@@ -9,6 +9,11 @@ function load(path) {
   return exports
 }
 const { frameCount, buildMiniMaxReferenceStillWorkflow, buildMiniMaxWorkflow, extractOutputUrl, OFFICIAL_H3_SAMPLER, OFFICIAL_H3_SCHEDULER } = load('src/lib/workflow.ts')
+const { h3SamplingSteps } = load('src/lib/workflow.ts')
+assert.equal(h3SamplingSteps('8', 30), 8, 'Native step count must display the Turbo fallback')
+assert.equal(h3SamplingSteps('8', 10), 10, 'Controlled Turbo step count must remain visible')
+assert.equal(h3SamplingSteps('4', 30), 4, 'Turbo 4 always displays its actual four steps')
+assert.equal(h3SamplingSteps('off', 24), 24, 'Native summary preserves custom step count')
 const { buildBiRefNetWorkflow } = load('src/lib/birefnetWorkflow.ts')
 const { buildZImage } = load('src/lib/zimage.ts')
 const { buildLtx25Workflow, ltx25FrameCount, LTX25_FIRST_STAGE_SIGMAS, LTX25_REFINER_SIGMAS } = load('src/lib/ltx25Workflow.ts')
@@ -39,6 +44,12 @@ assert.equal(fitWholeCharacter({ path: 'character.png', name: 'Character', kind:
 assert.equal(fitWholeCharacter({ path: 'character.png', name: 'Character', kind: 'image', crop: { x: .5, y: .5, zoom: 1, fit: 'crop' } }).crop.fit, 'crop')
 assert.ok(promptPresets.length >= 190)
 assert.ok(searchPromptPresets('dolly zoom').some((item) => item.id === 'camera.vertigo'))
+assert.equal(searchPromptPresets('dolly zoom')[0].id, 'camera.vertigo', 'Exact command titles outrank broad keyword matches')
+assert.equal(searchPromptPresets('single unbroken take')[0].id, 'continuity.single-take')
+assert.equal(searchPromptPresets('eyeline')[0].id, 'angle.eyeline', 'Exact labels precede partial labels')
+assert.equal(searchPromptPresets('zzzzzzzzzzz').length, 0)
+assert.equal(new Set(promptPresets.map((item) => item.id)).size, promptPresets.length, 'Palette IDs must remain unique for favorites and history')
+assert.equal(promptPresets.filter((item) => item.category === 'continuity').length, 10)
 for (let seconds = 2; seconds <= 15; seconds += 0.5) {
   const frames = frameCount(seconds)
   assert.equal((frames - 5) % 17, 0)

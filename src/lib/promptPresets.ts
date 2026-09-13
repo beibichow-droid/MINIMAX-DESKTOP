@@ -3,6 +3,26 @@ import type { PromptPreset, PromptPresetCategory } from '../types'
 const preset = (category: PromptPresetCategory, id: string, label: string, description: string, insertion: string, keywords = ''): PromptPreset => ({ id: `${category}.${id}`, category, label, description, insertion, keywords: `${label} ${description} ${keywords}`.toLowerCase().split(/\s+/) })
 
 export const promptPresets: PromptPreset[] = [
+  preset('continuity', 'single-take', 'Single Unbroken Take', 'Keep the whole clip in one continuous shot.', 'Continuity: one uninterrupted take from beginning to end. No cuts, dissolves, time jumps, or changes of location.', 'h3 one shot no cuts continuous'),
+  preset('continuity', 'screen-direction', 'Preserve Screen Direction', 'Keep movement consistent across the shot.', 'Continuity: maintain the established left-to-right or right-to-left travel direction. Keep the camera on the same side of the action axis.', '180 degree axis geography'),
+  preset('continuity', 'identity', 'Identity Lock', 'Preserve each assigned person throughout movement.', 'Continuity: preserve each assigned character’s face, proportions, hair, and distinguishing features through turns and partial occlusion. Keep different people distinct.', 'reference face consistency'),
+  preset('continuity', 'wardrobe', 'Wardrobe Continuity', 'Keep the assigned outfit consistent.', 'Continuity: retain the assigned garments, colors, materials, layers, and accessories throughout the shot. Fabric may move naturally without changing the outfit.', 'costume clothing'),
+  preset('continuity', 'prop-contact', 'Prop Contact', 'Keep a held object attached to the correct hand.', 'Continuity: maintain the same prop shape, size, and grip. Fingers remain in plausible contact with its surface until a deliberate release.', 'hands object grip'),
+  preset('continuity', 'background', 'Stable Background', 'Keep architecture and fixed landmarks consistent.', 'Continuity: retain the layout, doors, windows, furniture, and fixed background landmarks. Reveal them through plausible camera parallax without morphing or duplication.', 'room geometry environment'),
+  preset('continuity', 'exposure', 'Stable Exposure', 'Avoid brightness and color shifts between frames.', 'Continuity: maintain a consistent exposure, white balance, and lighting direction. Allow only motivated changes caused by visible lights or subject movement.', 'flicker color temporal'),
+  preset('continuity', 'edit-handles', 'Clean Edit Handles', 'Leave a settled beginning and ending for editing.', 'Timing: briefly establish a stable opening pose, perform the requested action, and leave a short settled hold at the end for a clean edit.', 'trim editing start end'),
+  preset('continuity', 'last-frame', 'Reach the Last Frame', 'For First + last mode with both frames attached.', 'Continuity: move naturally from the supplied first frame toward the supplied last frame. Resolve the action into its closing composition without a dissolve or sudden pose change.', 'first last transition fl2v'),
+  preset('continuity', 'no-overlays', 'Clean Frame', 'Keep generated graphics out of the picture.', 'Presentation: no captions, subtitles, watermarks, interface graphics, or added text overlays.', 'clean output typography'),
+  preset('movement', 'listening', 'Listening Reaction', 'A quiet reaction while another person speaks.', 'Performance: listen attentively with a restrained eye movement and one subtle change of expression. Keep the mouth relaxed and avoid speaking or exaggerated nodding.', 'dialogue reaction silent'),
+  preset('movement', 'eye-line', 'Hold an Eyeline', 'Keep attention on the established target.', 'Performance: maintain a consistent eyeline toward the established person or object. Use natural blinks without wandering gaze or looking into the lens unless requested.', 'gaze eye contact'),
+  preset('movement', 'weight-transfer', 'Grounded Weight Transfer', 'Make a change of stance physically readable.', 'Action: shift weight gradually through the hips and supporting foot before stepping. Keep planted feet grounded and the body balanced.', 'feet walking sliding'),
+  preset('movement', 'reach-grasp', 'Reach and Grasp', 'One clear hand-to-object interaction.', 'Action: reach toward the target object, open the hand before contact, close the fingers around its surface, then lift smoothly while maintaining the grip.', 'hand prop contact'),
+  preset('audio', 'foley', 'Synchronized Foley', 'Match physical sounds to visible contact.', 'Sound: place footsteps, cloth movement, and object contact precisely at the visible actions. Keep each sound grounded in the room perspective.', 'sync footsteps contact'),
+  preset('audio', 'dialogue-space', 'Dialogue First Mix', 'Use when dialogue is enabled for the shot.', 'Sound: keep the requested speech clear and at a natural level. Place ambience underneath it, with no competing foreground voices or added score.', 'voice intelligibility mix'),
+  preset('audio', 'offscreen', 'Offscreen Sound Cue', 'Suggest nearby activity without adding visible subjects.', 'Sound: a subtle offscreen cue comes from a consistent direction within the established environment. Do not introduce a new visible person or object to explain it.', 'spatial sound environment'),
+  preset('audio', 'room-perspective', 'Consistent Room Acoustics', 'Keep distance and reverberation coherent.', 'Sound: match reverberation and high-frequency detail to the visible room and source distance. Preserve the same acoustic space throughout the shot.', 'reverb ambience interior'),
+  preset('shot', 'safe-framing', 'Delivery Safe Framing', 'Leave room for later crops and reframing.', 'Framing: keep the main face, hands, and essential action away from the frame edges, with intentional headroom and enough space for modest delivery crops.', 'vertical social safe margins'),
+  preset('shot', 'two-person-blocking', 'Two-Person Blocking', 'Keep both people and their relationship readable.', 'Blocking: give each person a distinct position and consistent eyeline. Preserve clear silhouettes and avoid crossing or merging bodies during the exchange.', 'two shot dialogue staging'),
   preset('camera', 'static', 'Static', 'Locked composition with no camera motion.', 'Camera: locked-off static camera on a stable tripod, maintaining identical framing throughout.'),
   preset('camera', 'slow-push-in', 'Slow Push In', 'Gentle approach toward the subject.', 'Camera: a slow, smooth cinematic push-in toward the subject, maintaining stable framing and natural perspective.', 'dolly approach dramatic'),
   preset('camera', 'slow-pull-back', 'Slow Pull Back', 'Gradually reveal more of the scene.', 'Camera: a slow, smooth pull-back that gradually reveals the surrounding environment while preserving a stable axis.'),
@@ -98,12 +118,31 @@ export const promptPresets: PromptPreset[] = [
 
 export const promptPresetCategories: Array<{ id: PromptPresetCategory; label: string }> = [
   { id: 'camera', label: 'Camera' }, { id: 'shot', label: 'Shot' }, { id: 'angle', label: 'Angle' }, { id: 'lens', label: 'Lens' },
-  { id: 'lighting', label: 'Lighting' }, { id: 'audio', label: 'Audio' }, { id: 'style', label: 'Style' }, { id: 'movement', label: 'Movement' }, { id: 'transition', label: 'Transition' }, { id: 'character', label: 'Character' }, { id: 'wardrobe', label: 'Wardrobe' }, { id: 'location', label: 'Location' },
+  { id: 'lighting', label: 'Lighting' }, { id: 'audio', label: 'Audio' }, { id: 'style', label: 'Style' }, { id: 'movement', label: 'Movement' }, { id: 'transition', label: 'Transition' }, { id: 'continuity', label: 'Continuity' }, { id: 'character', label: 'Character' }, { id: 'wardrobe', label: 'Wardrobe' }, { id: 'location', label: 'Location' },
 ]
 
+export function promptCommandScore(item: { category: string; label: string; description: string; keywords?: string[]; meta?: string }, query: string) {
+  const normalized = query.toLowerCase().trim()
+  if (!normalized) return 0
+  const label = item.label.toLowerCase()
+  const searchable = `${item.category} ${label} ${item.description} ${(item.keywords ?? []).join(' ')} ${item.meta ?? ''}`.toLowerCase()
+  const tokens = searchable.split(/[^\p{L}\p{N}]+/u)
+  const fuzzy = (word: string) => word.length >= 3 && tokens.some((token) => {
+    if (token[0] !== word[0]) return false
+    let index = 0
+    for (const character of token) if (character === word[index]) index += 1
+    return index === word.length
+  })
+  const words = normalized.split(/\s+/)
+  if (!words.every((word) => searchable.includes(word) || fuzzy(word))) return Infinity
+  if (label === normalized) return 0
+  if (label.startsWith(normalized)) return 1
+  if (label.includes(normalized)) return 2
+  if (words.every((word) => searchable.includes(word))) return 3
+  return 4
+}
+
 export function searchPromptPresets(query: string) {
-  const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean)
-  if (!words.length) return promptPresets
-  const fuzzy = (value: string, word: string) => { let index = 0; for (const character of value) if (character === word[index]) index += 1; return index === word.length }
-  return promptPresets.filter((item) => { const searchable = `${item.category} ${item.label} ${item.keywords.join(' ')}`.toLowerCase(); return words.every((word) => searchable.includes(word) || fuzzy(searchable, word)) })
+  return promptPresets.filter((item) => Number.isFinite(promptCommandScore(item, query)))
+    .sort((a, b) => promptCommandScore(a, query) - promptCommandScore(b, query))
 }

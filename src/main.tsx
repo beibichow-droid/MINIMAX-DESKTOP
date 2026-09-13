@@ -1,11 +1,13 @@
-import { StrictMode } from 'react'
+import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
-import App from './App'
-import MobileApp from './MobileApp'
-import { MovieEditorWindow } from './MovieEditorWindow'
+const App = lazy(() => import('./App'))
+const MobileApp = lazy(() => import('./MobileApp'))
+const MovieEditorWindow = lazy(() => import('./MovieEditorWindow').then((module) => ({ default: module.MovieEditorWindow })))
 import { installBrowserMock } from './browserMock'
 import './styles.css'
 import './guided-studio.css'
+import './workspace-theme.css'
+import './movie-workspace.css'
 
 installBrowserMock()
 
@@ -16,6 +18,8 @@ document.documentElement.classList.toggle('movie-editor-route', movieEditor)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    {movieEditor ? <MovieEditorWindow /> : mobile ? <MobileApp /> : <App />}
+    <Suspense fallback={<main className="oyama-movie-loading" role="status">Opening workspace…</main>}>
+      {movieEditor ? <MovieEditorWindow /> : mobile ? <MobileApp /> : <App />}
+    </Suspense>
   </StrictMode>,
 )

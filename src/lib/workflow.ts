@@ -10,6 +10,13 @@ export type ComfyPrompt = Record<string, ComfyNode>
 export const OFFICIAL_H3_SAMPLER = 'res_multistep'
 export const OFFICIAL_H3_SCHEDULER = 'simple'
 
+export function h3SamplingSteps(turbo: GenerationOptions['turbo'], steps: number) {
+  if (turbo === '4') return 4
+  if (turbo === 'off') return steps
+  const requested = Math.round(Number(steps))
+  return requested >= 4 && requested <= 12 ? requested : 8
+}
+
 export function frameCount(seconds: number) {
   const base = Math.max(5, Math.round(seconds * 24))
   return base + ((5 - (base % 17) + 17) % 17)
@@ -152,8 +159,7 @@ export function buildMiniMaxWorkflow(
   // Turbo 8 is trained at eight steps, with controlled testing available up
   // to twelve steps for cases that benefit from extra coherence or detail.
   // Turbo 4 is a separate trained recipe and stays fixed at four.
-  const requestedTurbo8Steps = Math.round(Number(options.steps))
-  const scheduledSteps = options.turbo === 'off' ? options.steps : options.turbo === '8' ? requestedTurbo8Steps >= 4 && requestedTurbo8Steps <= 12 ? requestedTurbo8Steps : 8 : 4
+  const scheduledSteps = h3SamplingSteps(options.turbo, options.steps)
   prompt['14'] = {
     class_type: 'BasicScheduler',
     inputs: { model: modelLink, scheduler, steps: scheduledSteps, denoise: 1 },

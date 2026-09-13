@@ -1,6 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol, session } from 'electron'
 import { createReadStream, existsSync } from 'node:fs'
-import { cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { writeAtomicFile } from './atomicFile.js'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -280,7 +281,7 @@ async function migrateLegacyUserData(options: { force?: boolean; replaceBrowserS
   await cp(legacy, destination, { recursive: true, force: false, errorOnExist: false, filter: (path) => basename(path) !== 'LOCK' })
   const browserStorageMigrated = destinationWasFresh || options.replaceBrowserStorage === true
   if (browserStorageMigrated) await copyLegacyBrowserState(legacy, destination)
-  await writeFile(legacyMigrationMarkerPath(), JSON.stringify({ source: legacy, migratedAt: new Date().toISOString(), browserStorageMigrated }, null, 2), 'utf8')
+  await writeAtomicFile(legacyMigrationMarkerPath(), `${JSON.stringify({ source: legacy, migratedAt: new Date().toISOString(), browserStorageMigrated }, null, 2)}\n`)
 }
 
 async function legacyMigrationStatus() {
@@ -295,8 +296,7 @@ async function legacyMigrationStatus() {
 }
 
 async function saveLanToken(token: string) {
-  await mkdir(dirname(lanTokenPath()), { recursive: true })
-  await writeFile(lanTokenPath(), token, 'utf8')
+  await writeAtomicFile(lanTokenPath(), token)
 }
 
 async function loadLanToken() {
@@ -340,11 +340,17 @@ async function loadSettings(): Promise<AppSettings> {
 }
 
 async function saveSettings(settings: AppSettings) {
-  await mkdir(dirname(settingsPath()), { recursive: true })
-  const staged = `${settingsPath()}.tmp`
-  await writeFile(staged, JSON.stringify(settings, null, 2), 'utf8')
-  await rename(staged, settingsPath())
+  await writeAtomicFile(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`)
   return settings
+}
+
+function factoryResetMarkerPath() { return join(app.getPath('userData'), 'pending-factory-reset.json') }
+async function factoryResetSettings(confirmation: unknown) {
+  if (confirmation !== 'Reset') throw new Error('Type Reset exactly to confirm factory reset.')
+  await writeAtomicFile(factoryResetMarkerPath(), JSON.stringify({ requestedAt: Date.now() }))
+  // Apply before any window opens on the next launch so a second editor or
+  // autosave cannot restore the cleared projects from stale in-memory state.
+  setTimeout(() => { app.relaunch(); app.exit(0) }, 300)
 }
 
 async function scanDirectory(root: string, kind: ModelKind) {
@@ -754,6 +760,7 @@ async function resolveVideoSource(source: string) {
 }
 
 let movieEditorWindow: BrowserWindow | null = null
+let studioWindow: BrowserWindow | null = null
 
 function createMovieEditorWindow() {
   if (movieEditorWindow && !movieEditorWindow.isDestroyed()) { movieEditorWindow.focus(); return }
@@ -782,13 +789,15 @@ function createWindow() {
     minHeight: 620,
     backgroundColor: '#071524',
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#071524', symbolColor: '#d8ebff', height: 48 },
+    titleBarOverlay: { color: '#243c53', symbolColor: '#d8ebff', height: 48 },
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
+  studioWindow = window
+  window.on('closed', () => { if (studioWindow === window) studioWindow = null })
   window.setMenuBarVisibility(false)
   void loadSettings().then((settings) => window.webContents.setZoomFactor(settings.uiScale / 100))
   window.webContents.setWindowOpenHandler(({ url, frameName }) => {
@@ -807,7 +816,7 @@ function createWindow() {
         movable: true,
         backgroundColor: isPreviewMonitor ? '#07100b' : '#071524',
         titleBarStyle: 'hidden',
-        titleBarOverlay: { color: isPreviewMonitor ? '#07100b' : '#071524', symbolColor: '#d8ebff', height: 48 },
+        titleBarOverlay: { color: '#243c53', symbolColor: '#d8ebff', height: 48 },
         webPreferences: {
           preload: join(__dirname, 'preload.js'),
           contextIsolation: true,
@@ -823,6 +832,14 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (existsSync(factoryResetMarkerPath())) {
+    await session.defaultSession.clearStorageData()
+    await saveSettings(defaultSettings())
+    await saveLanToken(randomUUID().replace(/-/g, ''))
+    await writeAtomicFile(legacyMigrationMarkerPath(), JSON.stringify({ factoryReset: true, browserStorageMigrated: true }))
+    if (existsSync(pendingBrowserStorageMigrationPath())) await unlink(pendingBrowserStorageMigrationPath())
+    await unlink(factoryResetMarkerPath())
+  }
   const repairBrowserStorage = existsSync(pendingBrowserStorageMigrationPath())
   await migrateLegacyUserData({ force: repairBrowserStorage, replaceBrowserStorage: repairBrowserStorage })
   if (repairBrowserStorage) await unlink(pendingBrowserStorageMigrationPath()).catch(() => undefined)
@@ -861,7 +878,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('migration:legacy-status', () => legacyMigrationStatus())
   ipcMain.handle('migration:run', async (_event, replaceBrowserStorage = false) => {
     if (replaceBrowserStorage === true) {
-      await writeFile(pendingBrowserStorageMigrationPath(), JSON.stringify({ requestedAt: new Date().toISOString() }), 'utf8')
+      await writeAtomicFile(pendingBrowserStorageMigrationPath(), `${JSON.stringify({ requestedAt: new Date().toISOString() })}\n`)
       app.relaunch()
       app.exit(0)
       return { available: true, migrated: false, needsBrowserStorageRepair: false }
@@ -876,6 +893,7 @@ app.whenReady().then(async () => {
     target.setAlwaysOnTop(Boolean(enabled), 'floating')
     return target.isAlwaysOnTop()
   })
+  ipcMain.handle('window:open-studio', () => { if (!studioWindow || studioWindow.isDestroyed()) createWindow(); if (studioWindow?.isMinimized()) studioWindow.restore(); studioWindow?.show(); studioWindow?.focus() })
   ipcMain.handle('window:open-movie-editor', () => { createMovieEditorWindow() })
   ipcMain.handle('lan:status', () => lanStatus)
   ipcMain.handle('lan:sync-characters', (_event, characters: unknown[]) => { mobileCharacterLibrary = Array.isArray(characters) ? characters : []; return { synced: mobileCharacterLibrary.length } })
@@ -889,6 +907,7 @@ app.whenReady().then(async () => {
     return lanStatus
   })
   ipcMain.handle('settings:save', (_event, settings: AppSettings) => saveSettings(settings))
+  ipcMain.handle('settings:factory-reset', (_event, confirmation: unknown) => factoryResetSettings(confirmation))
   ipcMain.handle('workflow:export-json', async (_event, suggestedName: string, workflow: unknown) => {
     const safeName = basename(String(suggestedName || 'minimax-workflow.json')).replace(/[^a-z0-9._ -]/gi, '_')
     const result = await dialog.showSaveDialog({
@@ -898,7 +917,7 @@ app.whenReady().then(async () => {
     })
     if (result.canceled || !result.filePath) return null
     const filePath = result.filePath.toLowerCase().endsWith('.json') ? result.filePath : `${result.filePath}.json`
-    await writeFile(filePath, `${JSON.stringify(workflow, null, 2)}\n`, 'utf8')
+    await writeAtomicFile(filePath, `${JSON.stringify(workflow, null, 2)}\n`)
     return filePath
   })
   ipcMain.handle('window:set-ui-scale', (event, scale: number) => {

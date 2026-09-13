@@ -1,4 +1,4 @@
-export type View = 'create' | 'ltx25' | 'music' | 'zimage' | 'referenceprep' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'queue' | 'library' | 'clipmaster' | 'settings'
+export type View = 'create' | 'ltx25' | 'music' | 'zimage' | 'referenceprep' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'queue' | 'library' | 'clipmaster' | 'movie' | 'settings'
 export type GenerationMode = 'text' | 'image' | 'frames' | 'reference'
 export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
 export type MediaKind = 'image' | 'video' | 'audio'
@@ -7,7 +7,7 @@ export type Turbo8Profile = 'stable' | 'balanced' | 'motion' | 'euler-beta'
 export type AttentionBackendPreference = 'automatic' | 'kitchen' | 'sage' | 'native'
 export type AppliedLora = { name: string; strength: number }
 export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
-export type PromptPresetCategory = 'camera' | 'shot' | 'angle' | 'lens' | 'lighting' | 'audio' | 'style' | 'movement' | 'transition' | 'character' | 'wardrobe' | 'location'
+export type PromptPresetCategory = 'camera' | 'shot' | 'angle' | 'lens' | 'lighting' | 'audio' | 'style' | 'movement' | 'transition' | 'continuity' | 'character' | 'wardrobe' | 'location'
 export type PromptPreset = { id: string; category: PromptPresetCategory; label: string; keywords: string[]; description: string; insertion: string }
 export type MovieReferenceBinding = { file: MediaFile; purpose: ReferencePurpose; label: string; detailNotes?: string; characterId?: string; hairStyleId?: string; wardrobeId?: string; accessoryId?: string; locationId?: string; locationEnvironmentMode?: LocationProject['environmentMode']; locationContext?: LocationProject['locationContext']; locationAccuracyDetails?: string; source: 'character-studio' | 'hair-studio' | 'wardrobe-studio' | 'accessory-studio' | 'location-studio' | 'movie' | 'shot' | 'continuity' }
 export type ResolvedMovieShot = { preferredMode: GenerationMode; effectiveMode: GenerationMode; references: MovieReferenceBinding[]; compiledPrompt: string; routeReason: string; omittedReferences: MovieReferenceBinding[] }
@@ -433,6 +433,7 @@ export type DesktopApi = {
   migrateLegacyData(replaceBrowserStorage?: boolean): Promise<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean }>
   getGpuTelemetry(): Promise<GpuTelemetry>
   saveSettings(settings: AppSettings): Promise<AppSettings>
+  factoryResetSettings(confirmation: string): Promise<void>
   exportWorkflowJson(suggestedName: string, workflow: unknown): Promise<string | null>
   setUiScale(scale: number): Promise<number>
   chooseDirectory(initialPath?: string): Promise<string | null>
@@ -469,5 +470,6 @@ export type DesktopApi = {
   syncMobileCharacters(characters: unknown[]): Promise<{ synced: number }>
   rotateLanToken(): Promise<LanStatus>
   setWindowAlwaysOnTop(enabled: boolean): Promise<boolean>
+  openStudio(): Promise<void>
   openMovieEditor(): Promise<void>
 }

@@ -89,6 +89,12 @@ export function installBrowserMock() {
     migrateLegacyData: async () => ({ available: false, migrated: false, needsBrowserStorageRepair: false }),
     getGpuTelemetry: async () => ({ available: true, name: 'Preview GPU', usagePercent: 38, vramPercent: 62, vramUsedMb: 14880, vramTotalMb: 24000 }),
     saveSettings: async (next) => (current = next),
+    factoryResetSettings: async (confirmation) => {
+      if (confirmation !== 'Reset') throw new Error('Type Reset exactly to confirm factory reset.')
+      current = structuredClone(settings)
+      localStorage.clear()
+      location.reload()
+    },
     exportWorkflowJson: async (suggestedName) => `C:\\Users\\James\\Documents\\${suggestedName}`,
     setUiScale: async (scale) => Math.round(Math.max(.75, Math.min(1.5, scale)) * 100),
     chooseDirectory: async () => null,
@@ -186,6 +192,7 @@ export function installBrowserMock() {
     syncMobileCharacters: async (characters) => ({ synced: characters.length }),
     rotateLanToken: async () => ({ running: true, url: `${location.origin}/?mobile=1&token=browser-preview`, desktopUrl: `${location.origin}/?desktop=1&token=browser-preview`, port: Number(location.port) }),
     setWindowAlwaysOnTop: async (enabled) => enabled,
+    openStudio: async () => { if (window.opener && !window.opener.closed) window.opener.focus(); else window.open(location.pathname, 'oyama-studio') },
     openMovieEditor: async () => { window.open(`${location.pathname}?movieEditor=1`, 'oyama-ai-movie', 'popup=yes,width=1440,height=920,resizable=yes') },
   }
   window.minimax = api

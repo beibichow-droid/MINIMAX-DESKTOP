@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('minimax', {
   migrateLegacyData: (replaceBrowserStorage = false) => ipcRenderer.invoke('migration:run', replaceBrowserStorage),
   getGpuTelemetry: () => ipcRenderer.invoke('system:gpu-telemetry'),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),
+  factoryResetSettings: (confirmation: string) => ipcRenderer.invoke('settings:factory-reset', confirmation),
   exportWorkflowJson: (suggestedName: string, workflow: unknown) => ipcRenderer.invoke('workflow:export-json', suggestedName, workflow),
   setUiScale: (scale: number) => ipcRenderer.invoke('window:set-ui-scale', scale),
   chooseDirectory: (initialPath?: string) => ipcRenderer.invoke('dialog:directory', initialPath),
@@ -47,5 +48,6 @@ contextBridge.exposeInMainWorld('minimax', {
   syncMobileCharacters: (characters: unknown[]) => ipcRenderer.invoke('lan:sync-characters', characters),
   rotateLanToken: () => ipcRenderer.invoke('lan:rotate-token'),
   setWindowAlwaysOnTop: (enabled: boolean) => ipcRenderer.invoke('window:set-always-on-top', enabled),
+  openStudio: () => ipcRenderer.invoke('window:open-studio'),
   openMovieEditor: () => ipcRenderer.invoke('window:open-movie-editor'),
 })

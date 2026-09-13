@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { Aperture, AudioLines, Camera, ChevronRight, Clock3, Lightbulb, MapPin, Move, Plus, Scan, Search, Shirt, Sparkles, Star, Users } from 'lucide-react'
-import { promptPresetCategories, promptPresets } from '../lib/promptPresets'
+import { Aperture, AudioLines, Camera, ChevronRight, Clock3, Lightbulb, MapPin, Move, Plus, Scan, Search, Shirt, Sparkles, Star, Users, X } from 'lucide-react'
+import { promptCommandScore, promptPresetCategories, promptPresets } from '../lib/promptPresets'
 import type { PromptPreset, PromptPresetCategory } from '../types'
 
 export type SmartInsertOption = { id: string; category: 'character' | 'wardrobe' | 'location'; label: string; description: string; insertion: string; thumbnail?: string; meta?: string; onSelect?: (nextValue: string) => void }
@@ -21,14 +21,8 @@ function loadStoredIds(key: string, limit: number) {
   } catch { return [] }
 }
 
-function saveStoredIds(key: string, ids: string[]) { localStorage.setItem(key, JSON.stringify(ids)) }
-
-function matches(item: PaletteItem, query: string) {
-  const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean)
-  if (!words.length) return true
-  const searchable = `${item.category} ${item.label} ${item.description} ${'keywords' in item ? item.keywords.join(' ') : ''} ${item.meta ?? ''}`.toLowerCase()
-  const fuzzy = (word: string) => { let index = 0; for (const character of searchable) if (character === word[index]) index += 1; return index === word.length }
-  return words.every((word) => searchable.includes(word) || fuzzy(word))
+function saveStoredIds(key: string, ids: string[]) {
+  try { localStorage.setItem(key, JSON.stringify(ids)) } catch { /* Keep commands usable when storage is unavailable. */ }
 }
 
 export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: string; value: string; onChange(value: string): void; placeholder?: string; ariaLabel?: string; options?: SmartInsertOption[]; className?: string; disabled?: boolean; rows?: number }>(function SmartPromptEditor({ id, value, onChange, placeholder, ariaLabel, options = [], className = '', disabled = false, rows }, forwardedRef) {
@@ -56,9 +50,11 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
     .filter((item) => !category || item.category === category)
     .filter((item) => filter !== 'favorites' || favoriteSet.has(item.id))
     .filter((item) => filter !== 'recent' || recentIndex.has(item.id))
-    .filter((item) => matches(item, searchTerm))
+    .filter((item) => Number.isFinite(promptCommandScore(item, searchTerm)))
     .sort((left, right) => {
       if (sort === 'az') return left.label.localeCompare(right.label)
+      const relevance = promptCommandScore(left, searchTerm) - promptCommandScore(right, searchTerm)
+      if (relevance) return relevance
       const leftRecent = recentIndex.get(left.id) ?? Number.MAX_SAFE_INTEGER
       const rightRecent = recentIndex.get(right.id) ?? Number.MAX_SAFE_INTEGER
       if (!searchTerm && leftRecent !== rightRecent) return leftRecent - rightRecent
@@ -82,7 +78,8 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
     saveStoredIds(FAVORITES_KEY, next)
     return next
   })
-  const openPalette = () => { setCommandStart(null); setQuery(''); setFilter('all'); setSelectedCategory(undefined); setOpen(true); requestAnimationFrame(() => searchRef.current?.focus()) }
+  const closePalette = () => { setOpen(false); setCommandStart(null); inputRef.current?.focus() }
+  const openPalette = () => { if (disabled) return; setCommandStart(null); setQuery(''); setFilter('all'); setSelectedCategory(undefined); setActive(0); setOpen(true); requestAnimationFrame(() => searchRef.current?.focus()) }
 
   const insert = (text: string, option?: SmartInsertOption) => {
     const input = inputRef.current
@@ -102,8 +99,6 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
     input.setRangeText(inserted, start, end, 'end')
     if (option?.onSelect) option.onSelect(input.value)
     else onChange(input.value)
-    const item = results[active]
-    if (item) remember(item)
     setOpen(false); setCommandStart(null); setQuery('')
     requestAnimationFrame(() => input.focus())
   }
@@ -112,29 +107,29 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
 
   const updateCommand = (input: HTMLTextAreaElement) => {
     const before = input.value.slice(0, input.selectionStart)
-    const match = before.match(/(?:^|\s)\/\/([a-zA-Z0-9-]*(?:\s+[a-zA-Z0-9-]*)?)$/)
+    const match = before.match(/(?:^|\s)\/\/([^\n\r/]*)$/)
     if (!match) { if (commandStart !== null) { setOpen(false); setCommandStart(null) }; return }
     setCommandStart(input.selectionStart - match[1].length - 2)
     setQuery(match[1]); setFilter('all'); setSelectedCategory(undefined); setOpen(true)
   }
-  const selectResult = (index: number) => { const item = results[index]; if (item) insert(item.insertion, 'onSelect' in item ? item as SmartInsertOption : undefined) }
+  const selectResult = (index: number) => { const item = results[index]; if (item) { remember(item); insert(item.insertion, 'onSelect' in item ? item as SmartInsertOption : undefined) } }
   const handlePaletteKey = (event: React.KeyboardEvent) => {
     if (!open) return
-    if (event.key === 'ArrowDown') { event.preventDefault(); setActive((value) => Math.min(results.length - 1, value + 1)) }
+    if (event.key === 'ArrowDown') { event.preventDefault(); setActive((value) => Math.max(0, Math.min(results.length - 1, value + 1))) }
     else if (event.key === 'ArrowUp') { event.preventDefault(); setActive((value) => Math.max(0, value - 1)) }
     else if (event.key === 'PageDown') { event.preventDefault(); setActive((value) => Math.min(results.length - 1, value + 8)) }
     else if (event.key === 'PageUp') { event.preventDefault(); setActive((value) => Math.max(0, value - 8)) }
-    else if (event.key === 'Home') { event.preventDefault(); setActive(0) }
-    else if (event.key === 'End') { event.preventDefault(); setActive(Math.max(0, results.length - 1)) }
-    else if (event.key === 'Enter' || (event.key === 'Tab' && results.length > 0)) { event.preventDefault(); selectResult(active) }
-    else if (event.key === 'Escape') { event.preventDefault(); setOpen(false); setCommandStart(null); inputRef.current?.focus() }
+    else if (event.key === 'Home' && event.ctrlKey) { event.preventDefault(); setActive(0) }
+    else if (event.key === 'End' && event.ctrlKey) { event.preventDefault(); setActive(Math.max(0, results.length - 1)) }
+    else if (event.key === 'Enter') { event.preventDefault(); selectResult(active) }
+    else if (event.key === 'Escape') { event.preventDefault(); closePalette() }
   }
 
   return (
-    <div className={`smart-prompt-editor ${className}`} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) window.setTimeout(() => setOpen(false), 100) }}>
+    <div className={`smart-prompt-editor ${className}`} onKeyDown={(event) => { if (open && event.key === 'Escape') { event.stopPropagation(); closePalette() } }} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false) }}>
       <textarea ref={inputRef} id={id} aria-label={ariaLabel} value={value} placeholder={placeholder} disabled={disabled} rows={rows} onChange={(event) => { onChange(event.target.value); updateCommand(event.currentTarget) }} onClick={(event) => updateCommand(event.currentTarget)} onKeyDown={handlePaletteKey} />
-      {open && <div className="smart-insert-menu" role="dialog" aria-label="Production prompt command palette">
-        <header><Search size={15} /><input ref={searchRef} aria-label="Search production commands" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handlePaletteKey} placeholder="Search commands, e.g. dolly, rain, 85mm…" /><span>{results.length} matches</span><kbd>Esc</kbd></header>
+      {open && <section className="smart-insert-menu" aria-label="Production prompt command palette">
+        <header><Search size={15} /><input ref={searchRef} aria-label="Search production commands" aria-controls={`${id}-commands`} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handlePaletteKey} placeholder="Search camera, continuity, sound…" /><span role="status">{results.length} matches</span><button type="button" className="icon-button" aria-label="Close command palette" onClick={closePalette}><X size={16} /></button></header>
         <div className="smart-insert-toolbar">
           <div className="smart-insert-filters" aria-label="Command filters">
             <button type="button" className={filter === 'all' ? 'active' : ''} aria-pressed={filter === 'all'} onMouseDown={(event) => event.preventDefault()} onClick={() => setFilter('all')}>All</button>
@@ -143,16 +138,13 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
           </div>
           <label className="smart-insert-sort"><span>Sort</span><select value={sort} onChange={(event) => setSort(event.target.value as SortMode)}><option value="suggested">Suggested</option><option value="az">A–Z</option></select></label>
         </div>
-        <div className="smart-insert-categories" aria-label="Command categories">
-          <button type="button" className={!category ? 'active' : ''} onMouseDown={(event) => event.preventDefault()} onClick={() => { setSelectedCategory(undefined); setQuery('') }}>All categories <small>{allItems.length}</small></button>
-          {promptPresetCategories.map((item) => <button type="button" key={item.id} className={category === item.id ? 'active' : ''} onMouseDown={(event) => event.preventDefault()} onClick={() => { setSelectedCategory(item.id); setQuery('') }}>{item.label}<small>{categoryCounts.get(item.id) ?? 0}</small></button>)}
-        </div>
-        <div ref={resultsRef} className="smart-insert-results" role="listbox" aria-label="Matching commands">
+        <label className="smart-command-category"><span>Category</span><select value={category ?? ''} onChange={(event) => { setSelectedCategory(event.target.value as PromptPresetCategory || undefined); setQuery('') }}><option value="">All categories · {allItems.length}</option>{promptPresetCategories.map((item) => <option key={item.id} value={item.id}>{item.label} · {categoryCounts.get(item.id) ?? 0}</option>)}</select></label>
+        <div id={`${id}-commands`} ref={resultsRef} className="smart-insert-results" role="list" aria-label="Matching commands">
           {results.length ? results.map((item, index) => {
             const Icon = categoryIcons[item.category] ?? Sparkles
             const favorite = favoriteSet.has(item.id)
-            return <div role="option" data-preset-index={index} data-item-type={item.category} aria-selected={index === active} className={`smart-insert-result ${index === active ? 'active' : ''}`} key={item.id} onMouseEnter={() => setActive(index)}>
-              <button type="button" className="smart-insert-result-main" onMouseDown={(event) => event.preventDefault()} onClick={() => selectResult(index)}>
+            return <div role="listitem" data-preset-index={index} data-item-type={item.category} className={`smart-insert-result ${index === active ? 'active' : ''}`} key={item.id} onMouseEnter={() => setActive(index)}>
+              <button type="button" className="smart-insert-result-main" aria-current={index === active ? 'true' : undefined} onFocus={() => setActive(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => selectResult(index)}>
                 {'thumbnail' in item && item.thumbnail ? <img src={item.thumbnail} alt="" /> : <span><Icon size={15} /></span>}
                 <div><strong>{item.label}</strong><small>{item.description}</small></div>
                 <em>{item.meta ?? item.category}</em>
@@ -161,8 +153,9 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
             </div>
           }) : <div className="smart-insert-empty"><Search size={18} /><strong>No matching command</strong><span>Try a different word, choose a category, or return to All.</span></div>}
         </div>
-        <footer><span>{category ? `${promptPresetCategories.find((item) => item.id === category)?.label} commands` : 'Type a category first, e.g. // camera dolly'}</span><span>↑↓ move · Enter insert · ☆ save</span></footer>
-      </div>}
+        {results[active] && <div className="smart-command-preview"><strong>Will insert · {results[active].label}</strong><p>{results[active].insertion}</p></div>}
+        <footer><span>↑↓ browse · Enter insert · Esc close</span><span>Tab moves between controls</span></footer>
+      </section>}
       <div className="smart-prompt-footer"><button type="button" disabled={disabled} onClick={openPalette}><Plus size={13} />Insert command</button><span>Type <code>//</code> to search {allItems.length} production commands</span></div>
     </div>
   )
