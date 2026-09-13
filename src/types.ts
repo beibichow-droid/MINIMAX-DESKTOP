@@ -10,7 +10,7 @@ export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hai
 export type PromptPresetCategory = 'camera' | 'shot' | 'angle' | 'lens' | 'lighting' | 'audio' | 'style' | 'movement' | 'transition' | 'continuity' | 'character' | 'wardrobe' | 'location'
 export type PromptPreset = { id: string; category: PromptPresetCategory; label: string; keywords: string[]; description: string; insertion: string }
 export type MovieReferenceBinding = { file: MediaFile; purpose: ReferencePurpose; label: string; detailNotes?: string; characterId?: string; hairStyleId?: string; wardrobeId?: string; accessoryId?: string; locationId?: string; locationEnvironmentMode?: LocationProject['environmentMode']; locationContext?: LocationProject['locationContext']; locationAccuracyDetails?: string; source: 'character-studio' | 'hair-studio' | 'wardrobe-studio' | 'accessory-studio' | 'location-studio' | 'movie' | 'shot' | 'continuity' }
-export type ResolvedMovieShot = { preferredMode: GenerationMode; effectiveMode: GenerationMode; references: MovieReferenceBinding[]; compiledPrompt: string; routeReason: string; omittedReferences: MovieReferenceBinding[] }
+export type ResolvedMovieShot = { preferredMode: GenerationMode; effectiveMode: GenerationMode; references: MovieReferenceBinding[]; compiledPrompt: string; sceneState?: import('./lib/scenePromptState').ScenePromptState; conflicts?: import('./lib/scenePromptState').Conflict[]; routeReason: string; omittedReferences: MovieReferenceBinding[] }
 
 export type GenerationDefaults = {
   resolution: string
@@ -147,6 +147,7 @@ export type MovieLocation = { id: string; libraryLocationId?: string; libraryUpd
 export type MovieChatArea = 'setup' | 'bible' | 'shots' | 'preview'
 export type MovieChatMessage = { id: string; role: 'user' | 'assistant'; content: string; createdAt: number; appliedChanges?: string[]; areas?: MovieChatArea[] }
 export type MovieShot = {
+  sceneState?: import('./lib/scenePromptState').ScenePromptState
   id: string
   title: string
   duration: number
@@ -294,6 +295,9 @@ export type AceStepGenerationOptions = {
 }
 
 export type GenerationOptions = {
+  /** Explicit user override of scene validation; transport validation still runs. */
+  ignoreSceneConflicts?: boolean
+  sceneState?: import('./lib/scenePromptState').ScenePromptState
   mode: GenerationMode
   prompt: string
   width: number

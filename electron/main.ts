@@ -1044,8 +1044,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('outputs:resolve', async (_event, outputDirectory: string, file: { filename?: unknown; subfolder?: unknown; type?: unknown }) => {
     const settings = await loadSettings()
     if (normalize(outputDirectory).toLowerCase() !== normalize(settings.outputDirectory).toLowerCase()) return null
-    const path = resolveComfyOutput(outputDirectory, file)
-    return path ? `minimax-media://local?path=${encodeURIComponent(path)}` : null
+    // DesktopApi.resolveOutput promises a filesystem path. Callers persist this
+    // value for frame extraction and create a media URL separately. Returning a
+    // minimax-media URL here caused that URL to be treated as a path and made
+    // continuation fail after otherwise successful renders.
+    return resolveComfyOutput(outputDirectory, file)
   })
   ipcMain.handle('comfy:upload', async (_event, url: string, filePath: string, subfolder = 'minimax-desktop') => {
     const bytes = await readFile(filePath)

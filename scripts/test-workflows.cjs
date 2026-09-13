@@ -1,14 +1,6 @@
 const assert = require('node:assert/strict')
-const fs = require('node:fs')
-const vm = require('node:vm')
-const ts = require('typescript')
-function load(path) {
-  const exports = {}
-  const code = ts.transpileModule(fs.readFileSync(path, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
-  vm.runInNewContext(code, { exports, require, URLSearchParams })
-  return exports
-}
-const { frameCount, buildMiniMaxReferenceStillWorkflow, buildMiniMaxWorkflow, extractOutputUrl, OFFICIAL_H3_SAMPLER, OFFICIAL_H3_SCHEDULER } = load('src/lib/workflow.ts')
+const { load } = require('./test-ts-loader.cjs')
+const { frameCount, buildMiniMaxReferenceStillWorkflow, buildMiniMaxWorkflow, continuationSourceCandidates, extractOutputUrl, OFFICIAL_H3_SAMPLER, OFFICIAL_H3_SCHEDULER } = load('src/lib/workflow.ts')
 const { h3SamplingSteps } = load('src/lib/workflow.ts')
 assert.equal(h3SamplingSteps('8', 30), 8, 'Native step count must display the Turbo fallback')
 assert.equal(h3SamplingSteps('8', 10), 10, 'Controlled Turbo step count must remain visible')
@@ -284,6 +276,8 @@ const rtx = buildMiniMaxWorkflow({ mode: 'text', width: 608, height: 352, prompt
 }
 const url = extractOutputUrl({ job: { outputs: { 19: { images: [{ filename: 'original.mp4' }] }, 70: { images: [{ filename: 'upscaled.mp4' }] } } } }, 'job', 'http://localhost:8188')
 assert.ok(decodeURIComponent(url).includes('upscaled.mp4'))
+assert.deepEqual(JSON.parse(JSON.stringify(continuationSourceCandidates({ localOutputPath: 'C:/missing/old.mp4', outputUrl: 'minimax-media://comfy?url=http%3A%2F%2Flocalhost%3A8188%2Fview%3Ffilename%3Dvideo.mp4' }, 'C:/ComfyUI/output/video.mp4'))), ['C:/missing/old.mp4', 'C:/ComfyUI/output/video.mp4', 'minimax-media://comfy?url=http%3A%2F%2Flocalhost%3A8188%2Fview%3Ffilename%3Dvideo.mp4'])
+assert.deepEqual(JSON.parse(JSON.stringify(continuationSourceCandidates({ localOutputPath: 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4', outputUrl: 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4' }))), ['minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4', 'C:/ComfyUI/output/video.mp4'])
 console.log('PASS: official H3, LTX-2.5 and Z-Image workflows, model preference, duration/crop, previews, post-processing, and output selection')
 const zKitchenGraph = buildZImage('attention test', 768, 768, 1, 'z.safetensors', 'qwen.safetensors', 'ae.safetensors', 8, 1, 'turbo', '', 'comfy kitchen attention')
 assert.equal(zKitchenGraph['85'].class_type, 'ModelAttentionBackend')

@@ -1,4 +1,5 @@
 import type { GenerationOptions, ModelSelection, UploadedFile } from '../types'
+import { compileScene } from './h3SceneCompiler'
 
 type Link = [string, number]
 type ComfyNode = { class_type: string; inputs: Record<string, string | number | boolean | Link> }
@@ -51,6 +52,16 @@ export function buildMiniMaxWorkflow(
     audios: UploadedFile[]
   },
 ): ComfyPrompt {
+  const scene = options.sceneState
+  if (!Number.isFinite(options.duration) || options.duration <= 0 || options.duration > 15) throw new Error('Clip duration must be greater than 0 and no longer than 15 seconds.')
+  const compiled = scene ? compileScene(scene) : undefined
+  if (!options.ignoreSceneConflicts && compiled?.conflicts.some(item => item.severity === 'error')) throw new Error(compiled.conflicts.filter(item => item.severity === 'error').map(item => item.message).join('\n'))
+  if (scene) {
+    if (scene.mode !== options.mode || scene.duration !== options.duration) throw new Error('Scene mode and duration must match the render payload.')
+    const counts = { image: uploads.images.length, video: uploads.videos.length, audio: uploads.audios.length }
+    if (options.mode === 'reference' && Object.entries(counts).some(([kind, count]) => scene.references.filter(ref => ref.file.kind === kind).length !== count)) throw new Error('Reference upload order/count differs from the compiled scene.')
+    if (options.mode !== 'reference' && (Boolean(uploads.first) !== scene.references.some(ref => ref.anchor === 'opening') || Boolean(uploads.last) !== scene.references.some(ref => ref.anchor === 'ending'))) throw new Error('Frame uploads differ from the compiled scene anchors.')
+  }
   const prompt: ComfyPrompt = {
     '1': { class_type: 'UNETLoader', inputs: { unet_name: options.mode === 'reference' ? models.ref2va : models.fl2va, weight_dtype: 'default' } },
     '2': { class_type: 'CLIPLoader', inputs: { clip_name: models.textEncoder, type: 'minimax', device: 'default' } },
@@ -117,7 +128,7 @@ export function buildMiniMaxWorkflow(
   const conditioningInputs: Record<string, string | number | boolean | Link> = {
     clip: ['2', 0],
     vae: ['3', 0],
-    prompt: options.prompt,
+    prompt: compiled?.prompt ?? options.prompt,
     width: options.width,
     height: options.height,
     length: frameCount(options.duration),
@@ -134,7 +145,9 @@ export function buildMiniMaxWorkflow(
       const loaderId = `40${index}`
       const link = addLoader(prompt, loaderId, 'video', uploadedName(file))
       conditioningInputs[`ref_videos.ref_video_${index}`] = link
-      conditioningInputs[`ref_video_audios.ref_video_audio_${index}`] = [`${loaderId}1`, 1]
+      // Video audio is opt-in. An implicit soundtrack would shift every later
+      // Audio N assignment and can leak unrelated voices into the target.
+      if (scene?.references.filter(ref => ref.file.kind === 'video')[index]?.embeddedAudio) conditioningInputs[`ref_video_audios.ref_video_audio_${index}`] = [`${loaderId}1`, 1]
     })
     uploads.audios.forEach((file, index) => {
       const link = addLoader(prompt, `50${index}`, 'audio', uploadedName(file))
@@ -147,8 +160,17 @@ export function buildMiniMaxWorkflow(
     prompt['10'] = { class_type: 'MiniMaxH3ImageToVideo', inputs: conditioningInputs }
   }
 
+  let positive: Link = ['10', 0]
+  if (options.mode === 'reference' && scene) {
+    scene.references.filter(ref => ref.file.kind === 'image').forEach((ref, index) => {
+      if (!ref.anchor) return
+      const id = `60${index}`
+      prompt[id] = { class_type: 'MiniMaxH3AddGuide', inputs: { positive, latent: ['10', 1], vae: ['3', 0], image: [`30${index}`, 0], frame_idx: ref.anchor === 'ending' ? -1 : ref.anchor === 'keyframe' ? Math.round((ref.anchorTime || 0) * 24) : 0 } }
+      positive = [id, 0]
+    })
+  }
   prompt['11'] = { class_type: 'RandomNoise', inputs: { noise_seed: options.seed } }
-  prompt['12'] = { class_type: 'BasicGuider', inputs: { model: modelLink, conditioning: ['10', 0] } }
+  prompt['12'] = { class_type: 'BasicGuider', inputs: { model: modelLink, conditioning: positive } }
   // Turbo 8 profiles are intentional, tested recipes—not an accidental custom
   // override. Full-quality and Turbo 4 retain the upstream safe pair unless a
   // user explicitly opts into experimental sampling.
@@ -242,7 +264,9 @@ export function buildMiniMaxWorkflow(
 export function buildMiniMaxReferenceStillWorkflow(options: GenerationOptions, models: ModelSelection, uploads: { images: UploadedFile[]; videos: UploadedFile[]; audios: UploadedFile[] }): ComfyPrompt {
   // Ref2VA requires a video-shaped latent. Five frames is the node's minimum
   // valid 17k + 5 batch, so never spend a full video render on a still.
-  const prompt = buildMiniMaxWorkflow({ ...options, duration: 5 / 24 }, models, uploads)
+  // Still generation is an explicit separate artifact. Do not overwrite the
+  // authored video timeline with the five-frame implementation detail.
+  const prompt = buildMiniMaxWorkflow({ ...options, sceneState: undefined, duration: 5 / 24 }, models, uploads)
   delete prompt['17']; delete prompt['18']; delete prompt['19']; delete prompt['72']
   // Use the fifth decoded frame as the still. The short Ref2VA sequence gives
   // the generation room to settle, and the final frame is the requested handoff
@@ -305,4 +329,19 @@ export function outputFileFromUrl(value: string): ComfyOutputFile | undefined {
     if (!filename) return undefined
     return { filename, subfolder: target.searchParams.get('subfolder') || undefined, type: target.searchParams.get('type') || undefined }
   } catch { return undefined }
+}
+
+/** Ordered recovery sources for an existing completed video. Older persisted
+ * jobs may contain a media URL in localOutputPath; newer jobs contain a path.
+ * The remote ComfyUI URL remains a valid final fallback when the configured
+ * output folder is different from the server's output folder. */
+export function continuationSourceCandidates(job: { localOutputPath?: string; outputUrl?: string }, resolvedOutput?: string | null) {
+  const localFromUrl = (() => {
+    if (!job.outputUrl) return undefined
+    try {
+      const parsed = new URL(job.outputUrl)
+      return parsed.protocol === 'minimax-media:' && (parsed.hostname === 'local' || parsed.hostname === 'selected') ? parsed.searchParams.get('path') || undefined : undefined
+    } catch { return undefined }
+  })()
+  return [...new Set([job.localOutputPath, localFromUrl, resolvedOutput || undefined, job.outputUrl].filter((source): source is string => Boolean(source)))]
 }
