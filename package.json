@@ -1,6 +1,6 @@
 {
   "name": "oyama-ai-video-studio",
-  "version": "0.12.80",
+  "version": "0.12.86",
   "private": true,
   "description": "Local-first AI video studio powered by ComfyUI",
   "author": {
@@ -19,6 +19,7 @@
     "lint": "eslint . --max-warnings 0",
     "test": "pnpm test:scene && pnpm test:workflows && pnpm test:atomic-saves && pnpm test:movie-editor",
     "test:scene": "node scripts/test-scene-compiler.cjs",
+    "test:clip-master": "node scripts/test-clip-master.cjs",
     "test:movie-editor": "node scripts/test-movie-editor.cjs",
     "test:atomic-saves": "node scripts/test-atomic-saves.cjs",
     "package:all": "node scripts/release-all.cjs",

@@ -81,9 +81,9 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
   const closePalette = () => { setOpen(false); setCommandStart(null); inputRef.current?.focus() }
   const openPalette = () => { if (disabled) return; setCommandStart(null); setQuery(''); setFilter('all'); setSelectedCategory(undefined); setActive(0); setOpen(true); requestAnimationFrame(() => searchRef.current?.focus()) }
 
-  const insert = (text: string, option?: SmartInsertOption) => {
+  const insert = (text: string, option?: SmartInsertOption, notify = true) => {
     const input = inputRef.current
-    if (!input) return
+    if (!input) return ''
     let start = commandStart ?? input.selectionStart
     let end = commandStart === null ? input.selectionEnd : input.selectionStart
     const label = text.match(/^([A-Za-z ]+):/)?.[1]
@@ -97,10 +97,14 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
     const after = value.slice(end)
     const inserted = `${before && !/\s$/.test(before) ? ' ' : ''}${text}${after && !/^\s/.test(after) ? ' ' : ''}`
     input.setRangeText(inserted, start, end, 'end')
-    if (option?.onSelect) option.onSelect(input.value)
-    else onChange(input.value)
+    const nextValue = input.value
+    if (notify) {
+      if (option?.onSelect) option.onSelect(nextValue)
+      else onChange(nextValue)
+    }
     setOpen(false); setCommandStart(null); setQuery('')
     requestAnimationFrame(() => input.focus())
+    return nextValue
   }
 
   useImperativeHandle(forwardedRef, () => ({ open: openPalette, focus: () => inputRef.current?.focus(), insert }))
@@ -112,7 +116,16 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
     setCommandStart(input.selectionStart - match[1].length - 2)
     setQuery(match[1]); setFilter('all'); setSelectedCategory(undefined); setOpen(true)
   }
-  const selectResult = (index: number) => { const item = results[index]; if (item) { remember(item); if (onCommand) { const scene = commandStart === null ? value : value.slice(0, commandStart) + value.slice(inputRef.current?.selectionStart ?? value.length); onCommand(item, scene); if ('onSelect' in item) item.onSelect?.(scene); closePalette() } else insert(item.insertion, 'onSelect' in item ? item as SmartInsertOption : undefined) } }
+  const selectResult = (index: number) => {
+    const item = results[index]
+    if (!item) return
+    remember(item)
+    const option = 'onSelect' in item ? item as SmartInsertOption : undefined
+    const nextValue = insert(item.insertion, option, !onCommand)
+    if (!onCommand) return
+    option?.onSelect?.(nextValue)
+    onCommand(item, nextValue)
+  }
   const handlePaletteKey = (event: React.KeyboardEvent) => {
     if (!open) return
     if (event.key === 'ArrowDown') { event.preventDefault(); setActive((value) => Math.max(0, Math.min(results.length - 1, value + 1))) }
@@ -153,7 +166,7 @@ export const SmartPromptEditor = forwardRef<SmartPromptEditorHandle, { id: strin
             </div>
           }) : <div className="smart-insert-empty"><Search size={18} /><strong>No matching command</strong><span>Try a different word, choose a category, or return to All.</span></div>}
         </div>
-        {results[active] && <div className="smart-command-preview"><strong>{onCommand ? 'Update scene' : 'Will insert'} · {results[active].label}</strong><p>{results[active].insertion}</p></div>}
+        {results[active] && <div className="smart-command-preview"><strong>{onCommand ? 'Will insert and apply' : 'Will insert'} · {results[active].label}</strong><p>{results[active].insertion}</p></div>}
         <footer><span>↑↓ browse · Enter insert · Esc close</span><span>Tab moves between controls</span></footer>
       </section>}
       <div className="smart-prompt-footer"><button type="button" disabled={disabled} onClick={openPalette}><Plus size={13} />Insert command</button><span>Type <code>//</code> to search {allItems.length} production commands</span></div>

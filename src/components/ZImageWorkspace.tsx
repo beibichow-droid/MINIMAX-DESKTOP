@@ -1,10 +1,11 @@
+import { PreviewPanel, ProductionLoading } from './Workspace'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, Check, CircleStop, Dices, Film, Gauge, ImagePlus, LoaderCircle, Sparkles, WandSparkles } from 'lucide-react'
 import { buildZImage, type ZImageVariant } from '../lib/zimage'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { RenderSize } from './RenderSize'
 import { SmartPromptEditor } from './SmartPromptEditor'
-import type { MediaFile } from '../types'
+import type { MediaFile, WorkflowGpuRouting } from '../types'
 import { useLivePreview, type LiveProgress } from '../lib/useLivePreview'
 
 type StoredWorkspace = {
@@ -54,7 +55,7 @@ type HistoryEntry = {
 }
 
 export function ZImageWorkspace({
-  url, info, connected, ollamaAvailable, llmProvider, ollamaUrl, ollamaModel, outputDirectory, attentionBackend, onUse, onUseLtx,
+  url, info, connected, ollamaAvailable, llmProvider, ollamaUrl, ollamaModel, outputDirectory, attentionBackend, gpuRouting, onUse, onUseLtx,
 }: {
   url: string
   info: ObjectInfo
@@ -65,6 +66,7 @@ export function ZImageWorkspace({
   ollamaModel: string
   outputDirectory: string
   attentionBackend?: string
+  gpuRouting?: WorkflowGpuRouting
   onUse(file: MediaFile, resolution: string): void
   onUseLtx(file: MediaFile): void
 }) {
@@ -178,7 +180,8 @@ export function ZImageWorkspace({
     setBusy(true); setResult(null); setError(false); liveProgressRef.current = null; setLiveProgress(null); setMessage(`Submitting ${variant === 'turbo' ? 'Z-Image Turbo' : 'Original Z-Image'} workflow…`)
     try {
       const [width, height] = resolution.split('x').map(Number)
-      const response = await window.minimax.submitPrompt(url, buildZImage(prompt.trim(), width, height, seed, model, encoder, vae, steps, guidance, variant, variant === 'base' ? negativePrompt.trim() : '', attentionBackend), live.clientId)
+      const response = await window.minimax.submitPrompt(url, buildZImage(prompt.trim(), width, height, seed, model, encoder, vae, steps, guidance, variant, variant === 'base' ? negativePrompt.trim() : '', attentionBackend, gpuRouting), live.clientId)
+      if (gpuRouting) console.info('[GPU Routing] Z-Image component routing enabled.', gpuRouting)
       updateJob({ id: response.prompt_id, url })
     } catch (caught) {
       setMessage(caught instanceof Error ? caught.message : String(caught)); setError(true); setBusy(false)
@@ -244,11 +247,11 @@ export function ZImageWorkspace({
         <div className="zimage-generate-bar">{busy && <button className="danger-button" onClick={() => void cancel()}><CircleStop size={16} />Cancel</button>}<button className="primary-button" disabled={busy || !connected || !available || !prompt.trim()} onClick={() => void create()}>{busy ? <LoaderCircle size={18} className="spin" /> : <Sparkles size={18} />}{busy ? 'Creating image…' : 'Create image'}</button></div>
       </section>
 
-      <aside className="zimage-preview-panel">
+      <PreviewPanel>
         <div className="panel-heading"><div><span>OUTPUT</span><strong>Image preview</strong></div>{result && <span className="zimage-complete"><Check size={13} />Ready</span>}</div>
-        <div className="zimage-preview-stage">{result?.preview ? <img src={result.preview} alt="Generated Z-Image output" /> : visibleLivePreview ? <figure className="live-preview zimage-live-preview"><img src={visibleLivePreview.url} alt="Live Z-Image sampling preview" /><figcaption>Live sampling preview{visibleLivePreview.step && visibleLivePreview.totalSteps ? ` · step ${visibleLivePreview.step} of ${visibleLivePreview.totalSteps}` : ''}</figcaption></figure> : busy ? <div className="render-state"><LoaderCircle className="spin" /><strong>Creating your image</strong><span>{liveProgress?.label ?? `${resolution.replace('x', ' × ')} · waiting for live preview`}</span></div> : <div className="empty-preview"><div className="preview-icon"><ImagePlus size={28} /></div><strong>Your image will appear here</strong><span>Describe the still, select a canvas, and generate it locally.</span></div>}</div>
+        <div className="zimage-preview-stage">{result?.preview ? <img src={result.preview} alt="Generated Z-Image output" /> : visibleLivePreview ? <figure className="live-preview zimage-live-preview"><img src={visibleLivePreview.url} alt="Live Z-Image sampling preview" /><figcaption>Live sampling preview{visibleLivePreview.step && visibleLivePreview.totalSteps ? ` · step ${visibleLivePreview.step} of ${visibleLivePreview.totalSteps}` : ''}</figcaption></figure> : busy ? <div className="render-state"><ProductionLoading label={liveProgress?.label || 'Preparing image conditioning'}/><strong>Creating your image</strong><span>{liveProgress?.label ?? `${resolution.replace('x', ' × ')} · waiting for live preview`}</span></div> : <div className="empty-preview"><div className="preview-icon"><ImagePlus size={28} /></div><strong>Your image will appear here</strong><span>Describe the still, select a canvas, and generate it locally.</span></div>}</div>
         <div className="zimage-preview-actions"><span>{result ? `${result.name} · ${resolution.replace('x', ' × ')}` : 'Saved to ComfyUI · MiniMax_first_frames'}</span><div><button className="secondary-button" disabled={!result} onClick={() => result && onUse(result, resolution)}><ImagePlus size={16} />MiniMax I2V</button><button className="primary-button" disabled={!result} onClick={() => result && onUseLtx(result)} title="Loads an identity-preserving LTX image-to-video prompt"><Film size={16} />Send to LTX 2.5</button></div></div>
-      </aside>
+      </PreviewPanel>
     </div>
   </div>
 }

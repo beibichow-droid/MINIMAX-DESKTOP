@@ -23,3 +23,6 @@ createRoot(document.getElementById('root')!).render(
     </Suspense>
   </StrictMode>,
 )
+
+import './scene-composer.css'
+import './production-workspace.css'

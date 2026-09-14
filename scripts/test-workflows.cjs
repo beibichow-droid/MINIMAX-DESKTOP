@@ -11,6 +11,18 @@ const { buildZImage } = load('src/lib/zimage.ts')
 const { buildLtx25Workflow, ltx25FrameCount, LTX25_FIRST_STAGE_SIGMAS, LTX25_REFINER_SIGMAS } = load('src/lib/ltx25Workflow.ts')
 const { appendLtxVisionGrounding, buildLtxImageHandoffPrompt } = load('src/lib/ltxImageHandoff.ts')
 const { inferSelections, inferLtx25Selections } = load('src/lib/modelSelection.ts')
+const { resolveGpuRouting, routingGpus } = load('src/lib/gpuRouting.ts')
+assert.equal(routingGpus({ available: true, devices: [{ index: 0, name: 'NVIDIA GeForce RTX 3090', usagePercent: 0, vramPercent: 1, vramUsedMb: 20, vramTotalMb: 24576, vramFreeMb: 24556 }, { index: 1, name: 'NVIDIA GeForce RTX 5060 Ti', usagePercent: 0, vramPercent: 1, vramUsedMb: 20, vramTotalMb: 16384, vramFreeMb: 16364 }] }, [{ name: 'cuda:0 NVIDIA GeForce RTX 3090', type: 'cuda', vram_total: 1, vram_free: 1 }]).length, 2, 'NVIDIA telemetry must retain a secondary GPU when ComfyUI reports only cuda:0')
+assert.equal(routingGpus({ available: true, devices: [{ index: 1, name: 'NVIDIA GeForce RTX 5060 Ti', usagePercent: 0, vramPercent: 1, vramUsedMb: 20, vramTotalMb: 16384, vramFreeMb: 16364 }] }, [{ name: 'cuda:1 NVIDIA GeForce RTX 5060 Ti', type: 'cuda', vram_total: 1, vram_free: 1 }])[0].index, 1, 'A ComfyUI primary device reported as cuda:1 must retain its real CUDA index')
+const { parseSolRuntimeDiagnostics, solRuntimeLabel } = load('src/lib/solDiagnostics.ts')
+const solRuntime = parseSolRuntimeDiagnostics('backend=triton correctness gate PASS sparse=288 dense=112 density=0.353 step=8/8 seq=17,504 tau=1')
+assert.equal(solRuntime.state, 'sparse')
+assert.equal(solRuntime.correctnessGate, 'PASS')
+assert.equal(solRuntime.sparseCalls, 288)
+assert.equal(solRuntime.denseCalls, 112)
+assert.equal(solRuntime.sequenceLength, 17504)
+assert.match(solRuntimeLabel(solRuntime), /correctness gate passed/i)
+assert.equal(parseSolRuntimeDiagnostics('first_dense_steps=0.2 dense fallback').state, 'warmup')
 const { cropRect, fitWholeCharacter } = load('src/lib/imageCrop.ts')
 const ltxImageHandoffPrompt = buildLtxImageHandoffPrompt()
 assert.match(ltxImageHandoffPrompt, /authoritative first frame/i)
@@ -144,6 +156,35 @@ assert.equal(kitchenAttentionGraph['85'].inputs.attention, 'comfy kitchen attent
 assert.equal(kitchenAttentionGraph['12'].inputs.model[0], '85')
 assert.equal(kitchenAttentionGraph['14'].inputs.model[0], '85')
 
+const solAttentionGraph = buildMiniMaxWorkflow({ mode: 'text', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 30, turbo: 'off', sampler: 'res_multistep', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match', solAttention: { nodeType: 'SolAttnH3', tau: 1 } }, models, { images: [], videos: [], audios: [] })
+assert.equal(solAttentionGraph['84'].class_type, 'SolAttnH3')
+assert.equal(solAttentionGraph['84'].inputs.tau, 1)
+assert.equal(solAttentionGraph['84'].inputs.thresh_type, 'diag')
+assert.equal(solAttentionGraph['84'].inputs.first_dense_steps, 0.2)
+assert.equal(solAttentionGraph['84'].inputs.first_dense_layers, 2)
+assert.equal(solAttentionGraph['84'].inputs.sink_mode, 'prefix')
+assert.equal(solAttentionGraph['84'].inputs.correctness_gate, true)
+assert.equal(solAttentionGraph['84'].inputs.strict, false)
+assert.equal(solAttentionGraph['84'].inputs.kv_splits, 1)
+assert.equal(solAttentionGraph['12'].inputs.model[0], '84')
+assert.equal(solAttentionGraph['14'].inputs.model[0], '84')
+
+const isolatedSolGraph = buildMiniMaxWorkflow({ mode: 'text', width: 864, height: 480, prompt: 'test', duration: 5, seed: 1, steps: 8, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match', attentionBackend: 'comfy kitchen attention', solAttention: { nodeType: 'SolAttnH3', tau: 1 } }, models, { images: [], videos: [], audios: [] })
+assert.equal(isolatedSolGraph['84'].class_type, 'SolAttnH3')
+assert.equal(isolatedSolGraph['85'], undefined, 'Sol H3 graphs must never include ModelAttentionBackend')
+assert.equal(isolatedSolGraph['12'].inputs.model[0], '84')
+
+const solTurboCacheGraph = buildMiniMaxWorkflow({ mode: 'text', width: 864, height: 480, prompt: 'test', duration: 5, seed: 12345, steps: 30, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match', solCache: { nodeType: 'MiniMaxH3Cache', threshold: 0.1, maxSteps: 5 }, solAttention: { nodeType: 'SolAttnH3', tau: 1 } }, models, { images: [], videos: [], audios: [] })
+assert.equal(solTurboCacheGraph['5'].class_type, 'LoraLoaderModelOnly')
+assert.equal(solTurboCacheGraph['83'].class_type, 'MiniMaxH3Cache')
+assert.equal(solTurboCacheGraph['83'].inputs.model[0], '5', 'cache must patch the Turbo 8 LoRA-adapted model')
+assert.equal(solTurboCacheGraph['83'].inputs.resuse_threshold, 0.1)
+assert.equal(solTurboCacheGraph['83'].inputs.max_steps, 5)
+assert.equal(solTurboCacheGraph['84'].inputs.model[0], '83', 'Sol-Attn must run after the compatible cache')
+assert.equal(solTurboCacheGraph['85'], undefined)
+assert.equal(solTurboCacheGraph['14'].inputs.steps, 8)
+assert.equal(solTurboCacheGraph['14'].inputs.model[0], '84')
+
 const turboStable = buildMiniMaxWorkflow({ mode: 'text', width: 1344, height: 768, prompt: 'test', duration: 5, seed: 1, steps: 20, turbo: '8', sampler: 'euler', scheduler: 'simple', filenamePrefix: 'test', refImageSize: 'match' }, models, { images: [], videos: [], audios: [] })
 assert.equal(turboStable['13'].inputs.sampler_name, 'euler')
 assert.equal(turboStable['14'].inputs.scheduler, 'simple')
@@ -170,6 +211,17 @@ const officialModels = inferSelections([
 ], '8')
 assert.equal(officialModels.fl2va, 'minimax_h3_fl2va_pruned_int8_convrot.safetensors')
 assert.equal(officialModels.textEncoder, 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors')
+const nvfp4Models = inferSelections([
+  { kind: 'diffusion_models', name: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors' },
+  { kind: 'diffusion_models', name: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors' },
+  { kind: 'diffusion_models', name: 'minimax_h3_fl2va_pruned_nvfp4.safetensors' },
+  { kind: 'diffusion_models', name: 'minimax_h3_ref2va_pruned_nvfp4.safetensors' },
+], '8', 'fast', 'nvfp4')
+assert.equal(nvfp4Models.fl2va, 'minimax_h3_fl2va_pruned_nvfp4.safetensors')
+assert.equal(nvfp4Models.ref2va, 'minimax_h3_ref2va_pruned_nvfp4.safetensors')
+assert.equal(inferSelections([
+  { kind: 'diffusion_models', name: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors' },
+], 'off', 'fast', 'nvfp4').fl2va, 'minimax_h3_fl2va_pruned_int8_convrot.safetensors')
 assert.equal(inferSelections([
   { kind: 'text_encoders', name: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors' },
   { kind: 'text_encoders', name: 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors' },
@@ -278,6 +330,26 @@ const url = extractOutputUrl({ job: { outputs: { 19: { images: [{ filename: 'ori
 assert.ok(decodeURIComponent(url).includes('upscaled.mp4'))
 assert.deepEqual(JSON.parse(JSON.stringify(continuationSourceCandidates({ localOutputPath: 'C:/missing/old.mp4', outputUrl: 'minimax-media://comfy?url=http%3A%2F%2Flocalhost%3A8188%2Fview%3Ffilename%3Dvideo.mp4' }, 'C:/ComfyUI/output/video.mp4'))), ['C:/missing/old.mp4', 'C:/ComfyUI/output/video.mp4', 'minimax-media://comfy?url=http%3A%2F%2Flocalhost%3A8188%2Fview%3Ffilename%3Dvideo.mp4'])
 assert.deepEqual(JSON.parse(JSON.stringify(continuationSourceCandidates({ localOutputPath: 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4', outputUrl: 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4' }))), ['minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4', 'C:/ComfyUI/output/video.mp4'])
+const coreRoutingInfo = {
+  SelectModelDevice: { input: { required: { model: ['MODEL'], device: [['default', 'cpu', 'gpu:0', 'gpu:1']] } } },
+  SelectCLIPDevice: { input: { required: { clip: ['CLIP'], device: [['default', 'cpu', 'gpu:0', 'gpu:1']] } } },
+  SelectVAEDevice: { input: { required: { vae: ['VAE'], device: [['default', 'gpu:0', 'gpu:1']] } } },
+}
+const splitRouting = resolveGpuRouting({ preset: 'split', strategy: 'sequential', diffusion: 'auto', textEncoder: 'auto', videoVae: 'auto', audioVae: 'auto', previewVae: 'auto', allowOvercommit: false }, [{ index: 0, name: 'RTX 3090', totalBytes: 24e9, freeBytes: 22e9, usedBytes: 2e9 }, { index: 1, name: 'RTX 5060 Ti', totalBytes: 16e9, freeBytes: 15e9, usedBytes: 1e9 }], coreRoutingInfo, { diffusion: 20e9, textEncoder: 10e9, videoVae: 6e9, audioVae: 1e9 })
+const routedH3 = buildMiniMaxWorkflow({ mode: 'text', width: 608, height: 352, prompt: 'routing test', duration: 2, seed: 1, steps: 8, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', filenamePrefix: 'routing-test', refImageSize: 'match', gpuRouting: splitRouting.workflow }, models, { images: [], videos: [], audios: [] })
+assert.equal(routedH3['801'].class_type, 'SelectModelDevice')
+assert.equal(routedH3['801'].inputs.device, 'gpu:0')
+assert.equal(routedH3['803'].class_type, 'SelectVAEDevice')
+assert.equal(routedH3['803'].inputs.device, 'gpu:1')
+assert.deepEqual(JSON.parse(JSON.stringify(routedH3['16'].inputs.vae)), ['803', 0], 'Final Video VAE decode must retain the routed whole-VAE output')
+assert.deepEqual(JSON.parse(JSON.stringify(routedH3['17'].inputs.vae)), ['804', 0], 'Audio decode must retain its independent routed VAE output')
+const cpuVaeFallback = resolveGpuRouting({ preset: 'custom', strategy: 'cpu-fallback', diffusion: 'auto', textEncoder: 'auto', videoVae: 'cpu', audioVae: 'auto', previewVae: 'auto', allowOvercommit: false }, [{ index: 0, name: 'RTX 3090', totalBytes: 24e9, freeBytes: 20e9, usedBytes: 4e9 }], coreRoutingInfo)
+assert.equal(cpuVaeFallback.placements.videoVae.resolved, 'auto')
+assert.match(cpuVaeFallback.warnings.join(' '), /CPU placement is unsupported/i)
+const automaticSingleGpu = resolveGpuRouting({ preset: 'automatic', strategy: 'resident', diffusion: 'auto', textEncoder: 'auto', videoVae: 'auto', audioVae: 'auto', previewVae: 'auto', allowOvercommit: false }, [{ index: 0, name: 'RTX 3090', totalBytes: 24e9, freeBytes: 20e9, usedBytes: 4e9 }], coreRoutingInfo)
+assert.equal(Object.keys(automaticSingleGpu.workflow).length, 1, 'Automatic routing on one GPU must preserve the original Auto workflow')
+const visibleOrder = routingGpus({ available: true, devices: [{ index: 0, name: 'RTX 5060 Ti', usagePercent: 0, vramPercent: 0, vramUsedMb: 1000, vramTotalMb: 16000, vramFreeMb: 15000 }, { index: 1, name: 'RTX 3090', usagePercent: 0, vramPercent: 0, vramUsedMb: 2000, vramTotalMb: 24000, vramFreeMb: 22000 }] }, [{ type: 'cuda', name: 'cuda:0 NVIDIA GeForce RTX 3090', vram_total: 24e9, vram_free: 21e9 }, { type: 'cuda', name: 'cuda:1 NVIDIA GeForce RTX 5060 Ti', vram_total: 16e9, vram_free: 14e9 }])
+assert.deepEqual(JSON.parse(JSON.stringify(visibleOrder.map((gpu) => gpu.name))), ['RTX 3090', 'RTX 5060 Ti'], 'ComfyUI visible-device order must define cuda ordinals')
 console.log('PASS: official H3, LTX-2.5 and Z-Image workflows, model preference, duration/crop, previews, post-processing, and output selection')
 const zKitchenGraph = buildZImage('attention test', 768, 768, 1, 'z.safetensors', 'qwen.safetensors', 'ae.safetensors', 8, 1, 'turbo', '', 'comfy kitchen attention')
 assert.equal(zKitchenGraph['85'].class_type, 'ModelAttentionBackend')

@@ -1,7 +1,8 @@
+import { PreviewPanel } from './components/Workspace'
 import { importSceneDraft } from './lib/sceneLegacyAdapter'
 import { analyzeSceneReference } from './lib/referenceAnalysis'
-import { SceneComposer } from './components/SceneComposer'
-import { SceneContextPanels } from './components/SceneContextPanels'
+import { SceneComposer, type SceneInspectorSelection } from './components/SceneComposer'
+import { SceneContextPanels, SceneSelectionInspector } from './components/SceneContextPanels'
 import { buildCharacterDialogueRequest } from './lib/dialogPolicy'
 import { compileScene } from './lib/h3SceneCompiler'
 import { bindSceneReferences, createSceneState, resizeScene, value, type ScenePromptState } from './lib/scenePromptState'
@@ -22,6 +23,7 @@ import {
   CircleStop,
   Clock3,
   Dices,
+  Download,
   ExternalLink,
   Film,
   Folder,
@@ -37,7 +39,6 @@ import {
   ListVideo,
   LoaderCircle,
   MapPin,
-  Maximize2,
   Menu,
   MessageSquareText,
   Minus,
@@ -77,12 +78,15 @@ import { ACE_STEP_REQUIRED_NODES, buildAceStepWorkflow, inferAceStepSelections }
 import { fitWholeCharacter, prepareImage } from './lib/imageCrop'
 import { inferLtx25Selections, inferSelections } from './lib/modelSelection'
 import { choices, type ObjectInfo } from './lib/comfyInfo'
+import { estimatedComponentBytes, formatGiB, resolveGpuRouting, routingGpus, type RoutingComponent } from './lib/gpuRouting'
+import { parseSolRuntimeDiagnostics, solRuntimeLabel } from './lib/solDiagnostics'
+import { MINIMAX_VIDEO_RESOLUTIONS } from './lib/videoResolutions'
 import { useLivePreview, type LivePreview, type LiveProgress } from './lib/useLivePreview'
 import { RenderSize } from './components/RenderSize'
 import { ImageCrop } from './components/ImageCrop'
 import { ReferenceHandoffInspector } from './components/ReferenceHandoffInspector'
 import { ZImageWorkspace } from './components/ZImageWorkspace'
-import { ClipMasterBeta, ClipMasterLaunchpad } from './components/ClipMasterBeta'
+import { ClipMasterBeta } from './components/ClipMasterBeta'
 import { FrameBookmarkStudio, type BookmarkVideo } from './components/FrameBookmarkStudio'
 import { Ltx25Workspace } from './components/Ltx25Workspace'
 import { AceStepWorkspace } from './components/AceStepWorkspace'
@@ -325,6 +329,15 @@ function findH3ParallelAttentionNode(info: ObjectInfo) {
     ?? Object.keys(info).find((name) => /h3.*parallel.*attention/i.test(name))
 }
 
+function findSolAttentionNode(info: ObjectInfo) {
+  return Object.keys(info).find((name) => name === 'SolAttnH3')
+    ?? Object.keys(info).find((name) => /sol.*attn.*h3/i.test(name))
+}
+
+function findSolCompatibleCacheNode(info: ObjectInfo) {
+  return Object.keys(info).find((name) => name === 'MiniMaxH3Cache')
+}
+
 function findLtxSamplingPreviewOverrideNode(info: ObjectInfo) {
   return Object.keys(info).find((name) => name === 'LTX2SamplingPreviewOverride')
     ?? Object.keys(info).find((name) => /ltx2.*sampling.*preview.*override/i.test(name))
@@ -363,7 +376,11 @@ function comfyHistoryActivity(messages: unknown[] | undefined) {
     if (!text || typeof text !== 'string') return []
     const readable = text.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
     if (!readable) return []
-    return [{ level: /error|fail|interrupt/i.test(kind) ? 'error' as const : 'info' as const, message: `${node}${readable}`.slice(0, 260) }]
+    const tinyVaeMismatch = /taeh3.*(?:decoder|decode).*?(?:mismatch|shape|channel)|(?:mismatch|shape|channel).*taeh3/i.test(readable)
+    const notice = tinyVaeMismatch
+      ? 'H3 Tiny VAE preview is incompatible with this latent shape. Preview decoder disabled; final full Video VAE decode continues without retrying Tiny VAE.'
+      : `${node}${readable}`.slice(0, 260)
+    return [{ level: tinyVaeMismatch ? 'warning' as const : /error|fail|interrupt/i.test(kind) ? 'error' as const : 'info' as const, message: notice }]
   })
 }
 
@@ -422,6 +439,83 @@ const modeInfo: Array<{ id: GenerationMode; label: string; note: string; icon: t
 ]
 
 const diagnosticPrompt = 'A woman standing beside a window in soft daylight, natural skin texture, subtle head movement, realistic cinematic photography.'
+type H3BenchmarkBackend = 'kitchen' | 'sage' | 'sol'
+type H3BenchmarkConfig = { duration: number; resolution: string }
+type H3BenchmarkResult = {
+  backend: H3BenchmarkBackend
+  label: string
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'unavailable'
+  elapsedMs?: number
+  renderMs?: number
+  error?: string
+  completedAt?: number
+}
+const h3BenchmarkBackends: Array<{ backend: H3BenchmarkBackend; label: string }> = [
+  { backend: 'kitchen', label: 'Kitchen INT8' },
+  { backend: 'sage', label: 'SageAttention' },
+  { backend: 'sol', label: 'NVIDIA Sol-Attn' },
+]
+const H3_BENCHMARK_STORAGE_KEY = 'oyama.h3-attention-benchmark.v1'
+const H3_BENCHMARK_CONFIG_STORAGE_KEY = 'oyama.h3-attention-benchmark-config.v1'
+const defaultH3BenchmarkConfig: H3BenchmarkConfig = { duration: 3, resolution: '864x480' }
+
+function loadH3BenchmarkConfig(): H3BenchmarkConfig {
+  try {
+    const stored = JSON.parse(localStorage.getItem(H3_BENCHMARK_CONFIG_STORAGE_KEY) ?? '{}') as Partial<H3BenchmarkConfig>
+    const duration = Math.max(1, Math.min(60, Math.round(Number(stored.duration) || defaultH3BenchmarkConfig.duration)))
+    const resolution = typeof stored.resolution === 'string' && MINIMAX_VIDEO_RESOLUTIONS.includes(stored.resolution) ? stored.resolution : defaultH3BenchmarkConfig.resolution
+    return { duration, resolution }
+  } catch {
+    return defaultH3BenchmarkConfig
+  }
+}
+
+function loadH3BenchmarkResults(): H3BenchmarkResult[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(H3_BENCHMARK_STORAGE_KEY) ?? '[]') as H3BenchmarkResult[]
+    if (!Array.isArray(stored)) return []
+    return stored.filter((item) => item && typeof item.backend === 'string' && typeof item.label === 'string' && ['completed', 'failed', 'unavailable'].includes(item.status))
+  } catch {
+    return []
+  }
+}
+
+function formatBenchmarkDuration(ms?: number) {
+  if (ms === undefined || !Number.isFinite(ms)) return '—'
+  return ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} min` : `${(ms / 1000).toFixed(1)} s`
+}
+
+function benchmarkResultPatch(results: H3BenchmarkResult[], backend: H3BenchmarkBackend, patch: Partial<H3BenchmarkResult>) {
+  return results.map((item) => item.backend === backend ? { ...item, ...patch } : item)
+}
+
+async function waitForBenchmarkCompletion(comfyUrl: string, promptId: string, submittedAt: number) {
+  const timeoutMs = 30 * 60_000
+  let startedAt: number | undefined
+  while (Date.now() - submittedAt < timeoutMs) {
+    let history: Record<string, unknown>
+    try {
+      history = await window.minimax.getHistory(comfyUrl, promptId)
+    } catch {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 500))
+      continue
+    }
+    const queue = await window.minimax.getQueue(comfyUrl).catch(() => undefined)
+    if (!startedAt && queuePromptState(queue, promptId) === 'running') startedAt = Date.now()
+    const entry = history[promptId] as { status?: { status_str?: string; completed?: boolean } } | undefined
+    const terminalState = comfyTerminalState(entry)
+    if (terminalState === 'failed') throw new Error('ComfyUI reported an execution error.')
+    if (terminalState === 'completed') {
+      if (!extractOutputFile(history, promptId, 'video')) throw new Error('ComfyUI completed without reporting a video output.')
+      const finishedAt = Date.now()
+      return { elapsedMs: finishedAt - submittedAt, renderMs: finishedAt - (startedAt ?? submittedAt) }
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 500))
+  }
+  await window.minimax.cancelPrompt(comfyUrl, promptId).catch(() => undefined)
+  throw new Error('Benchmark timed out after 30 minutes.')
+}
+
 const validatedH3Files = [
   { label: 'FL2VA', kind: 'diffusion_models' as const, expected: 'minimax_h3_fl2va_pruned_int8_convrot.safetensors', fallback: /^minimax_h3_fl2va.*\.safetensors$/i },
   { label: 'Ref2VA', kind: 'diffusion_models' as const, expected: 'minimax_h3_ref2va_pruned_int8_convrot.safetensors', fallback: /^minimax_h3_ref2va.*\.safetensors$/i },
@@ -628,6 +722,8 @@ function App() {
   const [info, setInfo] = useState<ObjectInfo>({})
   const h3PreviewOverrideNode = findH3PreviewOverrideNode(info)
   const h3ParallelAttentionNode = findH3ParallelAttentionNode(info)
+  const solAttentionNode = findSolAttentionNode(info)
+  const solCacheNode = findSolCompatibleCacheNode(info)
   const h3AttentionBackends = choices(info, 'ModelAttentionBackend', 'attention')
   const resolvedH3AttentionBackend = resolveAttentionBackend(settings?.attentionBackend ?? 'automatic', h3AttentionBackends)
   const ltxSamplingPreviewOverrideNode = findLtxSamplingPreviewOverrideNode(info)
@@ -646,7 +742,7 @@ function App() {
   const [seed, setSeed] = useState(persisted.seed)
   const [ref2vaSeed, setRef2vaSeed] = useState(persisted.ref2vaSeed)
   const [seedLocked, setSeedLocked] = useState(persisted.seedLocked)
-  const [advanced, setAdvanced] = useState(persisted.advanced)
+  const [advanced, setAdvanced] = useState(true)
   const [renderAnyway, setRenderAnyway] = useState(false)
   const [firstFrame, setFirstFrame] = useState<MediaFile | null>(persisted.firstFrame)
   const [lastFrame, setLastFrame] = useState<MediaFile | null>(persisted.lastFrame)
@@ -667,6 +763,10 @@ function App() {
   const [ltxSubmitting, setLtxSubmitting] = useState(false)
   const [aceSubmitting, setAceSubmitting] = useState(false)
   const [diagnosticRunning, setDiagnosticRunning] = useState(false)
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false)
+  const [benchmarkConfig, setBenchmarkConfig] = useState<H3BenchmarkConfig>(loadH3BenchmarkConfig)
+  const [benchmarkResults, setBenchmarkResults] = useState<H3BenchmarkResult[]>(loadH3BenchmarkResults)
+  const benchmarkConfigInitialized = useRef(false)
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(() => new Set())
   const cancellationRequests = useRef(new Set<string>())
   const generateRef = useRef<((target?: 'video' | 'image', renderAnyway?: boolean) => Promise<void>) | null>(null)
@@ -677,6 +777,22 @@ function App() {
   const [legacyMigrationDismissed, setLegacyMigrationDismissed] = useState(() => localStorage.getItem(legacyMigrationDismissalKey) === 'true')
   const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([])
   const activeLlmProvider = useRef<AppSettings['llmProvider'] | null>(null)
+  const loadedSettingsSnapshot = useRef<string | null>(null)
+  const settingsSaveQueue = useRef<Promise<void>>(Promise.resolve())
+  const queueSettingsSave = useCallback((nextSettings: AppSettings) => {
+    const snapshot = JSON.stringify(nextSettings)
+    const queued = settingsSaveQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        await window.minimax.saveSettings(nextSettings)
+        loadedSettingsSnapshot.current = snapshot
+      })
+    settingsSaveQueue.current = queued.catch((error) => {
+      setNotice({ tone: 'error', text: `Settings changed for this session, but could not be saved: ${error instanceof Error ? error.message : String(error)}` })
+      throw error
+    })
+    return settingsSaveQueue.current
+  }, [])
   const [promptSuggestion, setPromptSuggestion] = useState('')
   const [promptSuggestionId, setPromptSuggestionId] = useState('')
   const [characterCopilotContext, setCharacterCopilotContext] = useState<CopilotWorkspaceContext>({ label: 'Character Studio' })
@@ -696,6 +812,7 @@ function App() {
   const [lanQr, setLanQr] = useState<{ mobile: string; desktop: string }>({ mobile: '', desktop: '' })
   const [videoClipDraft, setVideoClipDraft] = useState<{ source: MediaFile; replaceIndex?: number } | null>(null)
   const [clipMasterClip, setClipMasterClip] = useState<ClipItem | null>(null)
+  const [clipMasterFromMovie, setClipMasterFromMovie] = useState(false)
   const [createResetKey, setCreateResetKey] = useState(0)
   const [ltxResetKey, setLtxResetKey] = useState(0)
   const [zImageResetKey, setZImageResetKey] = useState(0)
@@ -743,7 +860,7 @@ function App() {
   // are hidden so queue, node, and sampler-step progress remain real-time.
   const live = useLivePreview(settings?.comfyUrl, true, onLiveProgress)
 
-  const selection = useMemo(() => inferSelections(models, turbo, textEncoderPreference), [models, turbo, textEncoderPreference])
+  const selection = useMemo(() => inferSelections(models, turbo, textEncoderPreference, settings?.h3DiffusionPrecision ?? 'int8'), [models, turbo, textEncoderPreference, settings?.h3DiffusionPrecision])
   const userLoraChoices = useMemo(() => models.filter((model) => model.kind === 'loras' && !/^minimax_h3_(?:fl2v|ref2v)_turbo_/i.test(model.name)).map((model) => model.name).sort((a, b) => a.localeCompare(b)), [models])
   const h3Report = useMemo(() => h3StackReport(models), [models])
   const ltxSelection = useMemo(() => inferLtx25Selections(models, choices(info, 'LatentUpscaleModelLoader', 'model_name')), [models, info])
@@ -752,6 +869,16 @@ function App() {
   const activeLora = mode === 'reference' ? selection.ref2vLora : selection.fl2vLora
   const requiredModels = [activeModel, selection.textEncoder, selection.videoVae, selection.audioVae]
   const modelReady = requiredModels.every(Boolean) && (turbo === 'off' || Boolean(activeLora))
+  const detectedRoutingGpus = useMemo(() => routingGpus(gpu, status.stats?.devices), [gpu, status.stats?.devices])
+  const routingPlanFor = useCallback((names: Partial<Record<RoutingComponent, string>>, previewNode?: string) => {
+    if (!settings) return null
+    const sizes = Object.fromEntries(Object.entries(names).map(([component, name]) => {
+      const file = models.find((model) => model.name === name)
+      return [component, estimatedComponentBytes(file?.bytes, component as RoutingComponent)]
+    }))
+    return resolveGpuRouting(settings.gpuRouting, detectedRoutingGpus, info, sizes, previewNode)
+  }, [detectedRoutingGpus, info, models, settings])
+  const h3GpuRouting = useMemo(() => routingPlanFor({ diffusion: activeModel, textEncoder: selection.textEncoder, videoVae: selection.videoVae, audioVae: selection.audioVae, previewVae: selection.previewVae }, h3PreviewOverrideNode), [activeModel, h3PreviewOverrideNode, routingPlanFor, selection.audioVae, selection.previewVae, selection.textEncoder, selection.videoVae])
   const pendingJobs = jobs.filter((job) => job.status === 'queued' || job.status === 'running')
   const activeRenderJob = activeJobId ? jobs.find((job) => job.id === activeJobId) : undefined
   useEffect(() => {
@@ -821,10 +948,21 @@ function App() {
   useEffect(() => {
     void window.minimax.getSettings().then((loaded) => {
       activeLlmProvider.current = loaded.llmProvider
+      loadedSettingsSnapshot.current = JSON.stringify(loaded)
       setSettings(loaded)
       void Promise.all([scanModels(loaded), checkConnection(loaded.comfyUrl), refreshOllama(loaded)])
     })
   }, [checkConnection, refreshOllama, scanModels])
+
+  useEffect(() => {
+    if (!settings || loadedSettingsSnapshot.current === null) return
+    const snapshot = JSON.stringify(settings)
+    if (snapshot === loadedSettingsSnapshot.current) return
+    const timer = window.setTimeout(() => {
+      void queueSettingsSave(settings).catch(() => undefined)
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [queueSettingsSave, settings])
 
   useEffect(() => {
     void window.minimax.getLegacyMigrationStatus().then(setLegacyMigration).catch(() => setLegacyMigration({ available: false, migrated: false, needsBrowserStorageRepair: false }))
@@ -925,6 +1063,19 @@ function App() {
     }
     localStorage.setItem('minimax.workspace', JSON.stringify(workspace))
   }, [sceneState, activeJobId, advanced, clothingPolicy, duration, experimentalSampling, firstFrame, lastFrame, liveEnabled, livePreviewMode, loraStrength, mode, naturalMovement, noDialogue, prompt, refImageSize, referenceAudios, referenceImages, referenceVideos, ref2vaSeed, resolution, rtxModel, sampler, scheduler, seed, seedLocked, selectedReferenceCharacterIds, selectedReferenceLocationIds, shiftAudio, shiftVideo, sigmaShiftMode, steps, textEncoderPreference, turbo, turbo8Profile, upscaleMode, userLoras])
+
+  useEffect(() => {
+    const completed = benchmarkResults.filter((item) => ['completed', 'failed', 'unavailable'].includes(item.status))
+    if (completed.length) localStorage.setItem(H3_BENCHMARK_STORAGE_KEY, JSON.stringify(completed))
+  }, [benchmarkResults])
+
+  useEffect(() => {
+    if (benchmarkConfigInitialized.current) {
+      setBenchmarkResults([])
+      localStorage.removeItem(H3_BENCHMARK_STORAGE_KEY)
+    } else benchmarkConfigInitialized.current = true
+    localStorage.setItem(H3_BENCHMARK_CONFIG_STORAGE_KEY, JSON.stringify(benchmarkConfig))
+  }, [benchmarkConfig])
 
   useEffect(() => {
     if (!settings || mediaHydrated.current) return
@@ -1262,7 +1413,7 @@ function App() {
 
   const saveAppSettings = async () => {
     if (!settings) return
-    await window.minimax.saveSettings(settings)
+    await queueSettingsSave(settings)
     await scanModels(settings)
     await checkConnection(settings.comfyUrl)
     await refreshOllama(settings)
@@ -1612,6 +1763,12 @@ function App() {
       setNotice({ tone: 'error', text: message })
       return message
     }
+    const ltxGpuRouting = routingPlanFor({ diffusion: ltxSelection.diffusion, textEncoder: ltxSelection.textEncoder, videoVae: ltxSelection.videoVae, audioVae: ltxSelection.audioVae })
+    if (ltxGpuRouting?.vramWarnings.length && !settings.gpuRouting.allowOvercommit) {
+      const message = `${ltxGpuRouting.vramWarnings.join(' ')} Review GPU Routing or explicitly allow the VRAM warning.`
+      setNotice({ tone: 'error', text: message })
+      return message
+    }
     const missingNodes = LTX_NATIVE_REQUIRED_NODES.filter((node) => !info[node])
     if (missingNodes.length) {
       const message = `Update ComfyUI before using LTX‑2.5. Missing core nodes: ${missingNodes.join(', ')}.`
@@ -1635,7 +1792,8 @@ function App() {
       const uploaded = input ? await window.minimax.uploadImageData(settings.comfyUrl, await prepareImage(input, options.width, options.height)) : undefined
       const uploadedMsrReferences = options.msr ? await Promise.all(options.msr.references.slice(0, 5).map((path) => window.minimax.uploadInput(settings.comfyUrl, path))) : []
       if (cancellationRequests.current.has(localId)) throw new Error('Generation cancelled before submission.')
-      const graph = buildLtx25Workflow({ ...options, attentionBackend: ltxAttentionBackend }, ltxSelection, uploaded, uploadedMsrReferences)
+      const graph = buildLtx25Workflow({ ...options, attentionBackend: ltxAttentionBackend, gpuRouting: ltxGpuRouting?.workflow }, ltxSelection, uploaded, uploadedMsrReferences)
+      if (ltxGpuRouting) console.info(`[GPU Routing] LTX 2.5 | ${ltxGpuRouting.logLine} | Strategy: ${ltxGpuRouting.workflow.strategy}`)
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
@@ -1670,6 +1828,11 @@ function App() {
       setNotice({ tone: 'error', text: `The ACE-Step ${options.model.toUpperCase()} model, audio VAE, and both Qwen ACE text encoders are required.` })
       return
     }
+    const aceGpuRouting = routingPlanFor({ diffusion: selectedModel, textEncoder: aceSelection.textEncoderLarge, audioVae: aceSelection.vae })
+    if (aceGpuRouting?.vramWarnings.length && !settings.gpuRouting.allowOvercommit) {
+      setNotice({ tone: 'error', text: `${aceGpuRouting.vramWarnings.join(' ')} Review GPU Routing or explicitly allow the VRAM warning.` })
+      return
+    }
     const missingNodes = ACE_STEP_REQUIRED_NODES.filter((node) => !info[node])
     if (missingNodes.length) {
       setNotice({ tone: 'error', text: `Update ComfyUI before using ACE-Step 1.5. Missing core nodes: ${missingNodes.join(', ')}.` })
@@ -1680,13 +1843,14 @@ function App() {
       id: localId, provider: 'acestep', mediaType: 'audio', mode: 'text', prompt: options.tags,
       createdAt: Date.now(), status: 'queued', progress: 2, progressLabel: 'Preparing ACE-Step workflow',
       width: 0, height: 0, duration: options.duration,
-      execution: { diffusionModel: options.model === 'sft' ? aceSelection.sft : aceSelection.base, attentionBackend: attentionBackendLabel(resolvedH3AttentionBackend), sampler: 'Euler + simple' },
+      execution: { diffusionModel: options.model === 'sft' ? aceSelection.sft : aceSelection.base, attentionBackend: attentionBackendLabel(resolvedH3AttentionBackend), sampler: 'Euler + simple', gpuRouting: aceGpuRouting?.summary },
     }
     setJobs((current) => [job, ...current])
     setAceSubmitting(true)
     setNotice({ tone: 'neutral', text: `Preparing the official ACE-Step XL ${options.model.toUpperCase()} ComfyUI graph…` })
     try {
-      const graph = buildAceStepWorkflow({ ...options, attentionBackend: resolvedH3AttentionBackend }, aceSelection)
+      const graph = buildAceStepWorkflow({ ...options, attentionBackend: resolvedH3AttentionBackend, gpuRouting: aceGpuRouting?.workflow }, aceSelection)
+      if (aceGpuRouting) console.info(`[GPU Routing] ACE-Step | ${aceGpuRouting.logLine} | Strategy: ${aceGpuRouting.workflow.strategy}`)
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
@@ -1735,6 +1899,10 @@ function App() {
     }
     if (!modelReady) {
       setNotice({ tone: 'error', text: 'One or more required MiniMax H3 model components are missing.' })
+      return
+    }
+    if (h3GpuRouting?.vramWarnings.length && !settings.gpuRouting.allowOvercommit) {
+      setNotice({ tone: 'error', text: `${h3GpuRouting.vramWarnings.join(' ')} Review GPU Routing in Settings, choose Sequential Offload or CPU Fallback, or explicitly allow the VRAM warning.` })
       return
     }
     if (target === 'video' && liveEnabled && livePreviewMode === 'h3-override' && !h3PreviewOverrideNode) {
@@ -1836,13 +2004,14 @@ function App() {
         diffusionModel: mode === 'reference' ? selection.ref2va : selection.fl2va,
         diffusionPrecision: modelPrecisionLabel(mode === 'reference' ? selection.ref2va : selection.fl2va),
         textEncoder: selection.textEncoder,
-        attentionBackend: settings.h3ParallelAttentionEnabled && h3ParallelAttentionNode && /kitchen|int8/i.test(resolvedH3AttentionBackend ?? '') ? 'H3 multi-GPU parallel · Kitchen INT8' : attentionBackendLabel(resolvedH3AttentionBackend),
+        attentionBackend: settings.attentionBackend === 'sol' && solAttentionNode ? `NVIDIA Sol-Attn${settings.solCacheEnabled && solCacheNode ? ' + H3 cache' : ''} · tau ${settings.solAttnTau}` : settings.h3ParallelAttentionEnabled && h3ParallelAttentionNode && /kitchen|int8/i.test(resolvedH3AttentionBackend ?? '') ? 'H3 multi-GPU parallel · Kitchen INT8' : attentionBackendLabel(resolvedH3AttentionBackend),
         sampler: selectedSampling.sampler,
         scheduler: selectedSampling.scheduler,
         preview: target === 'video' && liveEnabled ? livePreviewMode === 'h3-override' ? `H3 animated · ${previewFrames} frames · ${H3_PREVIEW_FPS} fps` : 'Standard first frame' : 'Off',
         upscale: target === 'video' ? upscaleMode === 'h3' ? 'H3 learned latent · 1.5×' : upscaleMode === 'ltx' ? 'LTX latent · 2×' : upscaleMode === 'rtx' ? `RTX frames · 2× · ${rtxModel}` : 'Off' : undefined,
         referenceCount: mode === 'reference' ? renderReferenceImages.length + referenceVideos.length + referenceAudios.length : undefined,
         adapters: [turbo !== 'off' ? `Turbo ${turbo}` : '', ...userLoras.filter((lora) => lora.name).map((lora) => `${lora.name} · ${lora.strength}`)].filter(Boolean),
+        gpuRouting: h3GpuRouting?.summary,
       },
       characterProjectId: characterHandoff ?? undefined,
     }
@@ -1880,8 +2049,11 @@ function App() {
         refImageSize,
         sigmaShift: sigmaShiftMode === 'custom' ? { video: shiftVideo, audio: shiftAudio } : undefined,
         previewOverride: target === 'video' && liveEnabled && livePreviewMode === 'h3-override' && h3PreviewOverrideNode ? { frames: previewFrames, fps: H3_PREVIEW_FPS, nodeType: h3PreviewOverrideNode, vaeName: selection.previewVae, jpegQuality: 85 } : undefined,
-        attentionBackend: resolvedH3AttentionBackend,
+        attentionBackend: settings.attentionBackend === 'sol' ? undefined : resolvedH3AttentionBackend,
+        solAttention: target === 'video' && settings.attentionBackend === 'sol' && solAttentionNode ? { nodeType: solAttentionNode, tau: settings.solAttnTau } : undefined,
+        solCache: target === 'video' && settings.attentionBackend === 'sol' && settings.solCacheEnabled && solCacheNode ? { nodeType: solCacheNode, threshold: 0.1, maxSteps: 5 } : undefined,
         h3ParallelAttention: target === 'video' && mode === 'reference' && settings.h3ParallelAttentionEnabled && h3ParallelAttentionNode && /kitchen|int8/i.test(resolvedH3AttentionBackend ?? '') ? { nodeType: h3ParallelAttentionNode, devices: 'auto' as const } : undefined,
+        gpuRouting: h3GpuRouting?.workflow,
         filenamePrefix: target === 'image' ? `image/MiniMax_Ref2VA_Still_${Date.now()}` : `video/MiniMax_H3_${Date.now()}`,
         firstFrame: firstFrame?.path,
         lastFrame: lastFrame?.path,
@@ -1892,6 +2064,7 @@ function App() {
       const graph = target === 'image'
         ? buildMiniMaxReferenceStillWorkflow(generationOptions, selection, { images, videos, audios })
         : buildMiniMaxWorkflow(generationOptions, selection, { first, last, images, videos, audios })
+      if (h3GpuRouting) console.info(`[GPU Routing] ${h3GpuRouting.logLine} | Strategy: ${h3GpuRouting.workflow.strategy}`)
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
@@ -1958,11 +2131,70 @@ function App() {
 
   // The Movie Planner owns production sequencing. Once it has resolved a shot,
 
+  const runH3Benchmark = async () => {
+    if (!settings || benchmarkRunning) return
+    if (!status.connected) return setNotice({ tone: 'error', text: 'Connect ComfyUI before running the attention benchmark.' })
+    if (pendingJobs.length) return setNotice({ tone: 'error', text: 'Finish or cancel active renders before benchmarking so the timing comparison is fair.' })
+    const selection = inferSelections(models, '8', textEncoderPreference, settings.h3DiffusionPrecision)
+    if (![selection.fl2va, selection.textEncoder, selection.videoVae, selection.audioVae, selection.fl2vLora].every(Boolean)) {
+      return setNotice({ tone: 'error', text: 'The FL2VA base stack and official 8-step Turbo LoRA are required for the benchmark.' })
+    }
+    if (h3GpuRouting?.vramWarnings.length && !settings.gpuRouting.allowOvercommit) {
+      return setNotice({ tone: 'error', text: `${h3GpuRouting.vramWarnings.join(' ')} Enable “Allow render despite VRAM estimate” or choose a safer GPU routing strategy before benchmarking.` })
+    }
+    const available = h3BenchmarkBackends.map((item) => ({
+      ...item,
+      attention: item.backend === 'sol' ? undefined : resolveAttentionBackend(item.backend, h3AttentionBackends),
+      ready: item.backend === 'sol' ? Boolean(solAttentionNode) : Boolean(resolveAttentionBackend(item.backend, h3AttentionBackends)),
+    }))
+    let finalResults: H3BenchmarkResult[] = available.map((item) => ({
+      backend: item.backend,
+      label: item.backend === 'sol' && settings.solCacheEnabled && solCacheNode ? `${item.label} + cache` : item.label,
+      status: item.ready ? 'idle' : 'unavailable',
+      error: item.ready ? undefined : item.backend === 'sol' ? 'SolAttnH3 was not detected.' : `${item.label} was not reported by ComfyUI.`,
+    }))
+    setBenchmarkResults(finalResults)
+    if (!available.some((item) => item.ready)) return setNotice({ tone: 'error', text: 'None of the requested attention backends are available in ComfyUI.' })
+    setBenchmarkRunning(true)
+    const [width, height] = benchmarkConfig.resolution.split('x').map(Number)
+    setNotice({ tone: 'neutral', text: `Running the fixed ${benchmarkConfig.duration}-second ${benchmarkConfig.resolution} text-to-video benchmark sequentially. Please leave ComfyUI idle.` })
+    const benchmarkPrompt = 'A red paper kite glides slowly above a quiet coastal cliff at sunrise, stable cinematic camera, natural motion, realistic light, no dialogue, no text.'
+    const seed = 190914
+    for (const item of available) {
+      if (!item.ready) continue
+      finalResults = benchmarkResultPatch(finalResults, item.backend, { status: 'running', error: undefined })
+      setBenchmarkResults(finalResults)
+      const submittedAt = Date.now()
+      try {
+        const graph = buildMiniMaxWorkflow({
+          mode: 'text', prompt: benchmarkPrompt, width, height, duration: benchmarkConfig.duration, seed, steps: 8, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', refImageSize: 'match', loraStrength: 1,
+          attentionBackend: item.attention,
+          solAttention: item.backend === 'sol' && solAttentionNode ? { nodeType: solAttentionNode, tau: settings.solAttnTau } : undefined,
+          solCache: item.backend === 'sol' && settings.solCacheEnabled && solCacheNode ? { nodeType: solCacheNode, threshold: 0.1, maxSteps: 5 } : undefined,
+          gpuRouting: h3GpuRouting?.workflow,
+          filenamePrefix: `video/MiniMax_Attention_Benchmark_${item.backend}_${Date.now()}`,
+          referenceImages: [], referenceVideos: [], referenceAudios: [],
+        }, selection, { images: [], videos: [], audios: [] })
+        const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+        const timing = await waitForBenchmarkCompletion(settings.comfyUrl, response.prompt_id, submittedAt)
+        finalResults = benchmarkResultPatch(finalResults, item.backend, { status: 'completed', ...timing, completedAt: Date.now() })
+      } catch (error) {
+        finalResults = benchmarkResultPatch(finalResults, item.backend, { status: 'failed', error: error instanceof Error ? error.message : String(error), elapsedMs: Date.now() - submittedAt })
+      }
+      setBenchmarkResults(finalResults)
+    }
+    setBenchmarkRunning(false)
+    const completed = finalResults.filter((item) => item.status === 'completed' && item.elapsedMs !== undefined).sort((a, b) => (a.elapsedMs ?? Infinity) - (b.elapsedMs ?? Infinity))
+    setNotice(completed.length
+      ? { tone: 'success', text: `Attention benchmark complete. ${completed[0].label} was fastest at ${formatBenchmarkDuration(completed[0].elapsedMs)} total.` }
+      : { tone: 'error', text: 'The attention benchmark did not produce a completed render. Review the result details and ComfyUI log.' })
+  }
+
   const runH3Diagnostics = async () => {
     if (!settings || diagnosticRunning) return
     if (!status.connected) return setNotice({ tone: 'error', text: 'Connect ComfyUI before running the H3 diagnostic.' })
-    const qualityModels = inferSelections(models, 'off', textEncoderPreference)
-    const turboModels = inferSelections(models, '8', textEncoderPreference)
+    const qualityModels = inferSelections(models, 'off', textEncoderPreference, settings.h3DiffusionPrecision)
+    const turboModels = inferSelections(models, '8', textEncoderPreference, settings.h3DiffusionPrecision)
     if (![qualityModels.fl2va, qualityModels.textEncoder, qualityModels.videoVae, qualityModels.audioVae, turboModels.fl2vLora].every(Boolean)) {
       return setNotice({ tone: 'error', text: 'The FL2VA base stack and official 8-step Turbo LoRA are required for the diagnostic.' })
     }
@@ -2181,7 +2413,7 @@ function App() {
             <NavButton active={view === 'library'} icon={Library} label="Library" onClick={() => setView('library')} />
             <NavButton active={view === 'queue'} icon={ListVideo} label="Queue" count={pendingJobs.length} onClick={() => setView('queue')} />
             <NavButton active={view === 'movie'} icon={Clapperboard} label="Oyama AI Movie" onClick={() => setView('movie')} />
-            <NavButton active={view === 'clipmaster'} icon={Film} label="Clip Master Beta" onClick={() => setView('clipmaster')} />
+            <NavButton active={view === 'clipmaster'} icon={Film} label="Clip Master" onClick={() => setView('clipmaster')} />
           </div>
         </nav>
         <div className="sidebar-spacer" />
@@ -2198,6 +2430,8 @@ function App() {
         <div hidden={view !== 'create'}>
           <CreateView key={`create-${createResetKey}`} sceneState={sceneState} setSceneState={setSceneState} onAnalyzeReference={path => analyzeSceneReference(settings, path)}
             info={info}
+            gpuRoutingSummary={h3GpuRouting?.summary ?? 'GPU Routing: Auto'}
+            gpuRoutingWarning={h3GpuRouting?.vramWarnings[0] ?? h3GpuRouting?.warnings[0]}
             renderIntents={settings.renderSettingsPresets}
             onApplyIntent={(intent) => {
               const values = intent.values
@@ -2341,7 +2575,7 @@ function App() {
           onGenerate={(options) => void generateAceStep(options)}
           onCancel={(job) => void cancelJob(job)}
         />}
-        <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={settings.outputDirectory} attentionBackend={resolvedH3AttentionBackend} onUse={(file, frameResolution) => {
+        <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={settings.outputDirectory} attentionBackend={resolvedH3AttentionBackend} gpuRouting={h3GpuRouting?.workflow} onUse={(file, frameResolution) => {
           setFirstFrame(file); setResolution(frameResolution); setMode('image'); setActiveJobId(null); setView('create'); setNotice({ tone: 'success', text: 'Z-Image frame loaded into the MiniMax I2V workspace.' })
         }} onUseLtx={(file) => void sendGeneratedStillToLtx(file)} /></div>
         {view === 'referenceprep' && <ReferencePrepStudio settings={settings} info={info} connected={status.connected} onUseCutout={(file) => {
@@ -2369,20 +2603,23 @@ function App() {
           return generateLtx({ mode: 'image', prompt: `${walkthroughDirection} Location description: ${locationProfile} Camera language: ${cameraLanguage} Image clarity: ${clarityDirection} No cuts, no teleporting, no layout changes, no duplicated objects, no people as focal subjects, no dialogue, no text, no logos.`, width: 1344, height: 768, duration: Math.max(5, Math.min(20, options?.duration ?? 10)), preset: 'quality', seed: Math.floor(Math.random() * 1_000_000_000), filenamePrefix: 'MiniMax_location_walkthrough' }, firstFrame, { locationProjectId: project.id })
         }} />}
         {view === 'queue' && <JobsView title="Queue" note="Running and recent local generations" jobs={jobs} empty="No generations have been queued." cancellingIds={cancellingIds} onCancel={cancelJob} />}
-        {view === 'movie' && <div className="movie-integrated"><div className="movie-workspace-heading"><div><h1>Oyama AI Movie</h1><p>Assemble renders, refine clips, and send frames to H3 or LTX.</p></div><button className="secondary-button" onClick={() => void window.minimax.openMovieEditor()}><ExternalLink size={15} />Open separate window</button></div><MovieEditor settings={settings} jobs={jobs} onCreate={(kind) => setView(kind === 'music' ? 'music' : 'ltx25')} onNotice={(tone, text) => setNotice({ tone, text })} onOpenClipMaster={setClipMasterClip} onUseFrame={receiveMovieFrame} /></div>}
+        {(view === 'movie' || (view === 'clipmaster' && clipMasterFromMovie)) && <div className="movie-integrated" hidden={view !== 'movie'}><div className="movie-workspace-heading"><div><h1>Oyama AI Movie</h1><p>Assemble renders, refine clips, and send frames to H3 or LTX.</p></div><button className="secondary-button" onClick={() => void window.minimax.openMovieEditor()}><ExternalLink size={15} />Open separate window</button></div><MovieEditor settings={settings} jobs={jobs} onCreate={(kind) => setView(kind === 'music' ? 'music' : 'ltx25')} onNotice={(tone, text) => setNotice({ tone, text })} onOpenClipMaster={clip => { setClipMasterClip(clip); setClipMasterFromMovie(true); setView('clipmaster') }} onUseFrame={receiveMovieFrame} /></div>}
         {view === 'library'  && <LibraryView jobs={jobs.filter((job) => job.status === 'completed')} settings={settings} onEdit={() => setView('movie')} onUseLtx={loadStartFrameInLtx} onUseLastFrameReference={addVideoLastFrameAsReference} onNotice={(tone, text) => setNotice({ tone, text })} />}
-        {view === 'clipmaster' && <ClipMasterLaunchpad jobs={jobs} onOpenClip={setClipMasterClip} onChooseLocal={() => void (async () => {
-          try {
-            const picked = await window.minimax.chooseMedia('video')
-            if (!picked) return
-            setClipMasterClip({ id: createId(), name: picked.name, source: await window.minimax.mediaUrl(picked.path), createdAt: Date.now() })
-          } catch (error) { setNotice({ tone: 'error', text: `Could not open this video in Clip Master Beta: ${error instanceof Error ? error.message : String(error)}` }) }
-        })()} />}
-        {view === 'settings' && <SettingsView settings={settings} setSettings={setSettings} info={info} models={models} h3Report={h3Report} scanning={scanning} status={status} checking={checking} diagnosticRunning={diagnosticRunning} ollamaModels={ollamaModels} legacyMigration={legacyMigration} legacyMigrationRunning={legacyMigrationRunning} onRefreshOllama={() => void refreshOllama(settings)} onScan={() => void scanModels(settings)} onCheck={() => void checkConnection(settings.comfyUrl)} onSave={() => void saveAppSettings()} onApplyDefaults={applyGenerationDefaults} onRunDiagnostics={() => void runH3Diagnostics()} onRunLegacyMigration={() => void runLegacyMigration()} onFactoryReset={() => void factoryResetWorkspace()} />}
+        {view === 'clipmaster' && <ClipMasterBeta onUseFrame={receiveMovieFrame} clip={clipMasterClip ?? undefined} jobs={jobs} settings={settings} onClose={() => { setClipMasterClip(null); setView(clipMasterFromMovie ? 'movie' : 'library') }} onNotice={(tone, text) => setNotice({ tone, text })} onExportClip={clipMasterFromMovie ? clip => window.dispatchEvent(new CustomEvent('oyama-movie-add-media', { detail: clip })) : undefined} />}
+        {view === 'settings' && <SettingsView settings={settings} setSettings={setSettings} info={info} models={models} jobs={jobs} gpu={gpu} h3Report={h3Report} scanning={scanning} status={status} checking={checking} diagnosticRunning={diagnosticRunning} benchmarkRunning={benchmarkRunning} benchmarkConfig={benchmarkConfig} setBenchmarkConfig={setBenchmarkConfig} benchmarkResults={benchmarkResults} ollamaModels={ollamaModels} legacyMigration={legacyMigration} legacyMigrationRunning={legacyMigrationRunning} onRefreshOllama={() => void refreshOllama(settings)} onScan={() => void scanModels(settings)} onCheck={() => void checkConnection(settings.comfyUrl)} onSave={() => void saveAppSettings()} onApplyDefaults={applyGenerationDefaults} onRunDiagnostics={() => void runH3Diagnostics()} onRunBenchmark={() => void runH3Benchmark()} onRunLegacyMigration={() => void runLegacyMigration()} onFactoryReset={() => void factoryResetWorkspace()} />}
       </main>
       <footer className="status-bar" aria-label="Application status">
-        <span className="status-bar-context"><Film size={14} /><strong>{view === 'create' ? `Create · ${mode === 'reference' ? 'Ref2VA' : 'MiniMax H3'}` : view === 'movie' ? 'Oyama AI Movie' : view === 'clipmaster' ? 'Clip Master Beta' : workspaceProjectLabel(workspaceProjectScope(view) ?? 'create')}</strong></span>
+        <span className="status-bar-context"><Film size={14} /><strong>{view === 'create' ? `Create · ${mode === 'reference' ? 'Ref2VA' : 'MiniMax H3'}` : view === 'movie' ? 'Oyama AI Movie' : view === 'clipmaster' ? 'Clip Master' : workspaceProjectLabel(workspaceProjectScope(view) ?? 'create')}</strong></span>
         <span className="status-bar-divider" aria-hidden="true" />
+        {view === 'create' && <span className="status-bar-attention" aria-label="MiniMax H3 attention controls">
+          <span>Attention</span>
+          <select value={settings.attentionBackend === 'sol' ? 'automatic' : settings.attentionBackend} onChange={(event) => setSettings({ ...settings, attentionBackend: event.target.value as AppSettings['attentionBackend'] })} aria-label="H3 attention backend">
+            <option value="automatic">Auto</option><option value="kitchen">Kitchen</option><option value="sage">Sage</option><option value="native">Native</option>
+          </select>
+          <button type="button" className={`sol-toggle ${settings.attentionBackend === 'sol' ? 'on' : ''}`} disabled={!solAttentionNode} onClick={() => setSettings({ ...settings, attentionBackend: settings.attentionBackend === 'sol' ? 'automatic' : 'sol', h3ParallelAttentionEnabled: false })} title={solAttentionNode ? 'Sol on uses Sol-Attn for MiniMax H3. SageAttention remains the launch-level dense fallback.' : 'SolAttnH3 was not detected by ComfyUI.'}>
+            <Gauge size={12} />Sol {settings.attentionBackend === 'sol' ? 'On' : 'Off'}
+          </button>
+        </span>}
         {activeRenderRuntime !== undefined && <span className={`status-bar-runtime ${activeRenderJob?.status === 'running' || activeRenderJob?.status === 'queued' ? 'active' : ''}`} role="status" title={activeRenderJob?.status === 'running' && activeEngineRuntime !== undefined ? 'ComfyUI engine time. Queue wait is shown separately when known.' : 'Time since this render was submitted locally.'}><Clock3 size={13} />{activeRenderJob?.status === 'queued' ? 'Queue' : activeRenderJob?.status === 'running' ? 'Engine' : 'Render'} · {formatRuntime(activeEngineRuntime ?? activeRenderRuntime)}{activeRenderJob?.status === 'running' && activeQueueWait !== undefined && activeQueueWait > 0 && <small>Queued {formatRuntime(activeQueueWait)}</small>}</span>}
         {activeSamplerProgress && <span className="status-bar-sampler" role="status" title={`ComfyUI render progress: ${activeSamplerProgress.currentStep} of ${activeSamplerProgress.totalSteps} sampler steps (${activeSamplerProgress.progress}%). ${activeSamplerProgress.rate ? `Measured pace ${formatStepDuration(activeSamplerProgress.rate)}.` : 'Measuring sampler pace.'} ${activeSamplerProgress.currentStep < activeSamplerProgress.totalSteps && activeSamplerProgress.nextStepIn !== undefined ? `Next sampler step expected in ${formatStepCountdown(activeSamplerProgress.nextStepIn)}.` : ''} ${activeSamplerProgress.remainingMs !== undefined ? `Estimated ${formatRuntime(activeSamplerProgress.remainingMs)} remaining.` : 'Remaining-time estimate will appear after another sampler step is measured.'}`}><Gauge size={13} /><strong>{activeSamplerProgress.progress}%</strong><span className="sampler-step">Step {activeSamplerProgress.currentStep}/{activeSamplerProgress.totalSteps}</span>{activeSamplerProgress.rate && <span className="sampler-rate">{formatStepDuration(activeSamplerProgress.rate)}</span>}{activeSamplerProgress.currentStep < activeSamplerProgress.totalSteps && activeSamplerProgress.nextStepIn !== undefined && <span className="sampler-countdown"><Clock3 size={12} />Next {formatStepCountdown(activeSamplerProgress.nextStepIn)}</span>}{activeSamplerProgress.remainingMs !== undefined && <span className="sampler-estimate">ETA ~{formatRuntime(activeSamplerProgress.remainingMs)}</span>}</span>}
         <button type="button" className={`working-seed ${view === 'create' && mode === 'reference' || seed === ref2vaSeed ? 'matching' : 'mismatch'}`} onClick={() => { setSeed(ref2vaSeed); setSeedLocked(true); setNotice({ tone: 'success', text: `Working seed synchronized to Ref2VA seed ${ref2vaSeed}.` }) }} title={view === 'create' && mode === 'reference' ? `Ref2VA working seed ${ref2vaSeed} is authoritative.` : seed === ref2vaSeed ? `Working seed ${seed} matches the Ref2VA seed.` : `Current workspace seed ${seed} differs from Ref2VA seed ${ref2vaSeed}. Click to synchronize.`} aria-label={view === 'create' && mode === 'reference' ? `Ref2VA working seed ${ref2vaSeed}` : seed === ref2vaSeed ? `Working seed ${seed}, matches Ref2VA` : `Working seed ${seed}, click to use Ref2VA seed ${ref2vaSeed}`}><Dices size={13} /><span>Working seed</span><strong>{view === 'create' && mode === 'reference' ? ref2vaSeed : seed}</strong>{view !== 'create' || mode !== 'reference' ? seed !== ref2vaSeed && <small>· Ref2VA {ref2vaSeed}</small> : <small>· source</small>}</button>
@@ -2403,7 +2640,7 @@ function App() {
       }} />
       {lanOpen && <LanCompanionDialog status={lanStatus} qr={lanQr} onRotate={async () => setLanStatus(await window.minimax.rotateLanToken())} onClose={() => setLanOpen(false)} />}
       {videoClipDraft && <VideoReferenceClipper source={videoClipDraft.source} onClose={() => setVideoClipDraft(null)} onCreate={createVideoReferenceClip} />}
-      {clipMasterClip && settings && <ClipMasterBeta clip={clipMasterClip} settings={settings} onClose={() => setClipMasterClip(null)} onNotice={(tone, text) => setNotice({ tone, text })} onExportClip={view === 'movie' ? (clip) => { window.dispatchEvent(new CustomEvent('oyama-movie-add-media', { detail: clip })); setClipMasterClip(null) } : undefined} />}
+
     </div>
   )
 }
@@ -2458,7 +2695,7 @@ function WorkspaceProjectManager({ activeScope, projects, onClose, onSave, onLoa
 }
 
 function NavButton({ active, icon: Icon, label, count, itemType, onClick }: { active: boolean; icon: typeof Film; label: string; count?: number; itemType?: 'character' | 'wardrobe' | 'location'; onClick(): void }) {
-  return <button className={`nav-button ${active ? 'active' : ''}`} data-item-type={itemType} aria-label={label} onClick={onClick}><Icon size={19} /><span>{label}</span>{count ? <em>{count}</em> : null}</button>
+  return <button className={`nav-button ${active ? 'active' : ''}`} data-item-type={itemType} title={label} aria-current={active ? 'page' : undefined} aria-label={label} onClick={onClick}><Icon size={19} /><span>{label}</span>{count ? <em>{count}</em> : null}</button>
 }
 
 function Notice({ tone, text, onClose }: { tone: 'error' | 'success' | 'neutral'; text: string; onClose(): void }) {
@@ -2466,6 +2703,7 @@ function Notice({ tone, text, onClose }: { tone: 'error' | 'success' | 'neutral'
 }
 
 type CreateViewProps = {
+  gpuRoutingSummary: string; gpuRoutingWarning?: string
   onAnalyzeReference(path: string): ReturnType<typeof analyzeSceneReference>
   sceneState: ScenePromptState
   setSceneState(state: ScenePromptState): void
@@ -2521,7 +2759,7 @@ type CreateViewProps = {
 
 function CreateView(props: CreateViewProps) {
   const {
-    info, renderIntents, onApplyIntent, onSaveIntent, onDeleteIntent, sampler, setSampler, scheduler, setScheduler, experimentalSampling, setExperimentalSampling, refImageSize, setRefImageSize,
+    info, gpuRoutingSummary, gpuRoutingWarning, renderIntents, onApplyIntent, onSaveIntent, onDeleteIntent, sampler, setSampler, scheduler, setScheduler, experimentalSampling, setExperimentalSampling, refImageSize, setRefImageSize,
     sigmaShiftMode, setSigmaShiftMode, shiftVideo, setShiftVideo, shiftAudio, setShiftAudio, loraStrength, setLoraStrength, userLoras, setUserLoras, userLoraChoices, liveEnabled, setLiveEnabled, livePreviewMode, setLivePreviewMode, liveConnected, livePreview, blurNsfwPreview,
     upscaleMode, setUpscaleMode, h3LearnedUpscaleAvailable, h3LearnedUpscaleMissingNodes, h3LearnedUpscaleModelDetected, ltxAvailable, ltxMissingNodes, noDialogue, setNoDialogue, naturalMovement, setNaturalMovement, clothingPolicy, setClothingPolicy, rtxModels, rtxModel, setRtxModel, updateReference,
     mode, setMode, prompt, setPrompt, duration, setDuration, resolution, setResolution, turbo, setTurbo, turbo8Profile, setTurbo8Profile, textEncoderPreference, setTextEncoderPreference, steps, setSteps,
@@ -2538,7 +2776,8 @@ function CreateView(props: CreateViewProps) {
   const [dialogueOpen, setDialogueOpen] = useState(false)
   const [intentBuilderOpen, setIntentBuilderOpen] = useState(false)
   const [activeIntentId, setActiveIntentId] = useState('')
-  const [inspectorTab, setInspectorTab] = useState<'preview' | 'state' | 'render'>('preview')
+  const [inspectorTab, setInspectorTab] = useState<'preview' | 'state' | 'render'>('render')
+  const [inspectorSelection, setInspectorSelection] = useState<SceneInspectorSelection>({ kind: 'scene' })
   const [previewPopoutRoot, setPreviewPopoutRoot] = useState<HTMLElement | null>(null)
   const previewPopoutRef = useRef<Window | null>(null)
   const h3PreviewOverrideAvailable = Boolean(findH3PreviewOverrideNode(info))
@@ -2678,7 +2917,7 @@ function CreateView(props: CreateViewProps) {
           <section id="workspace-direction" className={`create-section create-direction-section ${mode === 'reference' ? 'reference-prompt-builder' : ''}`}>
             <div className="create-section-heading"><span><WandSparkles size={15} /></span><div><strong>{'Scene Composer'}</strong><small>{'Direct the scene. The compiler handles H3.'}</small></div><em className={prompt.trim() ? 'complete' : ''}>{prompt.trim() ? 'Ready' : 'Required'}</em></div>
           <div className="field-group prompt-field">
-<SceneComposer onAnalyzeReference={ollamaAvailable ? props.onAnalyzeReference : undefined} state={boundScene} onChange={next => { setSceneState(next); if (mode !== 'reference' && mode !== 'text') { setFirstFrame(next.references.find(ref => ref.anchor === 'opening')?.file || null); setLastFrame(next.references.find(ref => ref.anchor === 'ending')?.file || null) } }} options={[...smartCharacterOptions, ...smartWardrobeOptions, ...smartLocationOptions]} onAddReference={() => { if (mode === 'image' || mode === 'frames') { document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return } setMode('reference'); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} onManageReferences={() => { if (mode === 'image' || mode === 'frames') { document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return } setMode('reference'); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} />
+<SceneComposer selection={inspectorSelection} onInspect={setInspectorSelection} onAnalyzeReference={ollamaAvailable ? props.onAnalyzeReference : undefined} state={boundScene} onChange={next => { setSceneState(next); if (mode !== 'reference' && mode !== 'text') { setFirstFrame(next.references.find(ref => ref.anchor === 'opening')?.file || null); setLastFrame(next.references.find(ref => ref.anchor === 'ending')?.file || null) } }} options={[...smartCharacterOptions, ...smartWardrobeOptions, ...smartLocationOptions]} onAddReference={() => { if (mode === 'image' || mode === 'frames') { document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return } setMode('reference'); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} onManageReferences={() => { if (mode === 'image' || mode === 'frames') { document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return } setMode('reference'); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} />
             <div className="prompt-policy-toggles" aria-label="Prompt safeguards">
               <label className="no-dialogue-toggle" title={`Adds a render instruction that blocks spoken words, narration, singing, lip-sync, captions, and text overlays${mode === 'reference' ? ' in this Reference render' : ''}.`}><input type="checkbox" checked={noDialogue} onChange={(event) => setNoDialogue(event.target.checked)} /><span><strong>{mode === 'reference' ? 'No dialogue' : 'No dialogue'}</strong><small>{noDialogue ? 'Ambient sound only' : 'Dialogue and lip-sync allowed'}</small></span></label>
               <label className="no-dialogue-toggle natural-movement-toggle" title="Adds restrained breathing, blinking, eye movement, and posture adjustment without changing the requested action, pose, camera, identity, wardrobe, or scene."><input type="checkbox" checked={naturalMovement} onChange={(event) => setNaturalMovement(event.target.checked)} /><span><strong>Natural movement</strong><small>{naturalMovement ? 'Subtle subject motion' : 'No added motion direction'}</small></span></label>
@@ -2746,21 +2985,22 @@ function CreateView(props: CreateViewProps) {
             onInsert={(text) => { setNoDialogue(false); insertPromptText(text); closeDialogue() }}
           />}
 
+<PreviewPanel id="workspace-preview"><div className="panel-heading"><strong>Current render</strong><div className="preview-toolbar"><button className="icon-button" aria-label="Detach preview" title="Detach preview" onClick={detachPreview}><PanelTopOpen size={15}/></button></div></div>          {livePreviewForActiveJob && activeLiveJob && <figure className={`live-preview workspace-live-preview ${livePreviewForActiveJob.animated ? 'animated' : ''} ${blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 'sensitive-preview' : ''}`} tabIndex={blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 0 : undefined}>{livePreviewForActiveJob.mime === 'video/mp4' ? <video key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} aria-label="Animated MiniMax H3 generation preview" autoPlay loop muted playsInline /> : <img key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} alt={livePreviewForActiveJob.animated ? 'Animated MiniMax H3 generation preview' : 'Live generation preview'} />}{blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) && <span className="sensitive-preview-notice">Sensitive preview · hover or focus to reveal</span>}<figcaption><span>Live preview</span>{livePreviewForActiveJob.animated ? `Animated H3 · ${h3PreviewFrameCount(activeLiveJob.duration)} frames${livePreviewForActiveJob.fps ? ` · ${livePreviewForActiveJob.fps} fps` : ''}${livePreviewForActiveJob.step && livePreviewForActiveJob.totalSteps ? ` · sampler ${livePreviewForActiveJob.step}/${livePreviewForActiveJob.totalSteps}` : ''}` : 'Intermediate decoded frame'}</figcaption></figure>}
+          <div className={`preview-stage ${livePreviewForActiveJob ? 'has-live-preview' : ''}`}>
+            {latestJob?.outputUrl ? latestJob.mediaType === 'image' ? <img className="reference-still-output" src={latestJob.outputUrl} alt="Generated Ref2VA reference still" /> : <VideoPlayer src={latestJob.outputUrl} /> : latestJob && ['queued', 'running'].includes(latestJob.status) ? livePreviewForActiveJob ? <div className="live-render-status" role="status"><div><span className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</span><strong>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Sampling step ${latestJob.currentStep} of ${latestJob.totalSteps}` : latestJob.status === 'queued' ? 'Waiting in the render queue' : 'Preparing the next preview update'}</strong><small>{latestJob.progressLabel && !/waiting for comfyui to start/i.test(latestJob.progressLabel) ? latestJob.progressLabel : `${latestJob.width} × ${latestJob.height} · ${latestJob.duration}s`}</small></div><span className="live-render-progress"><strong>{Math.round(latestJob.progress)}%</strong><small>live progress</small></span><div className="progress" aria-label={`${Math.round(latestJob.progress)}% render progress`}><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Sampling</span><span>Output</span></div></div> : <div className="render-state constructing" data-render-state={latestJob.status}><RenderConstruction state={latestJob.status} label={latestJob.progressLabel} progress={latestJob.progress || undefined} /><div className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</div><strong>{latestJob.progressLabel ?? (latestJob.status === 'queued' ? 'Waiting in queue' : latestJob.mediaType === 'image' ? 'Generating one reference still' : 'Rendering locally')}</strong><span>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Live sampler step ${latestJob.currentStep} of ${latestJob.totalSteps}` : `${latestJob.width} × ${latestJob.height}${latestJob.mediaType === 'image' ? ' · one still' : ` · ${latestJob.duration}s`}`}</span><div className="progress"><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Rendering</span><span>Output</span></div><small>{Math.round(latestJob.progress)}% · live ComfyUI status</small></div> : <PreviewEmptyState job={latestJob} />}
+          </div>
+</PreviewPanel>
         </section>
 
-        <aside id="workspace-preview" className="preview-panel">
+        <aside id="workspace-inspector" className="preview-panel studio-inspector">
+          <SceneSelectionInspector state={boundScene} selection={inspectorSelection} onChange={setSceneState} />
       {mode === 'reference' && <section className="ref2va-intent-bar" aria-labelledby="ref2va-intent-label">
-        <div><span className="ref2va-intent-icon"><Sparkles size={16} /></span><span><strong id="ref2va-intent-label">Intent</strong><small>Apply a named Ref2VA render setup to this workspace.</small></span></div>
+        <div><span className="ref2va-intent-icon"><Sparkles size={16} /></span><span className="ref2va-intent-copy"><strong id="ref2va-intent-label">Intent</strong><small>Apply a named Ref2VA render setup to this workspace.</small></span></div>
         <div className="ref2va-intent-actions"><label><span className="sr-only">Ref2VA intent</span><select value={activeIntentId} onChange={(event) => selectIntent(event.target.value)}><option value="">Choose an intent…</option>{renderIntents.map((intent) => <option key={intent.id} value={intent.id}>{intent.name}</option>)}</select></label><button type="button" className="secondary-button" onClick={() => setIntentBuilderOpen(true)}><SlidersHorizontal size={15} />Build intents</button></div>
       </section>}
-          <div className="panel-heading"><div><span>PREVIEW</span><strong>Current workspace</strong></div><div className="preview-toolbar">{latestJob && <StatusBadge status={latestJob.status} />}<button type="button" className="icon-button" aria-label="Open detachable preview monitor" title="Open detachable preview monitor" onClick={detachPreview}><PanelTopOpen size={15} /></button><button type="button" className="icon-button" aria-label="Toggle fullscreen preview" title="Toggle fullscreen preview" onClick={() => { const panel = document.getElementById('workspace-preview'); if (document.fullscreenElement) void document.exitFullscreen(); else if (panel) void panel.requestFullscreen() }}><Maximize2 size={15} /></button></div></div>
           <nav className="inspector-tabs" aria-label="Workspace inspector">
-            {(['preview', 'state', 'render'] as const).map(tab => <button key={tab} type="button" data-inspector-tab={tab} className={inspectorTab === tab ? 'selected' : ''} aria-pressed={inspectorTab === tab} onClick={() => setInspectorTab(tab)}>{tab === 'preview' ? 'Preview' : tab === 'state' ? 'Scene State' : 'Render'}</button>)}
+            {(['preview', 'state', 'render'] as const).map(tab => <button key={tab} type="button" data-inspector-tab={tab} className={inspectorTab === tab ? 'selected' : ''} aria-pressed={inspectorTab === tab} onClick={() => setInspectorTab(tab)}>{tab === 'preview' ? 'Output' : tab === 'state' ? 'Continuity' : 'Render setup'}</button>)}
           </nav>
-          {livePreviewForActiveJob && activeLiveJob && <figure className={`live-preview workspace-live-preview ${livePreviewForActiveJob.animated ? 'animated' : ''} ${blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 'sensitive-preview' : ''}`} tabIndex={blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 0 : undefined}>{livePreviewForActiveJob.mime === 'video/mp4' ? <video key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} aria-label="Animated MiniMax H3 generation preview" autoPlay loop muted playsInline /> : <img key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} alt={livePreviewForActiveJob.animated ? 'Animated MiniMax H3 generation preview' : 'Live generation preview'} />}{blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) && <span className="sensitive-preview-notice">Sensitive preview · hover or focus to reveal</span>}<figcaption><span>Live preview</span>{livePreviewForActiveJob.animated ? `Animated H3 · ${h3PreviewFrameCount(activeLiveJob.duration)} frames${livePreviewForActiveJob.fps ? ` · ${livePreviewForActiveJob.fps} fps` : ''}${livePreviewForActiveJob.step && livePreviewForActiveJob.totalSteps ? ` · sampler ${livePreviewForActiveJob.step}/${livePreviewForActiveJob.totalSteps}` : ''}` : 'Intermediate decoded frame'}</figcaption></figure>}
-          <div className={`preview-stage ${livePreviewForActiveJob ? 'has-live-preview' : ''}`}>
-            {latestJob?.outputUrl ? latestJob.mediaType === 'image' ? <img className="reference-still-output" src={latestJob.outputUrl} alt="Generated Ref2VA reference still" /> : <VideoPlayer src={latestJob.outputUrl} /> : latestJob && ['queued', 'running'].includes(latestJob.status) ? livePreviewForActiveJob ? <div className="live-render-status" role="status"><div><span className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</span><strong>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Sampling step ${latestJob.currentStep} of ${latestJob.totalSteps}` : latestJob.status === 'queued' ? 'Waiting in the render queue' : 'Preparing the next preview update'}</strong><small>{latestJob.progressLabel && !/waiting for comfyui to start/i.test(latestJob.progressLabel) ? latestJob.progressLabel : `${latestJob.width} × ${latestJob.height} · ${latestJob.duration}s`}</small></div><span className="live-render-progress"><strong>{Math.round(latestJob.progress)}%</strong><small>live progress</small></span><div className="progress" aria-label={`${Math.round(latestJob.progress)}% render progress`}><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Sampling</span><span>Output</span></div></div> : <div className="render-state constructing" data-render-state={latestJob.status}><RenderConstruction state={latestJob.status} /><div className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</div><strong>{latestJob.progressLabel ?? (latestJob.status === 'queued' ? 'Waiting in queue' : latestJob.mediaType === 'image' ? 'Generating one reference still' : 'Rendering locally')}</strong><span>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Live sampler step ${latestJob.currentStep} of ${latestJob.totalSteps}` : `${latestJob.width} × ${latestJob.height}${latestJob.mediaType === 'image' ? ' · one still' : ` · ${latestJob.duration}s`}`}</span><div className="progress"><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Rendering</span><span>Output</span></div><small>{Math.round(latestJob.progress)}% · live ComfyUI status</small></div> : <PreviewEmptyState job={latestJob} />}
-          </div>
           {inspectorTab === 'preview' && <div className="inspector-tab-panel preview-inspector-panel">
           {latestJob?.mediaType !== 'image' && latestJob?.provider === 'minimax' && latestJob.status === 'completed' && latestJob.outputUrl && <VideoContinuationControls job={latestJob} onContinue={onContinue} onContinueReference={onContinueReference} />}
           {latestJob?.mediaType === 'image' && latestJob.status === 'completed' && latestJob.outputUrl && <div className="still-result-actions"><a className="secondary-button" href={latestJob.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open image</a><div className="still-i2v-actions"><span><ImagePlus size={15} />Send to I2V</span><button className="primary-button" onClick={() => onSendStillToI2v(latestJob, 'ltx25')}><Aperture size={15} />LTX 2.5</button><button className="secondary-button" onClick={() => onSendStillToI2v(latestJob, 'minimax')}><Film size={15} />MiniMax I2V</button></div></div>}
@@ -2768,14 +3008,15 @@ function CreateView(props: CreateViewProps) {
           {latestJob && <ComfyActivityConsole job={latestJob} />}
           </div>}
           {inspectorTab === 'state' && <div className="inspector-tab-panel state-inspector-panel"><SceneContextPanels state={boundScene} onChange={setSceneState} /></div>}
-          {inspectorTab === 'render' && <div className="inspector-tab-panel render-inspector-panel">{advanced && <details className="pipeline-summary"><summary>Engine components <ChevronDown size={12} /></summary>
+          {inspectorTab === 'render' && <div className="inspector-tab-panel render-inspector-panel">{advanced && <details open className="pipeline-summary"><summary>Engine components <ChevronDown size={12} /></summary>
             <PipelineItem ready={Boolean(mode === 'reference' ? selection.ref2va : selection.fl2va)} label="Diffusion" value={mode === 'reference' ? selection.ref2va : selection.fl2va} />
             <PipelineItem ready={Boolean(selection.textEncoder)} label="Encoder" value={selection.textEncoder} />
             <PipelineItem ready={Boolean(selection.videoVae && selection.audioVae)} label="Video + audio VAE" value={selection.videoVae && selection.audioVae ? 'Both detected' : 'Missing component'} />
             <PipelineItem ready={turbo === 'off' || Boolean(mode === 'reference' ? selection.ref2vLora : selection.fl2vLora)} label="Acceleration" value={turbo === 'off' ? 'Native sampling' : (mode === 'reference' ? selection.ref2vLora : selection.fl2vLora)} />
           </details>}
           <section id="workspace-output" className={`create-section create-output-section preview-output-settings ${advanced ? 'show-advanced' : 'basic-render'}`}>
-            <div className="create-section-heading"><span><Gauge size={15} /></span><div><strong>Output and quality</strong><small>Tune the next render directly beneath its preview.</small></div><em className="complete">{resolution.replace('x', ' × ')} · {duration}s</em></div>
+            <div className="create-section-heading"><span><Gauge size={15} /></span><div><strong>Output and quality</strong><small>Configure the next render.</small></div><em className="complete">{resolution.replace('x', ' × ')} · {duration}s</em></div>
+            <div className={`create-gpu-routing-summary ${gpuRoutingWarning ? 'warning' : ''}`}><Gauge size={14} /><span><strong>{gpuRoutingSummary}</strong><small>{gpuRoutingWarning ?? `H3 frame grid resolves this duration to ${frameCount(duration)} frames before generation. Whole-component placement is requested for the next render.`}</small></span></div>
             {mode !== 'reference' && <div className="create-presets" aria-label="Recommended H3 presets"><button type="button" onClick={() => applyCreatePreset('quality')}><strong>Native Quality</strong><small>1344 × 768 · 30 steps</small></button><button type="button" onClick={() => applyCreatePreset('turbo')}><strong>Turbo 8</strong><small>Native canvas · official LoRA</small></button><button type="button" onClick={() => applyCreatePreset('preview')}><strong>Preview</strong><small>864 × 480 · Turbo 8</small></button></div>}
             <RenderSize value={resolution} onChange={setResolution} />
             {mode === 'reference' && <details className="output-reference-fidelity"><summary><Gauge size={16} /><span><small>REFERENCE FIDELITY</small><strong>{refImageSize === 'max' ? 'Maximum identity' : 'Balanced'}</strong><em>{refImageSize === 'max' ? 'Keep more original source detail' : 'Fit references to the output canvas'}</em></span><ChevronDown size={15} /></summary><fieldset><legend>Choose how much source-image detail H3 preserves</legend><label className={refImageSize === 'match' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'match'} onChange={() => setRefImageSize('match')} /><span><strong>Balanced</strong><small>Fit references to the output canvas. Faster and uses less memory.</small></span></label><label className={refImageSize === 'max' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'max'} onChange={() => setRefImageSize('max')} /><span><strong>Maximum identity</strong><small>Keep more original image detail. Slower and uses more memory.</small></span></label></fieldset></details>}
@@ -2800,7 +3041,7 @@ function CreateView(props: CreateViewProps) {
             <p className="field-help render-duration">{frameCount(duration)} frames · {(frameCount(duration) / 24).toFixed(2)}s at 24 fps.</p>
           </section></div>}
           <div id="h3-render-readiness" className={`h3-render-readiness ${renderBlocker ? 'blocked' : 'ready'}`} role="status"><strong>{renderBlocker ? 'Before you generate' : 'Ready to render'}</strong><span>{renderBlocker || 'Review the output settings, then generate your video. Progress and results appear in Preview.'}</span></div>
-<div className="generate-bar preview-generate-bar"><div className="generation-summary"><Gauge size={17} /><span><strong>{resolution.replace('x', ' × ')}</strong><small>{(frameCount(duration) / 24).toFixed(2)}s · 24 fps · {effectiveSteps} steps · {turbo === 'off' ? 'Native' : `Turbo ${turbo}`}</small></span></div><div className="generate-actions">{latestJob && ['queued', 'running'].includes(latestJob.status) && <button className="danger-button" onClick={() => onCancel(latestJob)} disabled={cancelling}><CircleStop size={16} />{cancelling ? 'Stopping…' : latestJob.mediaType === 'image' ? 'Cancel image' : 'Cancel generation'}</button>}</div></div>
+{latestJob && ['queued', 'running'].includes(latestJob.status) && <div className="generate-bar preview-generate-bar"><div className="generation-summary"><Gauge size={17} /><span><strong>{resolution.replace('x', ' × ')}</strong><small>{(frameCount(duration) / 24).toFixed(2)}s · 24 fps · {effectiveSteps} steps · {turbo === 'off' ? 'Native' : `Turbo ${turbo}`}</small></span></div><div className="generate-actions"><button className="danger-button" onClick={() => onCancel(latestJob)} disabled={cancelling}><CircleStop size={16} />{cancelling ? 'Stopping…' : latestJob.mediaType === 'image' ? 'Cancel image' : 'Cancel generation'}</button></div></div>}
           {previewPopoutRoot && createPortal(<DetachedPreviewMonitor job={latestJob} livePreview={livePreview} liveEnabled={liveEnabled} blurSensitive={blurNsfwPreview} />, previewPopoutRoot)}
         </aside>
       </div>
@@ -2916,7 +3157,7 @@ const workspaceTips: Record<View, { title: string; description: string; tips: Ar
   locations: { title: 'Locations', description: 'Create recognizable environments and reusable spatial references.', tips: [['Master image', 'Choose a wide, uncluttered view that shows the main geography and landmarks.'], ['Survey', 'The LTX walkthrough is designed to reveal connected zones and stable spatial relationships.'], ['Nature-only', 'Enable it when the location should contain terrain, vegetation, water, or formations without human-made structures.']] },
   queue: { title: 'Queue', description: 'Monitor work running on the local ComfyUI engine.', tips: [['Progress', 'The runtime and sampler indicators show whether a job is waiting, rendering, or nearing completion.'], ['Cancel', 'Stopping a queued or running job prevents further work; completed outputs remain available.'], ['Errors', 'Open the job details and check the ComfyUI connection or missing model/node message before retrying.']] },
   library: { title: 'Video library', description: 'Review finished images and videos without changing their originals.', tips: [['Preview', 'Use Preview to open any still or clip in a lightbox. Escape, Close, or click outside the panel to dismiss it.'], ['Frames', 'Frame bookmarks lets you extract reusable frames from a video and send one to LTX 2.5 as a starting frame.'], ['Movie editor', 'Open Movie Editor to place, trim, and assemble non-destructive copies; source renders remain untouched.']] },
-  clipmaster: { title: 'Clip Master Beta', description: 'Select a video for precise frame selection, frame extraction, and isolated trimmed exports.', tips: [['Select a clip', 'Choose any completed video render here, or select a local video. The existing Clip editor remains separate and unchanged.'], ['Exact frames', 'Use the frame controls to set inclusive start and end frame numbers. The scrubber and the player remain synchronized to that frame index.'], ['Extract frames', 'Save the start, end, current, or multiple chosen frames into ComfyUI/output/ClipMaster/<source-clip-name>/.'], ['Export', 'Trimmed videos use an incrementing versioned filename and are saved inside the configured ComfyUI output folder without replacing an earlier export.']] },
+  clipmaster: { title: 'Clip Master', description: 'Select a video for precise frame selection, frame extraction, and isolated trimmed exports.', tips: [['Select a clip', 'Choose any completed video render here, or select a local video. The existing Clip editor remains separate and unchanged.'], ['Exact frames', 'Use the frame controls to set inclusive start and end frame numbers. The scrubber and the player remain synchronized to that frame index.'], ['Extract frames', 'Save the start, end, current, or multiple chosen frames into ComfyUI/output/ClipMaster/<source-clip-name>/.'], ['Export', 'Trimmed videos use an incrementing versioned filename and are saved inside the configured ComfyUI output folder without replacing an earlier export.']] },
   settings: { title: 'Settings', description: 'Connect the studio to your local engine and configure defaults.', tips: [['Connection', 'Keep ComfyUI running at the configured local address, then use Test connection to refresh status.'], ['Models', 'Rescan after adding files. The app indexes model folders in place and does not move or copy them.'], ['Defaults', 'Generation defaults apply to the main Create workspace; LTX and Z-Image keep their own workspace settings.'], ['Local assistant', 'Ollama or LM Studio can refine prompts locally when configured; prompts are not sent to a cloud service.']] },
 }
 
@@ -2953,6 +3194,7 @@ function JobExecutionChips({ job, expanded = false }: { job: GenerationJob; expa
   const chips = [
     execution.attentionBackend && { label: execution.attentionBackend, emphasis: /int8 attention|sage/i.test(execution.attentionBackend) },
     execution.diffusionPrecision && { label: execution.diffusionPrecision },
+    execution.gpuRouting && { label: execution.gpuRouting, emphasis: /GPU 1|5060/i.test(execution.gpuRouting) },
     execution.sampler && { label: `${execution.sampler} + ${execution.scheduler ?? 'scheduler'}` },
     execution.preview && { label: `Preview: ${execution.preview}` },
     execution.upscale && execution.upscale !== 'Off' && { label: execution.upscale },
@@ -3037,7 +3279,7 @@ function JobsView({ title, note, jobs, empty, cancellingIds, onCancel }: { title
   return <div className="standard-page"><div className="page-heading"><div><p className="eyebrow">LOCAL WORKSPACE</p><h1>{title}</h1><p>{note}</p></div></div>{jobs.length === 0 ? <div className="empty-page"><History size={28} /><strong>{empty}</strong><span>New work is saved automatically on this device.</span></div> : <div className="job-list">{jobs.map((job) => { const audio = job.mediaType === 'audio'; const image = job.mediaType === 'image'; return <article className={`job-row ${['running', 'queued'].includes(job.status) ? 'constructing' : ''}`} key={job.id}><div className={`job-thumbnail ${audio ? 'audio' : ''}`}>{job.outputUrl ? audio ? <Music2 /> : image ? <img src={job.outputUrl} alt="Generated reference still" /> : <video src={job.outputUrl} muted /> : job.status === 'running' ? <LoaderCircle className="spin" /> : audio ? <Music2 /> : image ? <ImageIcon /> : <Film />}</div><div className="job-copy"><div><StatusBadge status={job.status} /><span>{new Date(job.createdAt).toLocaleString()}</span></div><strong>{shortPrompt(job.prompt)}</strong><small>{audio ? `ACE-Step · ${job.duration}s · audio` : `${job.width} × ${job.height} · ${image ? 'Ref2VA still' : `${job.duration}s · ${job.mode}`}`}</small><JobExecutionChips job={job} />{job.outputUrl && audio && <audio className="job-audio" src={job.outputUrl} controls preload="metadata" />}{['running', 'queued'].includes(job.status) && <><small className="job-progress-label">{job.progressLabel ?? (job.status === 'queued' ? 'Waiting in queue' : audio ? 'Generating music locally' : image ? 'Generating one reference still' : 'Rendering locally')}{job.queuePosition ? ` · position ${job.queuePosition}` : ''}{job.currentStep !== undefined && job.totalSteps ? ` · ${job.currentStep}/${job.totalSteps}` : ''}</small><div className="progress compact"><i style={{ width: `${job.progress}%` }} /></div></>}{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.outputUrl && <a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a>}{['running', 'queued'].includes(job.status) && <button className="danger-button" disabled={cancellingIds.has(job.id)} onClick={() => void onCancel(job)}>{cancellingIds.has(job.id) ? <LoaderCircle size={15} className="spin" /> : <CircleStop size={15} />}{cancellingIds.has(job.id) ? 'Stopping…' : 'Stop'}</button>}</div></article> })}</div>}</div>
 }
 
-function SettingsView({ settings, setSettings, info, models, h3Report, scanning, status, checking, diagnosticRunning, ollamaModels, legacyMigration, legacyMigrationRunning, onRefreshOllama, onScan, onCheck, onSave, onApplyDefaults, onRunDiagnostics, onRunLegacyMigration, onFactoryReset }: { settings: AppSettings; setSettings(value: AppSettings): void; info: ObjectInfo; models: ModelFile[]; h3Report: ReturnType<typeof h3StackReport>; scanning: boolean; status: ComfyStatus; checking: boolean; diagnosticRunning: boolean; ollamaModels: OllamaModel[]; legacyMigration: { available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null; legacyMigrationRunning: boolean; onRefreshOllama(): void; onScan(): void; onCheck(): void; onSave(): void; onApplyDefaults(): void; onRunDiagnostics(): void; onRunLegacyMigration(): void; onFactoryReset(): void }) {
+function SettingsView({ settings, setSettings, info, models, jobs, gpu, h3Report, scanning, status, checking, diagnosticRunning, benchmarkRunning, benchmarkConfig, setBenchmarkConfig, benchmarkResults, ollamaModels, legacyMigration, legacyMigrationRunning, onRefreshOllama, onScan, onCheck, onSave, onApplyDefaults, onRunDiagnostics, onRunBenchmark, onRunLegacyMigration, onFactoryReset }: { settings: AppSettings; setSettings(value: AppSettings): void; info: ObjectInfo; models: ModelFile[]; jobs: GenerationJob[]; gpu: GpuTelemetry | null; h3Report: ReturnType<typeof h3StackReport>; scanning: boolean; status: ComfyStatus; checking: boolean; diagnosticRunning: boolean; benchmarkRunning: boolean; benchmarkConfig: H3BenchmarkConfig; setBenchmarkConfig(value: H3BenchmarkConfig): void; benchmarkResults: H3BenchmarkResult[]; ollamaModels: OllamaModel[]; legacyMigration: { available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null; legacyMigrationRunning: boolean; onRefreshOllama(): void; onScan(): void; onCheck(): void; onSave(): void; onApplyDefaults(): void; onRunDiagnostics(): void; onRunBenchmark(): void; onRunLegacyMigration(): void; onFactoryReset(): void }) {
   const pathRows: Array<{ kind: ModelKind; label: string; note: string }> = [
     { kind: 'diffusion_models', label: 'Diffusion models', note: 'FL2VA and Ref2VA checkpoints' },
     { kind: 'text_encoders', label: 'Text encoders', note: 'Qwen3-VL MiniMax encoder' },
@@ -3054,6 +3296,9 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
   const [presetName, setPresetName] = useState('')
   const [workflowKind, setWorkflowKind] = useState<'h3-i2v' | 'ref2va' | 'ltx' | 'zimage' | 'acestep'>('h3-i2v')
   const [workflowExportStatus, setWorkflowExportStatus] = useState('')
+  const [solGuideOpen, setSolGuideOpen] = useState(false)
+  const [solTestStatus, setSolTestStatus] = useState('')
+  const [gpuDiagnosticStatus, setGpuDiagnosticStatus] = useState('')
   const [factoryResetOpen, setFactoryResetOpen] = useState(false)
   const [factoryResetPhrase, setFactoryResetPhrase] = useState('')
   const [activeSettingsSection, setActiveSettingsSection] = useState('display')
@@ -3061,6 +3306,8 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
     ['display', 'Display & access'],
     ['engine', 'ComfyUI engine'],
     ['performance', 'Performance'],
+    ['benchmark', 'Attention benchmark'],
+    ['routing', 'GPU Routing'],
     ['workflows', 'Workflow export'],
     ['h3', 'H3 engine stack'],
     ['defaults', 'Render defaults'],
@@ -3103,13 +3350,70 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
   const warnedSampler = ['euler_ancestral', 'lcm', 'dpmpp_3m_sde'].includes(defaults.sampler)
   const attentionBackends = choices(info, 'ModelAttentionBackend', 'attention')
   const h3ParallelAttentionNode = findH3ParallelAttentionNode(info)
+  const solAttentionNode = findSolAttentionNode(info)
+  const solCacheNode = findSolCompatibleCacheNode(info)
+  const previewRoutingNode = findH3PreviewOverrideNode(info)
+  const nvfp4Fl2vaInstalled = models.some((model) => model.kind === 'diffusion_models' && /^minimax_h3_fl2va_pruned_nvfp4\.safetensors$/i.test(model.name))
+  const nvfp4Ref2vaInstalled = models.some((model) => model.kind === 'diffusion_models' && /^minimax_h3_ref2va_pruned_nvfp4\.safetensors$/i.test(model.name))
+  const nvfp4DiffusionReady = nvfp4Fl2vaInstalled && nvfp4Ref2vaInstalled
   const kitchenAttention = resolveAttentionBackend('kitchen', attentionBackends)
   const sageAttention = resolveAttentionBackend('sage', attentionBackends)
   const nativeAttention = resolveAttentionBackend('native', attentionBackends)
   const selectedAttention = resolveAttentionBackend(settings.attentionBackend, attentionBackends)
+  const h3AttentionBackend = settings.attentionBackend === 'sol' ? undefined : selectedAttention
+  const routingGpuList = routingGpus(gpu, status.stats?.devices)
+  const routingH3Models = inferSelections(models, defaults.turbo, defaults.textEncoderPreference, settings.h3DiffusionPrecision)
+  const routingModelNames: Partial<Record<RoutingComponent, string>> = { diffusion: routingH3Models.fl2va, textEncoder: routingH3Models.textEncoder, videoVae: routingH3Models.videoVae, audioVae: routingH3Models.audioVae, previewVae: routingH3Models.previewVae }
+  const routingSizes = Object.fromEntries(Object.entries(routingModelNames).map(([component, name]) => [component, estimatedComponentBytes(models.find((model) => model.name === name)?.bytes, component as RoutingComponent)]))
+  const gpuRoutingPlan = resolveGpuRouting(settings.gpuRouting, routingGpuList, info, routingSizes, previewRoutingNode)
+  const runtimeArgs = status.stats?.system?.argv ?? []
+  const hasRuntimeArg = (arg: string) => runtimeArgs.some((value) => value === arg || value.startsWith(`${arg}=`))
+  const routingCapabilities = [
+    { label: 'Diffusion model', node: info.UNETLoaderMultiGPU ? 'UNETLoaderMultiGPU' : info.SelectModelDevice ? 'SelectModelDevice' : undefined, cpu: Boolean(info.UNETLoaderMultiGPU) },
+    { label: 'Text encoder', node: info.CLIPLoaderMultiGPU ? 'CLIPLoaderMultiGPU' : info.SelectCLIPDevice ? 'SelectCLIPDevice' : undefined, cpu: Boolean(info.CLIPLoaderMultiGPU || info.SelectCLIPDevice) },
+    { label: 'Video / audio VAE', node: info.VAELoaderMultiGPU ? 'VAELoaderMultiGPU' : info.SelectVAEDevice ? 'SelectVAEDevice' : undefined, cpu: Boolean(info.VAELoaderMultiGPU) },
+    { label: 'Preview VAE', node: previewRoutingNode, cpu: false },
+  ]
+  const runtimeMemoryPolicy = !runtimeArgs.length ? 'Launch flags unavailable' : hasRuntimeArg('--gpu-only') ? 'GPU-only residency' : hasRuntimeArg('--highvram') ? 'High VRAM residency' : hasRuntimeArg('--lowvram') || hasRuntimeArg('--novram') ? 'Conservative VRAM mode' : 'ComfyUI-managed memory'
+  const solRuntimeDiagnostics = parseSolRuntimeDiagnostics(jobs.flatMap((job) => job.comfyActivity?.map((activity) => activity.message) ?? []).join('\n'))
+  const completedBenchmarks = benchmarkResults.filter((item) => item.status === 'completed' && item.elapsedMs !== undefined).sort((a, b) => (a.elapsedMs ?? Infinity) - (b.elapsedMs ?? Infinity))
+  const benchmarkWinner = completedBenchmarks[0]
+  const benchmarkMachine = gpu?.name ?? status.stats?.devices?.[0]?.name ?? 'this PC'
+  const gpuDeviceOptions: Array<[string, string]> = [['auto', 'Auto'], ['cpu', 'CPU'], ...routingGpuList.map((device) => [`gpu:${device.index}`, `GPU ${device.index} — ${device.name}`] as [string, string])]
+  const updateGpuRouting = (patch: Partial<AppSettings['gpuRouting']>) => setSettings({ ...settings, gpuRouting: { ...settings.gpuRouting, ...patch } })
+  const testSolEngine = async () => {
+    if (!solAttentionNode) { setSolTestStatus('SolAttnH3 is not detected. Install it, restart ComfyUI, and Test connection first.'); return }
+    try {
+      const h3 = inferSelections(models, '8', defaults.textEncoderPreference, settings.h3DiffusionPrecision)
+      const workflow = buildMiniMaxWorkflow({ mode: 'text', prompt: 'A polished chrome sphere rotates slowly on a dark studio pedestal under one soft overhead light. Locked camera, clean reflections, ambient room tone, no dialogue, no text.', width: 864, height: 480, duration: 5, seed: 12345, steps: 8, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', refImageSize: 'match', loraStrength: 1, gpuRouting: gpuRoutingPlan.workflow, solCache: settings.solCacheEnabled && solCacheNode ? { nodeType: solCacheNode, threshold: 0.1, maxSteps: 5 } : undefined, solAttention: { nodeType: solAttentionNode, tau: settings.solAttnTau }, filenamePrefix: `video/Sol_Engine_Test_${Date.now()}`, referenceImages: [], referenceVideos: [], referenceAudios: [] }, h3, { images: [], videos: [], audios: [] })
+      const nodes = Object.values(workflow)
+      if (!nodes.some((node) => node.class_type === solAttentionNode)) throw new Error('The generated workflow does not contain the Sol-Attn node.')
+      if (nodes.some((node) => node.class_type === 'ModelAttentionBackend')) throw new Error('Safety check failed: a generic attention backend was also present in the H3 graph.')
+      if (!nodes.some((node) => node.class_type === 'LoraLoaderModelOnly')) throw new Error('The official Turbo 8 LoRA is not available in the selected H3 model stack.')
+      if (workflow['14']?.inputs.steps !== 8) throw new Error('The Sol test graph did not resolve to exactly eight sampling steps.')
+      if (settings.solCacheEnabled && solCacheNode && !nodes.some((node) => node.class_type === solCacheNode)) throw new Error('The requested H3 cache node was not included in the Sol stack.')
+      const response = await window.minimax.submitPrompt(settings.comfyUrl, workflow)
+      setSolTestStatus(`Sol${settings.solCacheEnabled && solCacheNode ? ' + cache' : ''} Turbo 8 test accepted · prompt ${response.prompt_id}. Watch the queue and ComfyUI log for backend=triton, correctness gate PASS, sparse calls, and cache skips.`)
+    } catch (error) {
+      setSolTestStatus(`Sol test failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const testGpuRouting = async () => {
+    if (!status.connected) { setGpuDiagnosticStatus('Connect ComfyUI before running the placement diagnostic.'); return }
+    if (!routingH3Models.fl2va || !routingH3Models.textEncoder || !routingH3Models.videoVae || !routingH3Models.audioVae) { setGpuDiagnosticStatus('The H3 diffusion, text encoder, and both full VAEs are required.'); return }
+    if (gpuRoutingPlan.vramWarnings.length && !settings.gpuRouting.allowOvercommit) { setGpuDiagnosticStatus(`Blocked by VRAM validation: ${gpuRoutingPlan.vramWarnings.join(' ')}`); return }
+    try {
+      const workflow = buildMiniMaxWorkflow({ mode: 'text', prompt: 'GPU placement diagnostic. Static studio color chart, locked camera, ambient tone, no dialogue.', width: 608, height: 352, duration: 2, seed: 30905060, steps: 8, turbo: '8', sampler: 'res_multistep', scheduler: 'simple', refImageSize: 'match', loraStrength: 1, gpuRouting: gpuRoutingPlan.workflow, solAttention: settings.attentionBackend === 'sol' && solAttentionNode ? { nodeType: solAttentionNode, tau: settings.solAttnTau } : undefined, filenamePrefix: `video/GPU_Routing_Diagnostic_${Date.now()}`, referenceImages: [], referenceVideos: [], referenceAudios: [] }, inferSelections(models, '8', defaults.textEncoderPreference, settings.h3DiffusionPrecision), { images: [], videos: [], audios: [] })
+      const response = await window.minimax.submitPrompt(settings.comfyUrl, workflow)
+      console.info(`[GPU Routing Diagnostic] ${gpuRoutingPlan.logLine} | Strategy: ${gpuRoutingPlan.workflow.strategy}`)
+      setGpuDiagnosticStatus(`Diagnostic queued · prompt ${response.prompt_id}. Requested: ${gpuRoutingPlan.logLine}. Queue acceptance verifies graph compatibility only; confirm the ComfyUI process log reports these placements before treating them as runtime-verified.`)
+    } catch (error) {
+      setGpuDiagnosticStatus(`Diagnostic failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
   const exportWorkflow = async () => {
     const [width, height] = defaults.resolution.split('x').map(Number)
-    const h3 = inferSelections(models, defaults.turbo, defaults.textEncoderPreference)
+    const h3 = inferSelections(models, defaults.turbo, defaults.textEncoderPreference, settings.h3DiffusionPrecision)
     const ltx = inferLtx25Selections(models, choices(info, 'LatentUpscaleModelLoader', 'model_name'))
     const ace = inferAceStepSelections(models)
     const attentionBackend = selectedAttention
@@ -3118,36 +3422,63 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
     let filename: string
     if (workflowKind === 'ref2va') {
       filename = 'minimax-ref2va-api-workflow.json'
-      workflow = buildMiniMaxWorkflow({ mode: 'reference', prompt: 'Describe the shot. Attach reference media in ComfyUI before queueing.', width, height, duration: defaults.duration, seed: 12345, steps: defaults.steps, turbo: defaults.turbo, sampler: defaults.sampler, scheduler: defaults.scheduler, experimentalSampling: defaults.experimentalSampling, refImageSize: defaults.refImageSize, loraStrength: defaults.loraStrength, attentionBackend, filenamePrefix, referenceImages: [], referenceVideos: [], referenceAudios: [] }, h3, { images: [], videos: [], audios: [] })
+      workflow = buildMiniMaxWorkflow({ mode: 'reference', prompt: 'Describe the shot. Attach reference media in ComfyUI before queueing.', width, height, duration: defaults.duration, seed: 12345, steps: defaults.steps, turbo: defaults.turbo, sampler: defaults.sampler, scheduler: defaults.scheduler, experimentalSampling: defaults.experimentalSampling, refImageSize: defaults.refImageSize, loraStrength: defaults.loraStrength, attentionBackend: h3AttentionBackend, gpuRouting: gpuRoutingPlan.workflow, solCache: settings.attentionBackend === 'sol' && settings.solCacheEnabled && solCacheNode ? { nodeType: solCacheNode, threshold: 0.1, maxSteps: 5 } : undefined, solAttention: settings.attentionBackend === 'sol' && solAttentionNode ? { nodeType: solAttentionNode, tau: settings.solAttnTau } : undefined, filenamePrefix, referenceImages: [], referenceVideos: [], referenceAudios: [] }, h3, { images: [], videos: [], audios: [] })
     } else if (workflowKind === 'ltx') {
       filename = 'ltx-2.5-api-workflow.json'
-      workflow = buildLtx25Workflow({ mode: 'text', prompt: 'Describe one continuous cinematic shot.', width, height, duration: defaults.duration, seed: 12345, preset: 'turbo', attentionBackend, filenamePrefix }, ltx)
+      workflow = buildLtx25Workflow({ mode: 'text', prompt: 'Describe one continuous cinematic shot.', width, height, duration: defaults.duration, seed: 12345, preset: 'turbo', attentionBackend, gpuRouting: gpuRoutingPlan.workflow, filenamePrefix }, ltx)
     } else if (workflowKind === 'zimage') {
       filename = 'z-image-api-workflow.json'
       const zModel = models.find((model) => model.kind === 'diffusion_models' && /z[_-]?image.*turbo/i.test(model.name))?.name ?? 'z_image_turbo_bf16.safetensors'
       const zEncoder = models.find((model) => model.kind === 'text_encoders' && /qwen[_-]?3[_-]?4b/i.test(model.name))?.name ?? 'qwen_3_4b.safetensors'
       const zVae = models.find((model) => model.kind === 'vae' && /^ae\.safetensors$/i.test(model.name))?.name ?? 'ae.safetensors'
-      workflow = buildZImage('Describe a single polished image.', width, height, 12345, zModel, zEncoder, zVae, 8, 1, 'turbo', '', attentionBackend)
+      workflow = buildZImage('Describe a single polished image.', width, height, 12345, zModel, zEncoder, zVae, 8, 1, 'turbo', '', attentionBackend, gpuRoutingPlan.workflow)
     } else if (workflowKind === 'acestep') {
       filename = 'ace-step-1.5-api-workflow.json'
-      workflow = buildAceStepWorkflow({ model: ace.sft ? 'sft' : 'base', tags: 'cinematic instrumental soundtrack', lyrics: '', instrumental: true, duration: 60, bpm: 120, timeSignature: '4', language: 'en', keyScale: 'C major', seed: 12345, generateAudioCodes: true, attentionBackend, filenamePrefix }, ace)
+      workflow = buildAceStepWorkflow({ model: ace.sft ? 'sft' : 'base', tags: 'cinematic instrumental soundtrack', lyrics: '', instrumental: true, duration: 60, bpm: 120, timeSignature: '4', language: 'en', keyScale: 'C major', seed: 12345, generateAudioCodes: true, attentionBackend, gpuRouting: gpuRoutingPlan.workflow, filenamePrefix }, ace)
     } else {
       filename = 'minimax-h3-i2v-api-workflow.json'
-      workflow = buildMiniMaxWorkflow({ mode: 'text', prompt: 'Describe one continuous cinematic shot.', width, height, duration: defaults.duration, seed: 12345, steps: defaults.steps, turbo: defaults.turbo, sampler: defaults.sampler, scheduler: defaults.scheduler, experimentalSampling: defaults.experimentalSampling, refImageSize: defaults.refImageSize, loraStrength: defaults.loraStrength, attentionBackend, filenamePrefix, referenceImages: [], referenceVideos: [], referenceAudios: [] }, h3, { images: [], videos: [], audios: [] })
+      workflow = buildMiniMaxWorkflow({ mode: 'text', prompt: 'Describe one continuous cinematic shot.', width, height, duration: defaults.duration, seed: 12345, steps: defaults.steps, turbo: defaults.turbo, sampler: defaults.sampler, scheduler: defaults.scheduler, experimentalSampling: defaults.experimentalSampling, refImageSize: defaults.refImageSize, loraStrength: defaults.loraStrength, attentionBackend: h3AttentionBackend, gpuRouting: gpuRoutingPlan.workflow, solCache: settings.attentionBackend === 'sol' && settings.solCacheEnabled && solCacheNode ? { nodeType: solCacheNode, threshold: 0.1, maxSteps: 5 } : undefined, solAttention: settings.attentionBackend === 'sol' && solAttentionNode ? { nodeType: solAttentionNode, tau: settings.solAttnTau } : undefined, filenamePrefix, referenceImages: [], referenceVideos: [], referenceAudios: [] }, h3, { images: [], videos: [], audios: [] })
     }
     try {
       const saved = await window.minimax.exportWorkflowJson(filename, workflow)
-      setWorkflowExportStatus(saved ? `Saved ${filename}. It includes ${attentionBackend ? attentionBackendLabel(attentionBackend) : 'ComfyUI default attention'}.` : 'Workflow export cancelled.')
+      setWorkflowExportStatus(saved ? `Saved ${filename}. It includes ${settings.attentionBackend === 'sol' && solAttentionNode && (workflowKind === 'ref2va' || workflowKind === 'h3-i2v') ? 'NVIDIA Sol-Attn' : attentionBackend ? attentionBackendLabel(attentionBackend) : 'ComfyUI default attention'}.` : 'Workflow export cancelled.')
     } catch (error) {
       setWorkflowExportStatus(error instanceof Error ? `Could not export workflow: ${error.message}` : 'Could not export workflow.')
     }
   }
-  return <div className="standard-page settings-page"><div className="page-heading"><div><p className="eyebrow">APPLICATION</p><h1>Settings</h1><p>Organize your local engine, models, workspace scale, and output tools.</p></div><button className="primary-button" onClick={onSave}><Save size={17} />Save settings</button></div>
+  const routingRows: Array<{ key: RoutingComponent; setting: 'diffusion' | 'textEncoder' | 'videoVae' | 'audioVae' | 'previewVae'; label: string }> = [{ key: 'diffusion', setting: 'diffusion', label: 'Diffusion Model' }, { key: 'textEncoder', setting: 'textEncoder', label: 'Text Encoder' }, { key: 'videoVae', setting: 'videoVae', label: 'Video VAE' }, { key: 'audioVae', setting: 'audioVae', label: 'Audio VAE' }, { key: 'previewVae', setting: 'previewVae', label: 'Preview VAE' }]
+  return <div className="standard-page settings-page"><div className="page-heading"><div><p className="eyebrow">APPLICATION</p><h1>Settings</h1><p>Organize your local engine, models, workspace scale, and output tools. Changes are saved automatically; this button also rescans models and refreshes connections.</p></div><button className="primary-button" onClick={onSave}><Save size={17} />Save & refresh</button></div>
     <div className="settings-layout"><aside className="settings-sidebar" aria-label="Settings sections"><span>SETTINGS</span>{settingsSections.map(([id, label]) => <button key={id} type="button" className={activeSettingsSection === id ? 'active' : ''} onClick={() => openSettingsSection(id)}>{label}</button>)}</aside><div className="settings-content">
     <section className="settings-section settings-display-section" id="settings-display"><div className="settings-heading"><div><SlidersHorizontal size={19} /><span><strong>Display & access</strong><small>Make the workspace comfortable at your screen resolution and text size.</small></span></div><output>{settings.uiScale}%</output></div><div className="ui-scale-control"><div><label htmlFor="ui-scale">Interface scale</label><small>Changes the entire application immediately. The choice is saved with your local settings.</small></div><div><input id="ui-scale" type="range" min="75" max="150" step="5" value={settings.uiScale} onChange={(event) => { const uiScale = Number(event.target.value); setSettings({ ...settings, uiScale }); void window.minimax.setUiScale(uiScale / 100) }} /><div><button type="button" className="secondary-button" onClick={() => { setSettings({ ...settings, uiScale: 100 }); void window.minimax.setUiScale(1) }}>Reset to 100%</button><strong>{settings.uiScale}%</strong></div></div></div></section>
     <section className="settings-section" id="settings-engine"><div className="settings-heading"><div><Activity size={19} /><span><strong>ComfyUI engine</strong><small>The desktop app communicates only with this local address.</small></span></div><span className={`health-pill ${status.connected ? 'online' : ''}`}>{status.connected ? 'Connected' : 'Offline'}</span></div><div className="connection-row"><div className="field-group grow"><label htmlFor="comfy-url">Server URL</label><input id="comfy-url" value={settings.comfyUrl} onChange={(event) => setSettings({ ...settings, comfyUrl: event.target.value })} /></div><button className="secondary-button test-button" onClick={onCheck} disabled={checking}>{checking ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}Test connection</button></div>{status.connected && status.stats?.devices?.[0] && <div className="device-strip"><Gauge size={17} /><span><strong>{status.stats.devices[0].name ?? 'Compute device'}</strong><small>{status.stats.devices[0].vram_total ? `${formatBytes(status.stats.devices[0].vram_total)} VRAM · ${formatBytes(status.stats.devices[0].vram_free ?? 0)} free` : 'ComfyUI device detected'}</small></span></div>}</section>
+    <section className="settings-section gpu-routing-section" id="settings-routing"><div className="settings-heading"><div><Gauge size={19} /><span><strong>GPU Routing</strong><small>Place whole model components on independent devices; VAEs are never split.</small></span></div><span className={`health-pill ${gpuRoutingPlan.warnings.length ? '' : 'online'}`}>{gpuRoutingPlan.warnings.length ? 'Fallback active' : 'Ready'}</span></div>
+      <div className="gpu-routing-presets"><SelectField label="Routing preset" value={settings.gpuRouting.preset} onChange={(preset) => updateGpuRouting({ preset: preset as AppSettings['gpuRouting']['preset'] })} options={[["automatic", 'Automatic'], ["single", 'Single GPU'], ["split", 'Diffusion GPU 0 / VAE GPU 1'], ["custom", 'Custom']]} /><SelectField label="Residency strategy" value={gpuRoutingPlan.workflow.strategy} onChange={(strategy) => updateGpuRouting({ strategy: strategy as AppSettings['gpuRouting']['strategy'] })} options={[["resident", 'Keep Resident'], ["sequential", 'Sequential Offload'], ["cpu-fallback", 'CPU Fallback']]} /></div>
+      <div className="gpu-inventory">{routingGpuList.length ? routingGpuList.map((device) => <article key={device.index}><span className="status-dot" /><div><strong>GPU {device.index} — {device.name}</strong><small>{formatGiB(device.totalBytes)} total · {formatGiB(device.usedBytes)} used · {formatGiB(device.freeBytes)} free</small></div><em>{device.totalBytes ? Math.round(device.usedBytes / device.totalBytes * 100) : 0}%</em></article>) : <p className="settings-warning"><AlertCircle size={15} />No CUDA GPUs were reported. Refresh the engine; routing remains Auto.</p>}</div>
+      {routingGpuList.length > (status.stats?.devices?.filter((device) => /cuda/i.test(`${device.type ?? ''} ${device.name ?? ''}`)).length ?? 0) && <p className="settings-note">Additional CUDA GPUs are available through NVIDIA telemetry. ComfyUI’s <code>/system_stats</code> endpoint currently reports only its primary device; use a device-aware loader and the placement diagnostic before relying on a secondary target.</p>}
+      <details className="runtime-capability-panel" open><summary><span><strong>Runtime capability gate</strong><small>Only routes components through device nodes this ComfyUI server has advertised.</small></span><em>{routingCapabilities.filter((item) => item.node).length}/4 detected</em></summary><div className="runtime-capability-list">{routingCapabilities.map((item) => <div key={item.label} className={item.node ? 'ready' : 'missing'}><span className="routing-status" /><div><strong>{item.label}</strong><small>{item.node ? `${item.node} detected · ${item.cpu ? 'GPU and CPU placement available' : item.label.includes('VAE') ? 'GPU targets only in ComfyUI core' : 'GPU placement available'}` : 'No compatible device-aware node advertised; remains on ComfyUI default.'}</small></div><em>{item.node ?? 'Unavailable'}</em></div>)}</div><div className="runtime-launch-report"><span><strong>ComfyUI memory policy</strong><small>{runtimeMemoryPolicy}{status.stats?.system?.pytorch_version ? ` · PyTorch ${status.stats.system.pytorch_version}` : ''}</small></span><span><strong>Dynamic VRAM</strong><small>{!runtimeArgs.length ? 'Not reported by this server' : hasRuntimeArg('--disable-dynamic-vram') ? 'Disabled by launch flag' : 'Not disabled by launch flag'}</small></span><span><strong>Async offload</strong><small>{!runtimeArgs.length ? 'Not reported by this server' : hasRuntimeArg('--disable-async-offload') ? 'Disabled by launch flag' : 'No disabling flag reported'}</small></span></div><p className="field-help">A detected selector means the graph can request placement, not that a render succeeded there. Run the placement diagnostic after changing a GPU, driver, ComfyUI build, or custom node. Core <code>SelectVAEDevice</code> supports another GPU but intentionally does not support CPU; CPU VAE requires <code>VAELoaderMultiGPU</code>.</p></details>
+      <div className="gpu-routing-grid">{routingRows.map((row) => { const placement = gpuRoutingPlan.placements[row.key]; const selected = settings.gpuRouting[row.setting] ?? 'auto'; return <div className="gpu-routing-row" key={row.key}><span className={`routing-status ${placement.status}`} title={placement.note ?? placement.status} /><SelectField label={row.label} value={settings.gpuRouting.preset === 'custom' ? selected : placement.resolved} disabled={settings.gpuRouting.preset !== 'custom'} onChange={(device) => updateGpuRouting({ preset: 'custom', [row.setting]: device })} options={gpuDeviceOptions} /><small>{placement.resolved === 'auto' ? 'Resolved: ComfyUI default' : `Resolved: ${placement.resolved === 'cpu' ? 'CPU' : `cuda:${placement.resolved.slice(4)}`} · ${placement.route?.nodeType ?? 'fallback'}`}</small></div> })}</div>
+      <div className="gpu-routing-summary"><strong>{gpuRoutingPlan.summary}</strong><small>{gpuRoutingPlan.workflow.strategy === 'sequential' ? 'Text encoding runs before decode; compatible MultiGPU loaders offload to CPU between component stages.' : gpuRoutingPlan.workflow.strategy === 'cpu-fallback' ? 'Unsupported or memory-constrained automatic placements fall back safely instead of claiming a GPU assignment.' : 'Components remain resident until ComfyUI releases them.'}</small></div>
+      {gpuRoutingPlan.warnings.map((warning) => <p className="settings-warning" key={warning}><AlertCircle size={15} />{warning}</p>)}
+      {gpuRoutingPlan.vramWarnings.map((warning) => <p className="settings-warning" key={warning}><AlertCircle size={15} />{warning}</p>)}
+      <label className="settings-check"><input type="checkbox" checked={settings.gpuRouting.allowOvercommit} onChange={(event) => updateGpuRouting({ allowOvercommit: event.target.checked })} /><span><strong>Allow render despite VRAM estimate</strong><small>Required to continue when routed component estimates exceed currently free VRAM. ComfyUI may still offload or reject the job.</small></span></label>
+      <div className="diagnostic-action"><span><strong>Placement diagnostic</strong><small>Queues a two-second H3 render through every selected loader and full Video/Audio VAE decode.</small></span><button className="secondary-button" disabled={!status.connected || !h3Report.ready} onClick={() => void testGpuRouting()}><Activity size={15} />Test GPU Routing</button></div>{gpuDiagnosticStatus && <p className="settings-note" role="status">{gpuDiagnosticStatus}</p>}
+      <p className="settings-note">Uses current ComfyUI core Select Device nodes when available, or <a href="https://github.com/pollockjj/ComfyUI-MultiGPU" target="_blank" rel="noreferrer">ComfyUI-MultiGPU</a> device-aware loaders. CPU VAE routing requires the latter because ComfyUI’s native VAE selector intentionally rejects CPU.</p>
+    </section>
     <section className="settings-section performance-settings" id="settings-performance"><div className="settings-heading"><div><Gauge size={19} /><span><strong>Render performance</strong><small>Global attention acceleration. The selected backend is applied to every compatible new H3, Ref2VA, LTX, and ACE-Step graph.</small></span></div><span className={`health-pill ${selectedAttention ? 'online' : ''}`}>{selectedAttention ? 'Ready' : 'Setup needed'}</span></div><fieldset className="attention-backend-picker"><legend>Attention backend</legend><label className={settings.attentionBackend === 'automatic' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'automatic'} onChange={() => setSettings({ ...settings, attentionBackend: 'automatic' })} /><span><strong>Automatic</strong><small>{kitchenAttention ? `Uses ${kitchenAttention} when detected, then SageAttention, then native.` : sageAttention ? `Uses ${sageAttention} when detected, then native.` : 'Uses the native backend until an accelerated backend is detected.'}</small></span></label><label className={settings.attentionBackend === 'kitchen' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'kitchen'} onChange={() => setSettings({ ...settings, attentionBackend: 'kitchen' })} /><span><strong>Kitchen INT8</strong><small>{kitchenAttention ? `Detected: ${kitchenAttention}` : 'Not detected — the graph will safely use native attention.'}</small></span></label><label className={settings.attentionBackend === 'sage' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'sage'} onChange={() => setSettings({ ...settings, attentionBackend: 'sage' })} /><span><strong>SageAttention</strong><small>{sageAttention ? `Detected: ${sageAttention}` : 'Requires SageAttention to be enabled by the running ComfyUI environment.'}</small></span></label><label className={settings.attentionBackend === 'native' ? 'selected' : ''}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'native'} onChange={() => setSettings({ ...settings, attentionBackend: 'native' })} /><span><strong>Native</strong><small>{nativeAttention ? `Detected: ${nativeAttention}` : 'Use ComfyUI’s standard attention implementation.'}</small></span></label></fieldset><label className="settings-check"><input type="checkbox" checked={settings.h3ParallelAttentionEnabled} disabled={!h3ParallelAttentionNode || !kitchenAttention} onChange={(event) => setSettings({ ...settings, h3ParallelAttentionEnabled: event.target.checked, attentionBackend: event.target.checked ? 'kitchen' : settings.attentionBackend })} /><span><strong>Accelerate one H3 Ref2VA render across GPUs</strong><small>{h3ParallelAttentionNode && kitchenAttention ? `Ready to use ${h3ParallelAttentionNode} with Kitchen INT8. The node verifies peer access and uses up to four visible GPUs automatically.` : 'Requires the H3 Parallel custom node and a detected Kitchen INT8 attention backend. Until both are detected, the normal single-GPU graph is used.'}</small></span></label><div className="settings-note"><strong>H3 Parallel setup</strong><br />1. In ComfyUI Manager choose <em>Install via Git URL</em> and enter <code>https://github.com/AesSedai/ComfyUI-MiniMaxH3-Parallel.git</code>.<br />2. Install or update <code>comfy-kitchen</code> (0.2.31+), then launch the one ComfyUI process with <code>--use-ck-attention</code> and expose 2–4 NVIDIA GPUs, for example <code>CUDA_VISIBLE_DEVICES=0,1 python main.py --use-ck-attention</code>.<br />3. Restart ComfyUI and Test connection. Enable this option only after the Parallel node and Kitchen INT8 show as ready. It applies only to new H3 Ref2VA video renders; it does not combine with SageAttention or Torch Compile.</div>{!attentionBackends.length && <p className="settings-warning"><AlertCircle size={15} />This ComfyUI server does not report <code>ModelAttentionBackend</code> yet. Update/restart ComfyUI Desktop, then test the connection again. No acceleration graph is sent until it is detected.</p>}</section>
+    <section className="settings-section attention-benchmark-section" id="settings-benchmark"><div className="settings-heading"><div><Clock3 size={19} /><span><strong>Attention benchmark</strong><small>Runs one standardized text-to-video Turbo 8 clip through Kitchen INT8, SageAttention, and Sol-Attn.</small></span></div><span className={`health-pill ${benchmarkWinner ? 'online' : ''}`}>{benchmarkWinner ? 'Measured' : 'Not run'}</span></div><div className="benchmark-controls"><label><span>Clip duration</span><div><input type="number" min="1" max="60" step="1" disabled={benchmarkRunning} value={benchmarkConfig.duration} onChange={(event) => setBenchmarkConfig({ ...benchmarkConfig, duration: Math.max(1, Math.min(60, Math.round(Number(event.target.value) || 1))) })} /><small>seconds</small></div></label><label><span>Resolution</span><select disabled={benchmarkRunning} value={benchmarkConfig.resolution} onChange={(event) => setBenchmarkConfig({ ...benchmarkConfig, resolution: event.target.value })}>{MINIMAX_VIDEO_RESOLUTIONS.map((resolution) => <option key={resolution} value={resolution}>{resolution.replace('x', ' × ')}</option>)}</select></label></div><div className="diagnostic-action"><span><strong>PC-specific recommendation</strong><small>{benchmarkConfig.resolution.replace('x', ' × ')} · {benchmarkConfig.duration} seconds · 8 steps · fixed seed · identical prompt and model stack. Timing includes queue submission through completed video output.</small></span><button type="button" className="primary-button" disabled={benchmarkRunning || !status.connected || !h3Report.ready} onClick={onRunBenchmark}>{benchmarkRunning ? <LoaderCircle className="spin" size={15} /> : <Clock3 size={15} />}{benchmarkRunning ? 'Benchmark running…' : 'Run benchmark'}</button></div>{benchmarkResults.length > 0 && <div className="benchmark-results" aria-live="polite">{benchmarkResults.map((result) => <div className="benchmark-result-row" key={result.backend}><div><strong>{result.label}</strong><small>{result.status === 'completed' ? `Total ${formatBenchmarkDuration(result.elapsedMs)} · active render ${formatBenchmarkDuration(result.renderMs)}` : result.status === 'running' ? 'Rendering now…' : result.status === 'unavailable' ? 'Unavailable' : result.status === 'failed' ? 'Failed' : 'Waiting'}</small></div><span className={`health-pill ${result.status === 'completed' ? 'online' : ''}`}>{result.status === 'completed' ? formatBenchmarkDuration(result.elapsedMs) : result.status === 'running' ? <LoaderCircle className="spin" size={13} /> : result.status}</span>{result.error && result.status !== 'unavailable' && <small className="field-help">{result.error}</small>}</div>)}</div>}{benchmarkWinner && <div className="settings-note benchmark-recommendation"><strong>Recommendation for {benchmarkMachine}:</strong> use <strong>{benchmarkWinner.label}</strong> for H3 text-to-video. It completed the {benchmarkConfig.duration}-second {benchmarkConfig.resolution.replace('x', ' × ')} clip in {formatBenchmarkDuration(benchmarkWinner.elapsedMs)} total ({formatBenchmarkDuration(benchmarkWinner.renderMs)} active render). Re-run after changing models, GPU routing, ComfyUI launch flags, or driver versions.</div>}</section>
     <section className="settings-section workflow-export-section" id="settings-workflows"><div className="settings-heading"><div><Save size={19} /><span><strong>ComfyUI workflow export</strong><small>Save an API-format workflow for queueing directly in ComfyUI. It uses your indexed model filenames and selected attention backend.</small></span></div></div><div className="workflow-export-controls"><label>Workflow template<select value={workflowKind} onChange={(event) => setWorkflowKind(event.target.value as typeof workflowKind)}><option value="h3-i2v">MiniMax H3 image / text to video</option><option value="ref2va">MiniMax H3 Ref2VA</option><option value="ltx">LTX 2.5 video</option><option value="zimage">Z-Image still</option><option value="acestep">ACE-Step 1.5 audio</option></select></label><button type="button" className="secondary-button" onClick={() => void exportWorkflow()}><Save size={15} />Export workflow JSON</button></div><p className="field-help">Exports ComfyUI’s API prompt JSON, not a screenshot or app preset. Reference-media templates include a clear placeholder prompt; attach your own input/reference nodes in ComfyUI before queueing. {selectedAttention ? `${attentionBackendLabel(selectedAttention)} will be included as a ModelAttentionBackend node.` : 'No acceleration node is added until ComfyUI reports a compatible backend.'}</p>{workflowExportStatus && <p className="settings-note workflow-export-status" role="status">{workflowExportStatus}</p>}</section>
+    <section className="settings-section sol-engine-settings" aria-labelledby="sol-engine-title">
+      <div className="settings-heading"><div><Gauge size={19} /><span><strong id="sol-engine-title">NVIDIA Sol Engine</strong><small>H3-only sparse video attention through ComfyUI.</small></span></div><span className={`health-pill ${solAttentionNode ? 'online' : ''}`}>{solAttentionNode ? 'Detected' : 'Install node'}</span></div>
+      <label className={`settings-check ${settings.attentionBackend === 'sol' ? 'selected' : ''}`}><input type="radio" name="attention-backend" checked={settings.attentionBackend === 'sol'} disabled={!solAttentionNode} onChange={() => setSettings({ ...settings, attentionBackend: 'sol', h3ParallelAttentionEnabled: false })} /><span><strong>Use Sol-Attn for MiniMax H3 video</strong><small>{solAttentionNode ? `Ready through ${solAttentionNode}. H3 and Ref2VA use Sol exclusively; LTX, Z-Image, and ACE-Step use ${kitchenAttention ?? 'ComfyUI default attention'}.` : 'Install ComfyUI-SolAttn-H3, restart ComfyUI, then Test connection.'}</small></span></label>
+      <fieldset className="attention-backend-picker h3-precision-picker"><legend>H3 diffusion weight format</legend><label className={settings.h3DiffusionPrecision === 'int8' ? 'selected' : ''}><input type="radio" name="h3-diffusion-precision" checked={settings.h3DiffusionPrecision === 'int8'} onChange={() => setSettings({ ...settings, h3DiffusionPrecision: 'int8' })} /><span><strong>INT8 ConvRot</strong><small>Recommended for this RTX 3090 · native CUDA 13 path · best current speed/quality balance.</small></span></label><label className={settings.h3DiffusionPrecision === 'nvfp4' ? 'selected' : ''}><input type="radio" name="h3-diffusion-precision" checked={settings.h3DiffusionPrecision === 'nvfp4'} onChange={() => setSettings({ ...settings, h3DiffusionPrecision: 'nvfp4' })} /><span><strong>NVFP4 · experimental</strong><small>{nvfp4DiffusionReady ? 'FL2VA and Ref2VA detected. New H3, Sol, and Turbo 8 workflows will use them.' : `Install ${!nvfp4Fl2vaInstalled && !nvfp4Ref2vaInstalled ? 'both diffusion files' : !nvfp4Fl2vaInstalled ? 'FL2VA' : 'Ref2VA'}. Until then, the app falls back to the installed INT8 pair.`}</small></span></label></fieldset>
+      <div className="settings-note nvfp4-download-panel"><strong>NVFP4 downloads</strong><p>The diffusion conversions are community files. Native NVFP4 diffusion execution targets Blackwell GPUs; an RTX 3090 emulates it and may be slower or show more artifacts than INT8 ConvRot.</p><div><a className="secondary-button" href="https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4/resolve/main/minimax_h3_fl2va_pruned_nvfp4.safetensors?download=true" target="_blank" rel="noreferrer"><Download size={14} />FL2VA NVFP4 · 12.5 GB</a><a className="secondary-button" href="https://huggingface.co/lilcheaty/MiniMax-H3-NVFP4/resolve/main/minimax_h3_ref2va_pruned_nvfp4.safetensors?download=true" target="_blank" rel="noreferrer"><Download size={14} />Ref2VA NVFP4 · 12.5 GB</a><a className="secondary-button" href="https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors?download=true" target="_blank" rel="noreferrer"><Download size={14} />Official text encoder · 15.7 GB</a></div><small>Put FL2VA and Ref2VA in <code>ComfyUI/models/diffusion_models</code>; put the Qwen text encoder in <code>ComfyUI/models/text_encoders</code>. Restart or rescan models afterward.</small></div>
+      <div className="field-group"><label htmlFor="sol-attn-tau">Routing threshold (tau)</label><input id="sol-attn-tau" type="number" min="-1000" max="10" step="0.05" value={settings.solAttnTau} disabled={!solAttentionNode} onChange={(event) => setSettings({ ...settings, solAttnTau: Math.max(-1000, Math.min(10, Number(event.target.value) || 1)) })} /><p className="field-help">1.0 is NVIDIA’s validated H3 policy. Higher values compute fewer key/value blocks and may change output quality.</p></div>
+      <label className="settings-check"><input type="checkbox" checked={settings.solCacheEnabled} disabled={!solCacheNode} onChange={(event) => setSettings({ ...settings, solCacheEnabled: event.target.checked })} /><span><strong>Add NVIDIA-style cross-step cache</strong><small>{solCacheNode ? `Detected: ${solCacheNode}. Uses threshold 0.10 and at most five retained steps before Sol-Attn.` : 'Install the compatible ComfyUI-MiniMaxH3-Cache node. Other cache families are not auto-substituted because their hooks can conflict with Sol.'}</small></span></label>
+      <div className={`sol-runtime-panel ${solRuntimeDiagnostics.state}`}><div><strong>Sol runtime diagnostics</strong><span>{solRuntimeLabel(solRuntimeDiagnostics)}</span></div><small>Policy: tau 1.0 · diag · 20% dense warmup · first 2 dense layers · prefix sink · correctness gate · KV splits 1. SageAttention is the launch-level dense fallback; no Sage patch node is added to Sol graphs.</small><div className="sol-runtime-metrics"><span>Backend {solRuntimeDiagnostics.backend ?? 'awaiting runtime log'}</span><span>Sparse {solRuntimeDiagnostics.sparseCalls ?? '—'}</span><span>Dense {solRuntimeDiagnostics.denseCalls ?? '—'}</span><span>Density {solRuntimeDiagnostics.density ?? '—'}</span><span>Seq {solRuntimeDiagnostics.sequenceLength?.toLocaleString() ?? '—'}</span><span>Gate {solRuntimeDiagnostics.correctnessGate ?? '—'}</span></div></div>
+      <div className="settings-note"><strong>ComfyUI setup required</strong><br />ComfyUI Desktop uses a managed Python environment. Install both the custom node and NVIDIA kernel there, then restart and test the connection.</div>
+      <div className="sol-engine-actions"><button type="button" className="secondary-button sol-guide-button" onClick={() => setSolGuideOpen(true)}>How to install Sol-Attn</button><button type="button" className="primary-button" disabled={!status.connected || !solAttentionNode || !h3Report.ready} onClick={() => void testSolEngine()}>{!status.connected ? 'Connect ComfyUI to test' : 'Test Sol Engine'}</button></div>
+      {solTestStatus && <p className={`settings-note ${solTestStatus.startsWith('Sol test failed') ? 'error' : ''}`} role="status">{solTestStatus}</p>}
+    </section>
     <section className="settings-section h3-stack-section" id="settings-h3">
       <div className="settings-heading"><div><Gauge size={19} /><span><strong>H3 engine stack</strong><small>Compares the selected files with the validated official ComfyUI stack.</small></span></div><span className={`health-pill ${h3Report.validated ? 'online' : ''}`}>{h3Report.validated ? 'Validated' : h3Report.ready ? 'Custom' : 'Incomplete'}</span></div>
       <div className="h3-stack-list">{h3Report.rows.map((row) => <div key={row.label} className={row.validated ? 'validated' : row.optional && !row.selected ? 'optional' : 'custom'}><span>{row.validated ? <Check size={14} /> : row.optional && !row.selected ? <Minus size={14} /> : <AlertCircle size={14} />}</span><div><strong>{row.label}</strong><small title={row.selected || row.expected}>{row.selected || `${row.optional ? 'Optional' : 'Missing'} · expected ${row.expected}`}</small></div><em>{row.validated ? 'Recommended' : row.selected ? 'Non-standard' : row.optional ? 'Optional' : 'Missing'}</em></div>)}</div>
@@ -3209,7 +3540,27 @@ function SettingsView({ settings, setSettings, info, models, h3Report, scanning,
         <div><button type="button" className="secondary-button" onClick={() => { setFactoryResetOpen(false); setFactoryResetPhrase('') }}>Cancel</button><button type="submit" className="danger-button" disabled={factoryResetPhrase !== 'Reset'}>Factory reset and restart</button></div>
       </form>}
     </section>
-  </div></div></div>
+  </div></div>
+  {solGuideOpen && <div className="tips-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSolGuideOpen(false) }}>
+    <section className="tips-modal sol-guide-modal" role="dialog" aria-modal="true" aria-labelledby="sol-guide-title">
+      <header><div><span className="tips-modal-icon"><Gauge size={18} /></span><span><small>NVIDIA SOL ENGINE · WINDOWS</small><strong id="sol-guide-title">Install Sol-Attn in ComfyUI Desktop</strong><p>RTX 3090 · SM86 · Triton backend · MiniMax H3 video only</p></span></div><button type="button" className="icon-button" onClick={() => setSolGuideOpen(false)} aria-label="Close Sol setup guide"><X size={18} /></button></header>
+      <div className="tips-modal-body sol-guide-body">
+        <div className="sol-guide-callout"><AlertCircle size={16} /><p><strong>Use ComfyUI’s Python—not system Python.</strong> Your known environment is <code>C:\Users\James\Documents\ComfyUI\.venv\Scripts\python.exe</code>. The activated terminal should begin with <code>(.venv)</code>.</p></div>
+        <article><span>01</span><div><strong>Open the ComfyUI Desktop terminal</strong><p>Confirm the active interpreter and hardware:</p><pre><code>python -c "import sys; print(sys.executable)"{`\n`}python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.get_device_name())"</code></pre><p>Expected on this machine: PyTorch 2.13.0+cu130, CUDA 13.0, and NVIDIA GeForce RTX 3090.</p></div></article>
+        <article><span>02</span><div><strong>Install the ComfyUI custom node</strong><p>Use Manager → Custom Nodes Manager → Install via Git URL and paste:</p><pre><code>https://github.com/quzopl/ComfyUI-SolAttn-H3.git</code></pre><p>If Manager does not clone it, run this in the activated terminal:</p><pre><code>cd C:\Users\James\Documents\ComfyUI\custom_nodes{`\n`}git clone https://github.com/quzopl/ComfyUI-SolAttn-H3.git</code></pre></div></article>
+        <article><span>03</span><div><strong>Clone NVIDIA’s Sol Engine branch</strong><p>The sparse kernel is intentionally not bundled with the custom node:</p><pre><code>cd C:\Users\James\Documents{`\n`}git clone --branch sol-engine --depth 1 https://github.com/NVlabs/Sana.git sana-sol-engine</code></pre></div></article>
+        <article><span>04</span><div><strong>Install the kernel into ComfyUI’s environment</strong><pre><code>python -m pip install -e "C:\Users\James\Documents\sana-sol-engine\techniques\sparse_backends"</code></pre><p>For the RTX 3090, use the documented SM86 Triton path. CuTe DSL is for the newer SM89/90/100/120 paths and is not required here.</p></div></article>
+        <article><span>05</span><div><strong>Install the compatible H3 cross-step cache</strong><pre><code>cd C:\Users\James\Documents\ComfyUI\custom_nodes{`\n`}git clone https://github.com/lihaoyun6/ComfyUI-MiniMaxH3-Cache.git</code></pre><p>This is the cache implementation explicitly exercised with the Sol-Attn port. The app uses threshold 0.10 and max_steps 5, matching the practical NVIDIA fullopt cache policy. Do not stack EasyCache, FirstBlockCache, CacheDiT, Spectrum, or another cache on the same H3 model path.</p></div></article>
+        <article><span>06</span><div><strong>Verify Triton and run the self-test</strong><pre><code>python -c "import triton; print('Triton:', triton.__version__)"{`\n`}python "C:\Users\James\Documents\ComfyUI\custom_nodes\ComfyUI-SolAttn-H3\selftest.py"</code></pre><p>Look for RTX 3090, SM86, <code>backend=triton</code>, and <code>correctness gate PASS</code>. Do not enable Sol if the correctness gate fails.</p></div></article>
+        <article><span>07</span><div><strong>Restart and detect the stack</strong><p>Fully quit and reopen ComfyUI Desktop, return here, and choose <strong>Test connection</strong>. This panel should detect both <code>SolAttnH3</code> and <code>MiniMaxH3Cache</code>. The app chains the official Turbo LoRA, cache, and Sol-Attn before sampling.</p></div></article>
+        <article><span>08</span><div><strong>Benchmark before committing</strong><p>Sol is not guaranteed to beat SageAttention on every 3090 workload. Compare Native, SageAttention, Sol, and Sol + cache with the same model, prompt, seed, resolution, frames, steps, and references. Test the official eight-step LoRA separately from 20–50-step quality runs because fewer steps leave less cache reuse.</p></div></article>
+        <div className="sol-guide-callout"><AlertCircle size={16} /><p><strong>Fullopt boundary:</strong> NVIDIA’s regional torch.compile kernels and resident BF16 VAE belong to its standalone Modular Diffusers runtime and are not safely exposed by the current ComfyUI Sol node. The Sol node itself documents a graph break under torch.compile. This app does not claim or enable those two optimizations until a compatible ComfyUI node reports them.</p></div>
+        <div className="sol-guide-callout success"><Check size={16} /><p><strong>Recommended settings:</strong> tau 1.0, diag threshold, 20% dense warmup, two dense layers, prefix sink, correctness gate on, strict off, and kv_splits 1. The app supplies these automatically.</p></div>
+      </div>
+      <footer><span><AlertCircle size={14} />Sol applies only to new MiniMax H3 and Ref2VA video workflows.</span><button type="button" className="primary-button" onClick={() => setSolGuideOpen(false)}>Done</button></footer>
+    </section>
+  </div>}
+  </div>
 }
 
 export default App

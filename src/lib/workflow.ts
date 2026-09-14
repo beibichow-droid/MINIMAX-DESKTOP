@@ -1,7 +1,21 @@
-import type { GenerationOptions, ModelSelection, UploadedFile } from '../types'
+import type { GenerationOptions, ModelSelection, UploadedFile, WorkflowComponentRoute } from '../types'
 import { compileScene } from './h3SceneCompiler'
+import { routingDeviceForNode } from './gpuRouting'
 
 type Link = [string, number]
+
+export function addRoutedLoader(prompt: ComfyPrompt, id: string, baseNodeType: string, inputs: Record<string, string | number | boolean | Link>, route?: WorkflowComponentRoute, selectorId = `${id}99`): Link {
+  if (route?.method === 'loader') {
+    prompt[id] = { class_type: route.nodeType, inputs: { ...inputs, device: routingDeviceForNode(route), ...(route.offloadDevice ? { offload_device: route.offloadDevice === 'cpu' ? 'cpu' : `cuda:${route.offloadDevice.slice(4)}` } : {}) } }
+    return [id, 0]
+  }
+  prompt[id] = { class_type: baseNodeType, inputs }
+  if (route?.method === 'selector') {
+    prompt[selectorId] = { class_type: route.nodeType, inputs: { [baseNodeType === 'UNETLoader' ? 'model' : baseNodeType.includes('CLIP') ? 'clip' : 'vae']: [id, 0], device: routingDeviceForNode(route) } }
+    return [selectorId, 0]
+  }
+  return [id, 0]
+}
 type ComfyNode = { class_type: string; inputs: Record<string, string | number | boolean | Link> }
 export type ComfyPrompt = Record<string, ComfyNode>
 
@@ -62,14 +76,12 @@ export function buildMiniMaxWorkflow(
     if (options.mode === 'reference' && Object.entries(counts).some(([kind, count]) => scene.references.filter(ref => ref.file.kind === kind).length !== count)) throw new Error('Reference upload order/count differs from the compiled scene.')
     if (options.mode !== 'reference' && (Boolean(uploads.first) !== scene.references.some(ref => ref.anchor === 'opening') || Boolean(uploads.last) !== scene.references.some(ref => ref.anchor === 'ending'))) throw new Error('Frame uploads differ from the compiled scene anchors.')
   }
-  const prompt: ComfyPrompt = {
-    '1': { class_type: 'UNETLoader', inputs: { unet_name: options.mode === 'reference' ? models.ref2va : models.fl2va, weight_dtype: 'default' } },
-    '2': { class_type: 'CLIPLoader', inputs: { clip_name: models.textEncoder, type: 'minimax', device: 'default' } },
-    '3': { class_type: 'VAELoader', inputs: { vae_name: models.videoVae } },
-    '4': { class_type: 'VAELoader', inputs: { vae_name: models.audioVae } },
-  }
-
-  let modelLink: Link = ['1', 0]
+  const prompt: ComfyPrompt = {}
+  const routed = options.gpuRouting
+  let modelLink = addRoutedLoader(prompt, '1', 'UNETLoader', { unet_name: options.mode === 'reference' ? models.ref2va : models.fl2va, weight_dtype: 'default' }, routed?.diffusion, '801')
+  const clipLink = addRoutedLoader(prompt, '2', 'CLIPLoader', { clip_name: models.textEncoder, type: 'minimax', device: 'default' }, routed?.textEncoder, '802')
+  const videoVaeLink = addRoutedLoader(prompt, '3', 'VAELoader', { vae_name: models.videoVae }, routed?.videoVae, '803')
+  const audioVaeLink = addRoutedLoader(prompt, '4', 'VAELoader', { vae_name: models.audioVae }, routed?.audioVae, '804')
   const loraName = options.mode === 'reference' ? models.ref2vLora : models.fl2vLora
   if (options.turbo !== 'off' && loraName) {
     prompt['5'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: loraName, strength_model: options.loraStrength ?? 1 } }
@@ -83,11 +95,25 @@ export function buildMiniMaxWorkflow(
     prompt[id] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: lora.name, strength_model: lora.strength } }
     modelLink = [id, 0]
   })
+  // The cache implementation validated by the Sol-Attn port patches H3's
+  // block_loop, while Sol stamps individual double_block calls. Applying the
+  // cache first preserves both hooks and mirrors NVIDIA's cache-before-sparse
+  // fullopt stack. Other cache node families are intentionally not substituted.
+  if (options.solCache) {
+    prompt['83'] = { class_type: options.solCache.nodeType, inputs: { model: modelLink, resuse_threshold: options.solCache.threshold, start_percent: 0.15, end_percent: 0.9, max_steps: options.solCache.maxSteps, device: 'auto', verbose: false } }
+    modelLink = ['83', 0]
+  }
+  // Sol-Attn is an H3-specific patch, separate from ComfyUI's generic
+  // ModelAttentionBackend. Keep NVIDIA's validated policy defaults here.
+  if (options.solAttention) {
+    prompt['84'] = { class_type: options.solAttention.nodeType, inputs: { model: modelLink, enabled: true, tau: options.solAttention.tau, thresh_type: 'diag', first_dense_steps: 0.2, first_dense_layers: 2, sink_mode: 'prefix', correctness_gate: true, strict: false, kv_splits: 1 } }
+    modelLink = ['84', 0]
+  }
   // ModelAttentionBackend is a native ComfyUI model patch. It changes only the
   // H3 model in this graph, so global server settings and unrelated workflows
   // are left untouched. ComfyUI itself falls back when a requested backend is
   // no longer available after an update.
-  if (options.attentionBackend) {
+  if (options.attentionBackend && !options.solAttention) {
     prompt['85'] = { class_type: 'ModelAttentionBackend', inputs: { model: modelLink, attention: options.attentionBackend } }
     modelLink = ['85', 0]
   }
@@ -118,6 +144,7 @@ export function buildMiniMaxWorkflow(
         // This is the tiny per-step RGB decoder from models/vae_approx, not the
         // full MiniMax video VAE used by the final decode branch.
         vae_name: options.previewOverride.vaeName ?? models.previewVae,
+        ...(routed?.previewVae?.method === 'inline' ? { device: routingDeviceForNode(routed.previewVae) } : {}),
         jpeg_quality: options.previewOverride.jpegQuality ?? 85,
         suppress_default_preview: true,
       },
@@ -126,8 +153,8 @@ export function buildMiniMaxWorkflow(
   }
 
   const conditioningInputs: Record<string, string | number | boolean | Link> = {
-    clip: ['2', 0],
-    vae: ['3', 0],
+    clip: clipLink,
+    vae: videoVaeLink,
     prompt: compiled?.prompt ?? options.prompt,
     width: options.width,
     height: options.height,
@@ -135,7 +162,7 @@ export function buildMiniMaxWorkflow(
   }
 
   if (options.mode === 'reference') {
-    conditioningInputs.audio_vae = ['4', 0]
+    conditioningInputs.audio_vae = audioVaeLink
     conditioningInputs.ref_image_size = options.refImageSize
     uploads.images.forEach((file, index) => {
       const link = addLoader(prompt, `30${index}`, 'image', uploadedName(file))
@@ -165,7 +192,7 @@ export function buildMiniMaxWorkflow(
     scene.references.filter(ref => ref.file.kind === 'image').forEach((ref, index) => {
       if (!ref.anchor) return
       const id = `60${index}`
-      prompt[id] = { class_type: 'MiniMaxH3AddGuide', inputs: { positive, latent: ['10', 1], vae: ['3', 0], image: [`30${index}`, 0], frame_idx: ref.anchor === 'ending' ? -1 : ref.anchor === 'keyframe' ? Math.round((ref.anchorTime || 0) * 24) : 0 } }
+      prompt[id] = { class_type: 'MiniMaxH3AddGuide', inputs: { positive, latent: ['10', 1], vae: videoVaeLink, image: [`30${index}`, 0], frame_idx: ref.anchor === 'ending' ? -1 : ref.anchor === 'keyframe' ? Math.round((ref.anchorTime || 0) * 24) : 0 } }
       positive = [id, 0]
     })
   }
@@ -190,8 +217,8 @@ export function buildMiniMaxWorkflow(
     class_type: 'SamplerCustomAdvanced',
     inputs: { noise: ['11', 0], guider: ['12', 0], sampler: ['13', 0], sigmas: ['14', 0], latent_image: ['10', 1] },
   }
-  prompt['16'] = { class_type: 'VAEDecode', inputs: { samples: ['15', 0], vae: ['3', 0] } }
-  prompt['17'] = { class_type: 'VAEDecodeAudio', inputs: { samples: ['15', 0], vae: ['4', 0] } }
+  prompt['16'] = { class_type: 'VAEDecode', inputs: { samples: ['15', 0], vae: videoVaeLink } }
+  prompt['17'] = { class_type: 'VAEDecodeAudio', inputs: { samples: ['15', 0], vae: audioVaeLink } }
   prompt['18'] = {
     class_type: 'CreateVideo',
     inputs: { images: ['16', 0], audio: ['17', 0], fps: 24, bit_depth: 8, color_space: 'sRGB' },
@@ -221,8 +248,8 @@ export function buildMiniMaxWorkflow(
     prompt['112'] = { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: ['111', 0], audio_latent: ['110', 1] } }
     // Keep nodes 16/71 as the first-pass preview branch. The final video is
     // decoded only from the learned-upscaled latent, after the preview node.
-    prompt['113'] = { class_type: 'VAEDecode', inputs: { samples: ['112', 0], vae: ['3', 0] } }
-    prompt['114'] = { class_type: 'VAEDecodeAudio', inputs: { samples: ['112', 0], vae: ['4', 0] } }
+    prompt['113'] = { class_type: 'VAEDecode', inputs: { samples: ['112', 0], vae: videoVaeLink } }
+    prompt['114'] = { class_type: 'VAEDecodeAudio', inputs: { samples: ['112', 0], vae: audioVaeLink } }
     prompt['18'] = { class_type: 'CreateVideo', inputs: { images: ['113', 0], audio: ['114', 0], fps: 24, bit_depth: 8, color_space: 'sRGB' } }
     prompt['19'] = { class_type: 'SaveVideo', inputs: { video: ['18', 0], filename_prefix: `${options.filenamePrefix}_H3_Latent_1_5x`, format: 'auto', codec: 'auto' } }
   } else if (options.upscale?.type === 'ltx') {
@@ -303,7 +330,10 @@ export function extractOutputFile(history: Record<string, unknown>, promptId: st
   else if (entry.outputs['70']) visit(entry.outputs['70'])
   else visit(entry.outputs)
   const expected = mediaType === 'audio' ? /\.(flac|wav|mp3|ogg|m4a|aac|opus)$/i : mediaType === 'image' ? /\.(png|jpe?g|webp)$/i : /\.(mp4|webm|mov|mkv|gif)$/i
-  return candidates.find((candidate) => expected.test(candidate.filename)) ?? candidates[0]
+  // Do not fall through to an arbitrary output. In particular, a SaveVideo
+  // MP4 must never enter the still-image download path, where ComfyUI/Pillow
+  // quite correctly rejects it as an image.
+  return candidates.find((candidate) => expected.test(candidate.filename))
 }
 
 export function extractOutputUrl(history: Record<string, unknown>, promptId: string, comfyUrl: string, mediaType: 'video' | 'audio' | 'image' = 'video') {

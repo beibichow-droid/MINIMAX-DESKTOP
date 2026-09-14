@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('minimax', {
   extractClipMasterFrames: (source: string, frames: unknown[], outputDirectory: string, ffmpegPath: string, sourceName: string) => ipcRenderer.invoke('clip-master:frames', source, frames, outputDirectory, ffmpegPath, sourceName),
   chooseClipMasterExportPath: (outputDirectory: string, sourceName: string) => ipcRenderer.invoke('clip-master:choose-export-path', outputDirectory, sourceName),
   trimClipMaster: (source: string, startFrame: number, endFrame: number, fps: number, outputPath: string, ffmpegPath: string) => ipcRenderer.invoke('clip-master:trim', source, startFrame, endFrame, fps, outputPath, ffmpegPath),
+  spliceClipMaster: (clips: unknown[], outputDirectory: string, ffmpegPath: string) => ipcRenderer.invoke('clip-master:splice', clips, outputDirectory, ffmpegPath),
   joinVideos: (clips: unknown[], outputDirectory: string, ffmpegPath: string) => ipcRenderer.invoke('video:join', clips, outputDirectory, ffmpegPath),
   getRifeStatus: () => ipcRenderer.invoke('rife:status'),
   installRife: () => ipcRenderer.invoke('rife:install'),

@@ -11,6 +11,8 @@ import { Readable } from 'node:stream'
 import WebSocket from 'ws'
 
 type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
+type GpuRouteDevice = 'auto' | 'cpu' | `gpu:${number}`
+type GpuRoutingSettings = { preset: 'automatic' | 'single' | 'split' | 'custom'; strategy: 'resident' | 'sequential' | 'cpu-fallback'; diffusion: GpuRouteDevice; textEncoder: GpuRouteDevice; videoVae: GpuRouteDevice; audioVae: GpuRouteDevice; previewVae: GpuRouteDevice; allowOvercommit: boolean }
 
 type GenerationDefaults = {
   resolution: string
@@ -55,7 +57,11 @@ type AppSettings = {
   clipMasterOutputDirectory: string
   ffmpegPath: string
   uiScale: number
-  attentionBackend: 'automatic' | 'kitchen' | 'sage' | 'native'
+  attentionBackend: 'automatic' | 'sol' | 'kitchen' | 'sage' | 'native'
+  solAttnTau: number
+  solCacheEnabled: boolean
+  h3DiffusionPrecision: 'int8' | 'nvfp4'
+  gpuRouting: GpuRoutingSettings
   h3ParallelAttentionEnabled: boolean
   experimentalLtxMsrEnabled: boolean
   blurNsfwLivePreviews: boolean
@@ -66,7 +72,8 @@ type AppSettings = {
 }
 
 type LanStatus = { running: boolean; url?: string; desktopUrl?: string; port?: number; error?: string }
-type GpuTelemetry = { available: boolean; name?: string; usagePercent?: number; vramPercent?: number; vramUsedMb?: number; vramTotalMb?: number }
+type GpuTelemetryDevice = { index: number; name: string; usagePercent: number; vramPercent: number; vramUsedMb: number; vramTotalMb: number; vramFreeMb: number }
+type GpuTelemetry = { available: boolean; name?: string; usagePercent?: number; vramPercent?: number; vramUsedMb?: number; vramTotalMb?: number; devices?: GpuTelemetryDevice[] }
 const ltxUpscaleRequiredNodes = ['VAEEncodeTiled', 'LatentUpscaleModelLoader', 'LTXVLatentUpsampler', 'VAEDecodeTiled', 'ImageFromBatch', 'RepeatImageBatch', 'ImageBatch']
 const ltxNativeRequiredNodes = ['LTXVConditioning', 'LTXVEmptyLatentAudio', 'EmptyLTXVLatentVideo', 'LTXVDualCFGGuider', 'LTXVSeparateAVLatent', 'LTXVConcatAVLatent', 'LTXVLatentUpsampler', 'LTXVAudioVAEDecode', 'ManualSigmas', 'VAEDecodeTiled', 'CLIPTextEncode', 'KSamplerSelect', 'SamplerCustomAdvanced']
 let lanToken = ''
@@ -90,11 +97,15 @@ function readGpuTelemetry(): Promise<GpuTelemetry> {
     child.on('error', () => finish({ available: false }))
     child.on('close', (code) => {
       if (code !== 0 || !output.trim()) { finish({ available: false }); return }
-      const [name = 'GPU', usage = '', used = '', total = ''] = output.trim().split(/\r?\n/, 1)[0].split(',').map((part) => part.trim())
-      const usagePercent = Number(usage)
-      const vramUsedMb = Number(used)
-      const vramTotalMb = Number(total)
-      finish({ available: true, name, usagePercent: Number.isFinite(usagePercent) ? usagePercent : undefined, vramUsedMb: Number.isFinite(vramUsedMb) ? vramUsedMb : undefined, vramTotalMb: Number.isFinite(vramTotalMb) ? vramTotalMb : undefined, vramPercent: vramTotalMb > 0 ? Math.round(vramUsedMb / vramTotalMb * 100) : undefined })
+      const devices = output.trim().split(/\r?\n/).map((line, index) => {
+        const [name = `GPU ${index}`, usage = '', used = '', total = ''] = line.split(',').map((part) => part.trim())
+        const usagePercent = Number(usage) || 0
+        const vramUsedMb = Number(used) || 0
+        const vramTotalMb = Number(total) || 0
+        return { index, name, usagePercent, vramUsedMb, vramTotalMb, vramFreeMb: Math.max(0, vramTotalMb - vramUsedMb), vramPercent: vramTotalMb > 0 ? Math.round(vramUsedMb / vramTotalMb * 100) : 0 }
+      })
+      const primary = devices[0]
+      finish({ available: devices.length > 0, name: primary?.name, usagePercent: primary?.usagePercent, vramUsedMb: primary?.vramUsedMb, vramTotalMb: primary?.vramTotalMb, vramPercent: primary?.vramPercent, devices })
     })
   })
 }
@@ -170,6 +181,10 @@ function defaultSettings(): AppSettings {
     ffmpegPath: existsSync('C:\\FFMPEG\\bin\\ffmpeg.exe') ? 'C:\\FFMPEG\\bin\\ffmpeg.exe' : 'ffmpeg',
     uiScale: 100,
     attentionBackend: 'automatic',
+    solAttnTau: 1,
+    solCacheEnabled: true,
+    h3DiffusionPrecision: 'int8',
+    gpuRouting: { preset: 'automatic', strategy: 'sequential', diffusion: 'auto', textEncoder: 'auto', videoVae: 'auto', audioVae: 'auto', previewVae: 'auto', allowOvercommit: false },
     h3ParallelAttentionEnabled: false,
     experimentalLtxMsrEnabled: false,
     blurNsfwLivePreviews: false,
@@ -330,10 +345,14 @@ async function loadSettings(): Promise<AppSettings> {
       const values: RenderIntentValues = { ...renderIntentDefaults, ...(rawValues as Partial<RenderIntentValues>), userLoras, rtxModel: typeof rawValues.rtxModel === 'string' ? rawValues.rtxModel : '', livePreviewMode: rawValues.livePreviewMode === 'h3-override' ? 'h3-override' : 'standard', noDialogue: rawValues.noDialogue !== false, naturalMovement: rawValues.naturalMovement !== false, clothingPolicy: rawValues.clothingPolicy === 'underwear' || rawValues.clothingPolicy === 'unrestricted' ? rawValues.clothingPolicy : 'wardrobe', seed: Math.max(0, Math.min(999999999999, Math.floor(Number(rawValues.seed) || 0))), seedLocked: rawValues.seedLocked !== false }
       return { id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() }
     }) : []
-    const attentionBackend = raw.attentionBackend === 'kitchen' || raw.attentionBackend === 'sage' || raw.attentionBackend === 'native' ? raw.attentionBackend : 'automatic'
+    const attentionBackend = raw.attentionBackend === 'sol' || raw.attentionBackend === 'kitchen' || raw.attentionBackend === 'sage' || raw.attentionBackend === 'native' ? raw.attentionBackend : 'automatic'
+    const solAttnTau = Math.max(-1000, Math.min(10, Number(raw.solAttnTau) || 1))
     const outputDirectory = typeof raw.outputDirectory === 'string' && raw.outputDirectory.trim() ? raw.outputDirectory.trim() : defaults.outputDirectory
     const clipMasterOutputDirectory = typeof raw.clipMasterOutputDirectory === 'string' && raw.clipMasterOutputDirectory.trim() ? raw.clipMasterOutputDirectory.trim() : join(outputDirectory, 'video')
-    return { ...defaults, ...raw, outputDirectory, clipMasterOutputDirectory, uiScale, attentionBackend, h3ParallelAttentionEnabled: raw.h3ParallelAttentionEnabled === true, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, blurNsfwLivePreviews: raw.blurNsfwLivePreviews === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
+    const rawRouting = raw.gpuRouting
+    const validDevice = (value: unknown): GpuRouteDevice => typeof value === 'string' && (value === 'auto' || value === 'cpu' || /^gpu:\d+$/.test(value)) ? value as GpuRouteDevice : 'auto'
+    const gpuRouting: GpuRoutingSettings = { ...defaults.gpuRouting, ...rawRouting, preset: rawRouting?.preset === 'single' || rawRouting?.preset === 'split' || rawRouting?.preset === 'custom' ? rawRouting.preset : 'automatic', strategy: rawRouting?.strategy === 'resident' || rawRouting?.strategy === 'cpu-fallback' ? rawRouting.strategy : 'sequential', diffusion: validDevice(rawRouting?.diffusion), textEncoder: validDevice(rawRouting?.textEncoder), videoVae: validDevice(rawRouting?.videoVae), audioVae: validDevice(rawRouting?.audioVae), previewVae: validDevice(rawRouting?.previewVae), allowOvercommit: rawRouting?.allowOvercommit === true }
+    return { ...defaults, ...raw, outputDirectory, clipMasterOutputDirectory, uiScale, attentionBackend, solAttnTau, solCacheEnabled: raw.solCacheEnabled !== false, h3DiffusionPrecision: raw.h3DiffusionPrecision === 'nvfp4' ? 'nvfp4' : 'int8', gpuRouting, h3ParallelAttentionEnabled: raw.h3ParallelAttentionEnabled === true, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, blurNsfwLivePreviews: raw.blurNsfwLivePreviews === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
   }
@@ -1263,6 +1282,37 @@ app.whenReady().then(async () => {
     const created = await stat(output).catch(() => null)
     if (!created?.size) throw new Error('FFmpeg completed without producing a reference clip.')
     return { path: output, name }
+  })
+  ipcMain.handle('clip-master:splice', async (_event, clips: Array<{ source: string; startFrame: number; endFrame: number }>, outputDirectory: string, ffmpegPath: string) => {
+    if (!Array.isArray(clips) || !clips.length || clips.length > 100) throw new Error('Select between 1 and 100 segments.')
+    const temporary: string[] = []
+    const directory = join(outputDirectory, 'ClipMaster')
+    await mkdir(directory, { recursive: true })
+    const output = join(directory, `Sequence_${randomUUID()}.mp4`)
+    try {
+      let target: ClipVideoMetadata | undefined
+      for (const clip of clips) {
+        const input = await resolveVideoSource(clip.source)
+        const meta = await probeClipVideoMetadata(input, ffmpegPath)
+        if (!Number.isInteger(clip.startFrame) || !Number.isInteger(clip.endFrame) || clip.startFrame < 0 || clip.endFrame < clip.startFrame || clip.endFrame >= meta.frameCount) throw new Error('Invalid segment frame range.')
+        target ??= meta
+        const duration = (clip.endFrame - clip.startFrame + 1) / meta.fps
+        const audio = JSON.parse(await runFfprobe(ffmpegPath, ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'json', input])) as { streams?: unknown[] }
+        const segment = join(app.getPath('temp'), `oyama-segment-${randomUUID()}.mp4`)
+        temporary.push(segment)
+        const width = Math.ceil(target.width / 2) * 2, height = Math.ceil(target.height / 2) * 2
+        const args = ['-hide_banner', '-loglevel', 'error', '-i', input]
+        if (!audio.streams?.length) args.push('-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo')
+        args.push('-vf', `trim=start_frame=${clip.startFrame}:end_frame=${clip.endFrame + 1},setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${target.fps}`, '-af', audio.streams?.length ? `atrim=start=${clip.startFrame / meta.fps}:duration=${duration},asetpts=PTS-STARTPTS,apad` : 'anull', '-map', '0:v:0', '-map', audio.streams?.length ? '0:a:0' : '1:a:0', '-t', String(duration), '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-video_track_timescale', '90000', '-y', segment)
+        await runFfmpeg(ffmpegPath, args)
+      }
+      const list = join(app.getPath('temp'), `oyama-sequence-${randomUUID()}.txt`)
+      await writeFile(list, temporary.map(path => `file '${path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'))
+      temporary.push(list)
+      await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-n', output])
+      return { path: output, url: `minimax-media://local?path=${encodeURIComponent(output)}` }
+    } catch (error) { await unlink(output).catch(() => undefined); throw error }
+    finally { await Promise.all(temporary.map(path => unlink(path).catch(() => undefined))) }
   })
   ipcMain.handle('video:join', async (_event, clips: Array<{ source: string; start?: number; end?: number }>, outputDirectory: string, ffmpegPath: string) => {
     if (!Array.isArray(clips) || clips.length < 2) throw new Error('Add at least two clips to join.')

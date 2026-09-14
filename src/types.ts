@@ -4,7 +4,35 @@ export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' |
 export type MediaKind = 'image' | 'video' | 'audio'
 export type UpscaleMode = 'off' | 'h3' | 'ltx' | 'rtx'
 export type Turbo8Profile = 'stable' | 'balanced' | 'motion' | 'euler-beta'
-export type AttentionBackendPreference = 'automatic' | 'kitchen' | 'sage' | 'native'
+export type AttentionBackendPreference = 'automatic' | 'sol' | 'kitchen' | 'sage' | 'native'
+export type H3DiffusionPrecision = 'int8' | 'nvfp4'
+export type GpuRouteDevice = 'auto' | 'cpu' | `gpu:${number}`
+export type GpuRoutingPreset = 'automatic' | 'single' | 'split' | 'custom'
+export type GpuRoutingStrategy = 'resident' | 'sequential' | 'cpu-fallback'
+export type GpuRoutingSettings = {
+  preset: GpuRoutingPreset
+  strategy: GpuRoutingStrategy
+  diffusion: GpuRouteDevice
+  textEncoder: GpuRouteDevice
+  videoVae: GpuRouteDevice
+  audioVae: GpuRouteDevice
+  previewVae: GpuRouteDevice
+  allowOvercommit: boolean
+}
+export type WorkflowComponentRoute = {
+  device: Exclude<GpuRouteDevice, 'auto'>
+  method: 'loader' | 'selector' | 'inline'
+  nodeType: string
+  offloadDevice?: Exclude<GpuRouteDevice, 'auto'>
+}
+export type WorkflowGpuRouting = {
+  strategy: GpuRoutingStrategy
+  diffusion?: WorkflowComponentRoute
+  textEncoder?: WorkflowComponentRoute
+  videoVae?: WorkflowComponentRoute
+  audioVae?: WorkflowComponentRoute
+  previewVae?: WorkflowComponentRoute
+}
 export type AppliedLora = { name: string; strength: number }
 export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
 export type PromptPresetCategory = 'camera' | 'shot' | 'angle' | 'lens' | 'lighting' | 'audio' | 'style' | 'movement' | 'transition' | 'continuity' | 'character' | 'wardrobe' | 'location'
@@ -58,6 +86,10 @@ export type AppSettings = {
   ffmpegPath: string
   uiScale: number
   attentionBackend: AttentionBackendPreference
+  solAttnTau: number
+  solCacheEnabled: boolean
+  h3DiffusionPrecision: H3DiffusionPrecision
+  gpuRouting: GpuRoutingSettings
   h3ParallelAttentionEnabled: boolean
   experimentalLtxMsrEnabled: boolean
   blurNsfwLivePreviews: boolean
@@ -265,6 +297,7 @@ export type Ltx25GenerationOptions = {
   preset: 'quality' | 'turbo'
   previewOverride?: { nodeType: string; fps: number }
   attentionBackend?: string
+  gpuRouting?: WorkflowGpuRouting
   h3ParallelAttention?: { nodeType: string; devices: 'auto' | number }
   msr?: { loraName: string; references: string[] }
   filenamePrefix: string
@@ -291,6 +324,7 @@ export type AceStepGenerationOptions = {
   seed: number
   generateAudioCodes: boolean
   attentionBackend?: string
+  gpuRouting?: WorkflowGpuRouting
   filenamePrefix: string
 }
 
@@ -308,7 +342,10 @@ export type GenerationOptions = {
   turbo: 'off' | '4' | '8'
   experimentalSampling?: boolean
   attentionBackend?: string
+  solAttention?: { nodeType: string; tau: number }
+  solCache?: { nodeType: string; threshold: number; maxSteps: number }
   h3ParallelAttention?: { nodeType: string; devices: 'auto' | number }
+  gpuRouting?: WorkflowGpuRouting
   previewOverride?: { frames: number; fps: number; nodeType?: string; vaeName?: string; jpegQuality?: number }
   loraStrength?: number
   userLoras?: AppliedLora[]
@@ -329,7 +366,14 @@ export type ComfyStatus = {
   connected: boolean
   latencyMs: number
   stats?: {
-    system?: { os?: string; python_version?: string; comfyui_version?: string }
+    system?: {
+      os?: string
+      python_version?: string
+      comfyui_version?: string
+      pytorch_version?: string
+      /** Present on ComfyUI builds that expose their launch arguments. */
+      argv?: string[]
+    }
     devices?: Array<{ name?: string; type?: string; vram_total?: number; vram_free?: number }>
   }
   error?: string
@@ -358,6 +402,7 @@ export type GpuTelemetry = {
   vramPercent?: number
   vramUsedMb?: number
   vramTotalMb?: number
+  devices?: Array<{ index: number; name: string; usagePercent: number; vramPercent: number; vramUsedMb: number; vramTotalMb: number; vramFreeMb: number }>
 }
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -373,6 +418,7 @@ export type JobExecutionInfo = {
   upscale?: string
   referenceCount?: number
   adapters?: string[]
+  gpuRouting?: string
 }
 
 export type GenerationJob = {
@@ -459,6 +505,7 @@ export type DesktopApi = {
   extractClipMasterFrames(source: string, frames: Array<{ index: number; role: 'start' | 'end' | 'frame' }>, outputDirectory: string, ffmpegPath: string, sourceName: string): Promise<{ folder: string; files: Array<{ path: string; name: string; index: number; role: 'start' | 'end' | 'frame' }> }>
   chooseClipMasterExportPath(outputDirectory: string, sourceName: string): Promise<string | null>
   trimClipMaster(source: string, startFrame: number, endFrame: number, fps: number, outputPath: string, ffmpegPath: string): Promise<{ path: string; name: string; url: string; folder: string; frameCount: number; duration: number }>
+  spliceClipMaster(clips: Array<{ source: string; startFrame: number; endFrame: number }>, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; url: string }>
   joinVideos(clips: Array<Pick<ClipItem, 'source' | 'start' | 'end'>>, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; url: string }>
   getRifeStatus(): Promise<{ installed: boolean; executable?: string; error?: string }>
   installRife(): Promise<{ installed: boolean; executable?: string; error?: string }>

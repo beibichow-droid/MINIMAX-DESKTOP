@@ -1,6 +1,43 @@
 import { Check, ChevronDown, Image as ImageIcon } from 'lucide-react'
 import { compileScene } from '../lib/h3SceneCompiler'
-import { value, type ScenePromptState } from '../lib/scenePromptState'
+import { cameraOptions, defaultPreservedAttributes, preserveAttributes, value, type Camera, type ScenePromptState, type SceneReference } from '../lib/scenePromptState'
+import type { SceneInspectorSelection } from './SceneComposer'
+
+export function SceneSelectionInspector({ state, selection, onChange }: { state: ScenePromptState; selection: SceneInspectorSelection; onChange(state: ScenePromptState): void }) {
+  const reference = selection.kind === 'reference' ? state.references.find(item => item.id === selection.id) : undefined
+  const shotIndex = selection.kind === 'shot' ? state.shots.findIndex(item => item.id === selection.id) : -1
+  const shot = shotIndex >= 0 ? state.shots[shotIndex] : undefined
+  const camera = shotIndex === 0 ? state.camera : shot?.camera ?? {}
+  const updateReference = (update: Partial<SceneReference>) => reference && onChange({ ...state, references: state.references.map(item => item.id === reference.id ? { ...item, ...update } : item) })
+  const updateCamera = (key: keyof Camera, text: string) => {
+    if (!shot) return
+    if (shotIndex === 0) onChange({ ...state, camera: { ...state.camera, [key]: value(text) } })
+    else onChange({ ...state, shots: state.shots.map((item, index) => index === shotIndex ? { ...item, camera: { ...item.camera, [key]: value(text) } } : item) })
+  }
+
+  if (reference) return <section className="scene-context-card selection-inspector">
+    <header><div><small>SELECTED REFERENCE</small><strong>{reference.name}</strong></div><span>{reference.file.kind}</span></header>
+    <div className="selection-reference-summary">{reference.file.preview ? <img src={reference.file.preview} alt="" /> : <ImageIcon size={28} />}<div><b>{reference.file.referenceRole || 'Unassigned reference'}</b><small>{reference.ownerId ? state.characters.find(item => item.id === reference.ownerId)?.name || 'Assigned character' : 'Scene level'}</small></div></div>
+    <label>Owner<select value={reference.ownerId || ''} onChange={event => updateReference({ ownerId: event.target.value || undefined })}><option value="">Scene / environment</option>{state.characters.map(character => <option key={character.id} value={character.id}>{character.name}</option>)}</select></label>
+    {reference.file.kind === 'image' && <label>Frame role<select value={reference.anchor || ''} onChange={event => updateReference({ anchor: event.target.value as SceneReference['anchor'] || undefined, reviewed: false })}><option value="">Reusable reference</option><option value="opening">Opening frame · 0.00s</option><option value="ending">Ending frame</option><option value="keyframe">Keyframe</option></select></label>}
+    {reference.file.kind === 'video' && <label>Video role<select value={reference.videoRole} onChange={event => updateReference({ videoRole: event.target.value as SceneReference['videoRole'] })}>{['motion', 'structure', 'continuation', 'editing'].map(role => <option key={role}>{role}</option>)}</select></label>}
+    <div className="selection-toggle-heading"><strong>Preserve from source</strong><button type="button" onClick={() => updateReference({ preserve: reference.preserve.length ? [] : defaultPreservedAttributes(reference) })}>{reference.preserve.length ? 'Clear' : 'Use recommended'}</button></div>
+    <div className="selection-attribute-grid">{preserveAttributes.map(attribute => <label key={attribute}><input type="checkbox" checked={reference.preserve.includes(attribute)} onChange={event => updateReference({ preserve: event.target.checked ? [...new Set([...reference.preserve, attribute])] : reference.preserve.filter(item => item !== attribute) })} />{attribute}</label>)}</div>
+  </section>
+
+  if (shot) return <section className="scene-context-card selection-inspector">
+    <header><div><small>SELECTED SHOT</small><strong>Shot {shotIndex + 1}</strong></div><span>{shot.start.toFixed(2)}–{shot.end.toFixed(2)}s</span></header>
+    <label>Shot action<textarea rows={3} value={shot.description} placeholder="Describe the action in this shot" onChange={event => onChange({ ...state, shots: state.shots.map((item, index) => index === shotIndex ? { ...item, description: event.target.value } : item) })} /></label>
+    <div className="selection-camera-grid">{Object.entries(cameraOptions).map(([key, options]) => <label key={key}>{({ shotSize: 'Framing', angle: 'Angle', movement: 'Movement', speed: 'Speed', stabilization: 'Stabilization', amplitude: 'Amount' } as Record<string, string>)[key]}<select value={camera[key as keyof Camera]?.value || ''} onChange={event => updateCamera(key as keyof Camera, event.target.value)}><option value="">From scene</option>{options.map(option => <option key={option}>{option}</option>)}</select></label>)}</div>
+  </section>
+
+  return <section className="scene-context-card selection-inspector">
+    <header><div><small>SCENE CONTEXT</small><strong>Ref2VA direction</strong></div><span>{state.duration}s</span></header>
+    <label>Environment<input value={state.environment.value} placeholder="Location and physical environment" onChange={event => onChange({ ...state, environment: value(event.target.value) })} /></label>
+    <label>Lighting<input value={state.lighting.value} placeholder="Light source, time, atmosphere" onChange={event => onChange({ ...state, lighting: value(event.target.value) })} /></label>
+    <small>Select a reference card or shot to edit its production controls here.</small>
+  </section>
+}
 
 export function SceneContextPanels({ state, onChange }: { state: ScenePromptState; onChange(state: ScenePromptState): void }) {
   const output = compileScene(state)
