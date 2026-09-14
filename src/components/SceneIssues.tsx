@@ -9,6 +9,7 @@ const help: Record<string, [string, string]> = {
   'shot-end': ['Shot Builder', 'Set the last shot’s End (s) to Clip duration, or use Fit shots to clip.'],
   'camera-conflict': ['Shot Builder', 'Make the camera controls agree with your Scene wording. Change the control or edit the conflicting phrase.'],
   'wardrobe-conflict': ['Characters', 'Make the character’s wardrobe field agree with the outfit named in Scene. Neither explicit choice is silently replaced.'],
+  'wardrobe-nudity-conflict': ['Scene', 'A preserved wardrobe and an explicit nude or undressed direction cannot both be true. Remove the nude wording from Scene to keep the outfit, or turn off Preserve on the wardrobe source if nudity is intentional.'],
   'attribute-sources': ['References', 'Expand Retained attributes & ownership. Keep this attribute selected on only one reference for this owner; leave identity selected on multiple views if needed.'],
   'owner-required': ['References', 'Expand this card’s Retained attributes & ownership and choose its Character owner. Add the character in 4. Characters first if needed.'],
   'missing-owner': ['References', 'Choose an existing Character owner in this reference card.'],

@@ -16,14 +16,16 @@ export async function writeAtomicFile(path: string, content: string | Buffer): P
     try {
       const handle = await open(staged, 'wx', 0o600)
       try { await handle.writeFile(content); await handle.sync() } finally { await handle.close() }
-      for (let attempt = 0; ; attempt++) {
-        try { await rename(staged, destination); break } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code
-          if (process.platform !== 'win32' || !['EPERM', 'EBUSY', 'EACCES'].includes(code ?? '') || attempt >= 7) throw error
-          // Windows virus scanners and readers can briefly lock the target.
-          await delay(25 * (attempt + 1))
+        for (let attempt = 0; ; attempt++) {
+          try { await rename(staged, destination); break } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code
+            if (process.platform !== 'win32' || !['EPERM', 'EBUSY', 'EACCES'].includes(code ?? '') || attempt >= 15) throw error
+            // Windows readers and virus scanners can hold the destination for
+            // longer than one scheduler tick. Keep the retry bounded, but give
+            // the reader enough time to close before declaring the save failed.
+            await delay(25 * (attempt + 1))
+          }
         }
-      }
     } catch (error) {
       await unlink(staged).catch(() => undefined)
       throw error

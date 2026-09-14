@@ -192,6 +192,79 @@ function workspaceProjectLabel(scope: WorkspaceProjectScope) {
   return scope === 'create' ? 'MiniMax H3 / Ref2VA' : scope === 'ltx25' ? 'LTX 2.5' : scope === 'zimage' ? 'Create Image' : 'Music'
 }
 
+type WorkspaceSearchEntry = {
+  id: string
+  label: string
+  context: string
+  searchableText: string
+  target: HTMLElement
+  focusElement: HTMLElement
+}
+
+function compactSearchText(value: string | null | undefined) {
+  return (value ?? '').replace(/\s+/g, ' ').trim()
+}
+
+function searchLabelText(label: HTMLLabelElement | null) {
+  if (!label) return ''
+  const strong = compactSearchText(label.querySelector('strong')?.textContent)
+  if (strong) return strong
+  const clone = label.cloneNode(true) as HTMLElement
+  clone.querySelectorAll('input, select, textarea, button, small, svg, output').forEach((node) => node.remove())
+  return compactSearchText(clone.textContent)
+}
+
+function searchContextText(control: HTMLElement) {
+  const section = control.closest<HTMLElement>('section, fieldset, .create-section, .composer-panel, .preview-panel')
+  if (!section) return ''
+  const heading = section.querySelector<HTMLElement>('.settings-heading strong, .ref2va-setting-heading strong, .create-section-heading strong, h1, h2, h3, legend')
+  return compactSearchText(heading?.textContent)
+}
+
+function searchTargetForControl(control: HTMLElement, label: HTMLLabelElement | null) {
+  return control.closest<HTMLElement>('.field-group, .settings-check, .connection-row, .path-row, .ui-scale-control, .user-lora-slot, .render-controls > label, .render-extras > label, .upscale-options > label') ?? label ?? control
+}
+
+function isHiddenWorkspaceSearchControl(control: HTMLElement) {
+  let current: HTMLElement | null = control
+  while (current) {
+    if (current.hidden) return true
+    current = current.parentElement
+  }
+  return false
+}
+
+function collectWorkspaceSearchEntries(root: HTMLElement): WorkspaceSearchEntry[] {
+  const controls = Array.from(root.querySelectorAll<HTMLElement>('input:not([type="hidden"]), select, textarea'))
+  return controls.flatMap((control, index) => {
+    if (isHiddenWorkspaceSearchControl(control)) return []
+    const parentLabel = control.closest('label') as HTMLLabelElement | null
+    const id = control.getAttribute('id')
+    const associatedLabel = id
+      ? Array.from(root.querySelectorAll<HTMLLabelElement>('label[for]')).find((candidate) => candidate.htmlFor === id) ?? null
+      : null
+    const label = searchLabelText(parentLabel ?? associatedLabel)
+      || compactSearchText(control.getAttribute('aria-label'))
+      || compactSearchText(control.getAttribute('placeholder'))
+      || compactSearchText(control.getAttribute('title'))
+      || compactSearchText(id)
+      || 'Workspace setting'
+    const context = searchContextText(control)
+    const target = searchTargetForControl(control, parentLabel ?? associatedLabel)
+    const searchableText = compactSearchText([
+      label,
+      context,
+      control.getAttribute('aria-label'),
+      control.getAttribute('placeholder'),
+      control.getAttribute('title'),
+      control.getAttribute('name'),
+      id,
+      target.textContent,
+    ].filter(Boolean).join(' ')).toLowerCase()
+    return [{ id: `workspace-setting-${index}`, label, context, searchableText, target, focusElement: control }]
+  })
+}
+
 const H3_RANDOM_SEED_LIMIT = 1_000_000_000
 const H3_PREVIEW_FPS = 12
 
@@ -502,9 +575,17 @@ function resolveRenderReferenceBindings(files: MediaFile[], bindings: MovieRefer
     const source = files.find((file) => file.path === binding.file.path) ?? binding.file
     return { ...binding, file: { ...source, referenceRole: source.referenceRole ?? roleForPurpose(binding.purpose), referenceRetention: source.referenceRetention ?? 'preserve' as const } }
   })
-  const standalone = files.filter((file) => !libraryPaths.has(file.path))
+  const standalone = files.filter((file) => !libraryPaths.has(file.path) && !(clothingPolicy !== 'wardrobe' && file.referenceRole === 'wardrobe'))
   const roleLabels: Record<NonNullable<MediaFile['referenceRole']>, string> = { subject: 'subject or identity', wardrobe: 'wardrobe', prop: 'prop or product', location: 'location or set', composition: 'composition or pose', 'lighting-style': 'lighting or visual style' }
-  return [...assigned, ...standalone.map((file) => ({ file, purpose: 'generic' as const, label: `Shot reference: ${roleLabels[file.referenceRole ?? 'composition']} — ${file.name}`, source: 'shot' as const }))].slice(0, 9)
+  return [...assigned, ...standalone.map((file) => {
+    // Keep a standalone wardrobe handoff typed as wardrobe all the way into
+    // ScenePromptState. Treating it as generic loses the canonical clothing
+    // contract in downstream prompt composition even when the file itself has
+    // referenceRole=wardrobe.
+    const purpose = file.referenceRole === 'wardrobe' ? 'wardrobe' as const : 'generic' as const
+    const label = file.referenceRole === 'wardrobe' ? `Wardrobe reference: ${file.name}` : `Shot reference: ${roleLabels[file.referenceRole ?? 'composition']} — ${file.name}`
+    return { file, purpose, label, source: 'shot' as const }
+  })].slice(0, 9)
 }
 
 function App() {
@@ -566,6 +647,7 @@ function App() {
   const [ref2vaSeed, setRef2vaSeed] = useState(persisted.ref2vaSeed)
   const [seedLocked, setSeedLocked] = useState(persisted.seedLocked)
   const [advanced, setAdvanced] = useState(persisted.advanced)
+  const [renderAnyway, setRenderAnyway] = useState(false)
   const [firstFrame, setFirstFrame] = useState<MediaFile | null>(persisted.firstFrame)
   const [lastFrame, setLastFrame] = useState<MediaFile | null>(persisted.lastFrame)
   const [referenceImages, setReferenceImages] = useState<MediaFile[]>(persisted.referenceImages)
@@ -587,7 +669,7 @@ function App() {
   const [diagnosticRunning, setDiagnosticRunning] = useState(false)
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(() => new Set())
   const cancellationRequests = useRef(new Set<string>())
-  const generateRef = useRef<((target?: 'video' | 'image') => Promise<void>) | null>(null)
+  const generateRef = useRef<((target?: 'video' | 'image', renderAnyway?: boolean) => Promise<void>) | null>(null)
   const mediaHydrated = useRef(false)
   const [notice, setNotice] = useState<{ tone: 'error' | 'success' | 'neutral'; text: string } | null>(null)
   const [legacyMigration, setLegacyMigration] = useState<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null>(null)
@@ -603,6 +685,12 @@ function App() {
   const [lanOpen, setLanOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [projectManagerOpen, setProjectManagerOpen] = useState(false)
+  const [workspaceSearchOpen, setWorkspaceSearchOpen] = useState(false)
+  const [workspaceSearchQuery, setWorkspaceSearchQuery] = useState('')
+  const [workspaceSearchEntries, setWorkspaceSearchEntries] = useState<WorkspaceSearchEntry[]>([])
+  const [workspaceSearchIndex, setWorkspaceSearchIndex] = useState(0)
+  const workspaceSearchInputRef = useRef<HTMLInputElement>(null)
+  const workspaceSearchHighlightTimer = useRef<number | null>(null)
   const [workspaceProjects, setWorkspaceProjects] = useState<WorkspaceProject[]>(loadWorkspaceProjects)
   const [lanStatus, setLanStatus] = useState<LanStatus>({ running: false })
   const [lanQr, setLanQr] = useState<{ mobile: string; desktop: string }>({ mobile: '', desktop: '' })
@@ -1142,10 +1230,13 @@ function App() {
   const loadReferenceWardrobe = async (wardrobeId: string) => {
     const wardrobe = wardrobeProjects.find((project) => project.id === wardrobeId)
     if (!wardrobe) return
-    const approved = wardrobeReferences(wardrobe).slice(0, 9).map(fitWholeCharacter)
+    const approved = wardrobeReferences(wardrobe).slice(0, 9).map((file) => ({ ...fitWholeCharacter(file), referenceRole: 'wardrobe' as const, referenceRetention: 'preserve' as const }))
     if (!approved.length) { setNotice({ tone: 'error', text: `${wardrobe.name} has no approved wardrobe images yet.` }); return }
     const images = await Promise.all(approved.map(async (file) => { if (file.preview) return file; try { return { ...file, preview: await window.minimax.fileDataUrl(file.path) } } catch { return file } }))
-    setSelectedReferenceCharacterIds([]); setSelectedReferenceLocationIds([]); setMode('reference'); setReferenceImages(images)
+    // Choosing an approved outfit from the library is an explicit wardrobe
+    // request. Make that intent authoritative so an older Underwear or
+    // Unrestricted setting cannot silently discard the selected source.
+    setClothingPolicy('wardrobe'); setSelectedReferenceCharacterIds([]); setSelectedReferenceLocationIds([]); setMode('reference'); setReferenceImages(images)
     setNotice({ tone: 'success', text: `Loaded ${images.length} approved wardrobe reference${images.length === 1 ? '' : 's'} for ${wardrobe.name}.` })
   }
 
@@ -1903,6 +1994,99 @@ function App() {
     setView('queue')
   }
 
+  const refreshWorkspaceSearchEntries = useCallback(() => {
+    if (!mainAreaRef.current) return
+    setWorkspaceSearchEntries(collectWorkspaceSearchEntries(mainAreaRef.current))
+  }, [])
+  useEffect(() => {
+    if (!workspaceSearchOpen) return
+    const frame = window.requestAnimationFrame(refreshWorkspaceSearchEntries)
+    window.requestAnimationFrame(() => workspaceSearchInputRef.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [refreshWorkspaceSearchEntries, view, workspaceSearchOpen])
+  useEffect(() => {
+    if (!workspaceSearchOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setWorkspaceSearchOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [workspaceSearchOpen])
+  useEffect(() => () => {
+    if (workspaceSearchHighlightTimer.current !== null) window.clearTimeout(workspaceSearchHighlightTimer.current)
+  }, [])
+  const workspaceSearchResults = useMemo(() => {
+    const query = compactSearchText(workspaceSearchQuery).toLowerCase()
+    const terms = query.split(' ').filter(Boolean)
+    const matches = workspaceSearchEntries.filter((entry) => terms.every((term) => entry.searchableText.includes(term)))
+    if (!query) return matches.slice(0, 12)
+    return matches
+      .map((entry, index) => {
+        const label = entry.label.toLowerCase()
+        const score = label === query ? 0 : label.startsWith(query) ? 1 : label.includes(query) ? 2 : 3
+        return { entry, index, score }
+      })
+      .sort((a, b) => a.score - b.score || a.index - b.index)
+      .map(({ entry }) => entry)
+      .slice(0, 20)
+  }, [workspaceSearchEntries, workspaceSearchQuery])
+  useEffect(() => setWorkspaceSearchIndex(0), [workspaceSearchQuery, workspaceSearchResults.length])
+  const focusWorkspaceSearchEntry = (entry: WorkspaceSearchEntry) => {
+    setWorkspaceSearchOpen(false)
+    const root = mainAreaRef.current
+    if (!root) return
+    let ancestor: HTMLElement | null = entry.target
+    while (ancestor && ancestor !== root) {
+      if (ancestor instanceof HTMLDetailsElement) ancestor.open = true
+      ancestor = ancestor.parentElement
+    }
+    const hiddenPanel = entry.target.closest<HTMLElement>('[aria-hidden="true"]')
+    if (hiddenPanel) {
+      const toggle = Array.from(root.querySelectorAll<HTMLElement>('[aria-controls]')).find((candidate) => candidate.getAttribute('aria-controls') === hiddenPanel.id)
+      toggle?.click()
+    }
+    const focusTarget = () => {
+      if (workspaceSearchHighlightTimer.current !== null) window.clearTimeout(workspaceSearchHighlightTimer.current)
+      root.querySelector<HTMLElement>('.workspace-search-highlight')?.classList.remove('workspace-search-highlight')
+      entry.target.classList.add('workspace-search-highlight')
+      entry.target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+      if (!(entry.focusElement as HTMLInputElement).disabled) entry.focusElement.focus({ preventScroll: true })
+      workspaceSearchHighlightTimer.current = window.setTimeout(() => {
+        entry.target.classList.remove('workspace-search-highlight')
+        workspaceSearchHighlightTimer.current = null
+      }, 1800)
+    }
+    window.requestAnimationFrame(focusTarget)
+  }
+  const handleWorkspaceSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown' && workspaceSearchResults.length) {
+      event.preventDefault()
+      setWorkspaceSearchIndex((current) => (current + 1) % workspaceSearchResults.length)
+    } else if (event.key === 'ArrowUp' && workspaceSearchResults.length) {
+      event.preventDefault()
+      setWorkspaceSearchIndex((current) => (current - 1 + workspaceSearchResults.length) % workspaceSearchResults.length)
+    } else if (event.key === 'Enter' && workspaceSearchResults[workspaceSearchIndex]) {
+      event.preventDefault()
+      focusWorkspaceSearchEntry(workspaceSearchResults[workspaceSearchIndex])
+    }
+  }
+  const openWorkspaceSearch = () => {
+    setWorkspaceSearchQuery('')
+    setWorkspaceSearchIndex(0)
+    setWorkspaceSearchOpen(true)
+  }
+  useEffect(() => {
+    const openFromKeyboard = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setWorkspaceSearchQuery('')
+        setWorkspaceSearchIndex(0)
+        setWorkspaceSearchOpen(true)
+      }
+    }
+    window.addEventListener('keydown', openFromKeyboard)
+    return () => window.removeEventListener('keydown', openFromKeyboard)
+  }, [])
   if (!settings) {
     return <div className="boot"><LoaderCircle className="spin" /><span>Opening Oyama AI Video Studio…</span></div>
   }
@@ -1939,19 +2123,36 @@ function App() {
   const copilotReferenceBindings = mode === 'reference'
     ? resolveRenderReferenceBindings(referenceImages, workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds), clothingPolicy)
     : []
-
   return (
     <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
       <header className="titlebar" aria-label="Application title bar">
         <button className="titlebar-mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open workspace menu"><Menu size={18} /></button>
         <div className="titlebar-brand"><span className="brand-mark"><Film size={18} /></span><span><strong>Oyama AI Video Studio</strong><small>Create&nbsp;&nbsp;•&nbsp;&nbsp;Visualize&nbsp;&nbsp;•&nbsp;&nbsp;Tell Stories</small></span></div>
-        <button className="titlebar-search" type="button" onClick={() => setView('library')} title="Search generated media in Library"><Search size={15} /><span>Search assets, projects, or prompts…</span><kbd>Library</kbd></button>
+        <button className="titlebar-search" type="button" onClick={openWorkspaceSearch} title={`Search settings in ${workspaceTips[view].title}`} aria-haspopup="dialog" aria-expanded={workspaceSearchOpen}><Search size={15} /><span>Search {workspaceTips[view].title} settings…</span><kbd>Ctrl K</kbd></button>
         <div className="titlebar-drag" />
+        {view === 'create' && <div className="titlebar-generation-actions" aria-label="Video generation actions">
+          <button className="titlebar-action titlebar-generate-video" type="button" onClick={() => void generateRef.current?.('video', renderAnyway)} disabled={submitting} aria-describedby="h3-render-readiness"><Play size={14} fill="currentColor" />{submitting ? 'Submitting…' : 'Generate video'}</button>
+          <label className="titlebar-render-anyway" title="Submit despite scene conflicts. Engine, models, and media must still be available."><input type="checkbox" checked={renderAnyway} onChange={(event) => setRenderAnyway(event.target.checked)} />Render anyway</label>
+          {mode === 'reference' && <button className="titlebar-action titlebar-generate-image" type="button" onClick={() => void generateRef.current?.('image')} disabled={stillSubmitting}><ImagePlus size={14} />{stillSubmitting ? 'Generating…' : 'Generate image'}</button>}
+        </div>}
         {(view === 'create' || view === 'ltx25' || view === 'zimage') && <button className="titlebar-action titlebar-reset" onClick={resetCurrentWorkspace} title="Reset prompts, options, media, selections, and the current preview in this workspace"><RotateCcw size={14} />Reset workspace</button>}
         {workspaceProjectScope(view) && <button className="titlebar-action titlebar-projects" onClick={() => setProjectManagerOpen(true)} title="Save, open, and manage full workspace projects"><FolderOpen size={14} /><span>Project: Current workspace</span><ChevronDown size={13} /></button>}
         <button className="titlebar-action titlebar-help" onClick={() => setHelpOpen(true)} title="Show tips for this workspace" aria-label="Show workspace tips"><HelpCircle size={15} />Tips</button>
         <button className="titlebar-action" onClick={() => { setLanOpen(true); void window.minimax.getLanStatus().then(setLanStatus) }} title="Share Oyama AI Video Studio over your local network"><QrCode size={14} />LAN</button>
       </header>
+
+      {workspaceSearchOpen && <div className="workspace-search-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setWorkspaceSearchOpen(false) }}>
+        <section className="workspace-search-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-search-title">
+          <div className="workspace-search-input-wrap"><Search size={17} /><input ref={workspaceSearchInputRef} type="search" value={workspaceSearchQuery} onChange={(event) => setWorkspaceSearchQuery(event.target.value)} onKeyDown={handleWorkspaceSearchKeyDown} placeholder={`Search ${workspaceTips[view].title} settings`} autoComplete="off" spellCheck={false} aria-labelledby="workspace-search-title" /><kbd>Esc</kbd></div>
+          <div className="workspace-search-heading"><span><strong id="workspace-search-title">Workspace settings</strong><small>Search controls in {workspaceTips[view].title}, then jump to and highlight a match.</small></span><button type="button" className="icon-button" onClick={() => setWorkspaceSearchOpen(false)} aria-label="Close settings search"><X size={17} /></button></div>
+          <div className="workspace-search-results" role="listbox" aria-label="Workspace setting results">
+            {workspaceSearchResults.length === 0
+              ? <div className="workspace-search-empty"><Search size={22} /><strong>No settings found</strong><span>Try a label such as resolution, duration, sampler, output, or preview.</span></div>
+              : workspaceSearchResults.map((entry, index) => <button type="button" role="option" aria-selected={index === workspaceSearchIndex} className={`workspace-search-result ${index === workspaceSearchIndex ? 'selected' : ''}`} key={entry.id} onMouseEnter={() => setWorkspaceSearchIndex(index)} onClick={() => focusWorkspaceSearchEntry(entry)}><span><strong>{entry.label}</strong>{entry.context && <small>{entry.context}</small>}</span><kbd>↵</kbd></button>)}
+          </div>
+          <p className="workspace-search-help"><kbd>↑</kbd><kbd>↓</kbd> to move <span>·</span> <kbd>Enter</kbd> to jump <span>·</span> <kbd>Esc</kbd> to close</p>
+        </section>
+      </div>}
 
       {helpOpen && <WorkspaceTips view={view} onClose={() => setHelpOpen(false)} />}
       {projectManagerOpen && <WorkspaceProjectManager activeScope={workspaceProjectScope(view)} projects={workspaceProjects} onClose={() => setProjectManagerOpen(false)} onSave={saveWorkspaceProject} onLoad={loadWorkspaceProject} onRename={renameWorkspaceProject} onDelete={deleteWorkspaceProject} />}
@@ -2084,13 +2285,12 @@ function App() {
             h3Validated={h3Report.validated}
             modelReady={modelReady}
             selection={selection}
-            submitting={submitting}
-            stillSubmitting={stillSubmitting}
-            cancelling={Boolean(activeJobId && cancellingIds.has(activeJobId))}
+             submitting={submitting}
+             stillSubmitting={stillSubmitting}
+             renderAnyway={renderAnyway}
+             cancelling={Boolean(activeJobId && cancellingIds.has(activeJobId))}
             connected={status.connected}
-            onGenerate={(renderAnyway) => void generate('video', renderAnyway)}
-            onGenerateImage={() => void generate('image')}
-            onSendStillToI2v={(job, provider) => void sendStillToI2v(job, provider)}
+             onSendStillToI2v={(job, provider) => void sendStillToI2v(job, provider)}
             latestJob={activeJobId ? jobs.find((job) => job.id === activeJobId) : undefined}
             onCancel={(job) => void cancelJob(job)}
             onContinue={startVideoContinuation}
@@ -2315,7 +2515,8 @@ type CreateViewProps = {
   onPromptTool(tool: 'enhance' | 'timeline' | 'audio'): void
   onGenerateDialogue(draft: CharacterDialogueDraft): Promise<string>
   onUseSuggestion(): void; onDismissSuggestion(): void
-  onGenerate(renderAnyway?: boolean): void; onGenerateImage(): void; onSendStillToI2v(job: GenerationJob, provider: 'minimax' | 'ltx25'): void; onCancel(job: GenerationJob): void; onContinue(job: GenerationJob): Promise<void>; onContinueReference(job: GenerationJob): Promise<void>; latestJob?: GenerationJob
+  renderAnyway: boolean
+  onSendStillToI2v(job: GenerationJob, provider: 'minimax' | 'ltx25'): void; onCancel(job: GenerationJob): void; onContinue(job: GenerationJob): Promise<void>; onContinueReference(job: GenerationJob): Promise<void>; latestJob?: GenerationJob
 }
 
 function CreateView(props: CreateViewProps) {
@@ -2326,8 +2527,8 @@ function CreateView(props: CreateViewProps) {
     mode, setMode, prompt, setPrompt, duration, setDuration, resolution, setResolution, turbo, setTurbo, turbo8Profile, setTurbo8Profile, textEncoderPreference, setTextEncoderPreference, steps, setSteps,
     seed, setSeed, seedLocked, setSeedLocked, advanced, setAdvanced, firstFrame, lastFrame, setFirstFrame, setLastFrame, chooseMedia,
     referenceImages, referenceVideos, referenceAudios, characters, wardrobes, locations, selectedCharacterIds, selectedLocationIds, characterDetailReferencesEnabled, loadCharacter, loadWardrobe, loadLocation, refreshSourceMedia, removeReference, chooseReference, editVideoReference, h3Validated, modelReady, selection,
-    submitting, stillSubmitting, cancelling, connected, ollamaAvailable, ollamaModel, llmProviderLabel, promptSuggestion, promptingTool, dialogueGenerating,
-    onPromptTool, onGenerateDialogue, onUseSuggestion, onDismissSuggestion, onGenerate, onGenerateImage, onSendStillToI2v, onCancel, onContinue, onContinueReference, latestJob,
+    submitting, stillSubmitting, renderAnyway, cancelling, connected, ollamaAvailable, ollamaModel, llmProviderLabel, promptSuggestion, promptingTool, dialogueGenerating,
+    onPromptTool, onGenerateDialogue, onUseSuggestion, onDismissSuggestion, onSendStillToI2v, onCancel, onContinue, onContinueReference, latestJob,
   } = props
   const { sceneState, setSceneState } = props
   const sourceMediaTriggerRef = useRef<HTMLButtonElement>(null)
@@ -2337,7 +2538,7 @@ function CreateView(props: CreateViewProps) {
   const [dialogueOpen, setDialogueOpen] = useState(false)
   const [intentBuilderOpen, setIntentBuilderOpen] = useState(false)
   const [activeIntentId, setActiveIntentId] = useState('')
-  const [renderAnyway, setRenderAnyway] = useState(false)
+  const [inspectorTab, setInspectorTab] = useState<'preview' | 'state' | 'render'>('preview')
   const [previewPopoutRoot, setPreviewPopoutRoot] = useState<HTMLElement | null>(null)
   const previewPopoutRef = useRef<Window | null>(null)
   const h3PreviewOverrideAvailable = Boolean(findH3PreviewOverrideNode(info))
@@ -2503,11 +2704,6 @@ function CreateView(props: CreateViewProps) {
           </div>
           </section>
 
-          <section className="create-section advanced-workspace-section" aria-labelledby="advanced-controls-title">
-            <button className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced} aria-controls="advanced-controls-panel"><SlidersHorizontal size={16} /><span><strong id="advanced-controls-title">Advanced controls</strong><small>Encoder, fixed-seed testing, Turbo overrides, and custom sampling.</small></span><ChevronDown size={15} className={advanced ? 'rotated' : ''} /></button>
-            {advanced && <div id="advanced-controls-panel" className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ · 15.7 GB'], ["quality", 'Slower · better encoding · INT8 ConvRot · 27.1 GB']]} /><p className="field-help">The slower quality option requires <strong>qwen3vl_32b_minimax_h3_int8_convrot.safetensors</strong> in Text encoders. It is never selected unless you choose it.</p><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /><small>Controls the automatic official Turbo adapter only. It does not change the Additional ComfyUI LoRAs above.</small></div><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Use custom sampler and scheduler</label><SelectField label="Experimental Turbo override" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={[["off", 'Off · native quality'], ["8", 'Official 8-step'], ["4", '4-step · preview testing']]} /><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' ? turbo8Sampling(turbo8Profile).sampler : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' ? turbo8Sampling(turbo8Profile).scheduler : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", 'Model defaults · video 12 / audio 3'], ["custom", 'Custom sigma-shift node']]} /><NumberField label="Video sigma shift" value={shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom'} /><NumberField label="Audio sigma shift" value={shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom'} /><p className="field-help advanced-sampling-note">Choose Custom sigma-shift node to tune the video and audio shifts for any Turbo profile. Turbo 8 profiles execute as shown: Stable uses Euler + Simple for faces and dialogue; Balanced uses res_multistep + Simple; Motion uses res_multistep + Beta; Euler + Beta is a controlled test profile. Full quality retains <strong>res_multistep + simple</strong>, CFG 1, denoise 1, and native shifts. Compare controlled presets at a fixed seed.</p></div>}
-          </section>
-
           {(mode === 'image' || mode === 'frames') && <section id="workspace-sources" className="create-section create-input-section">
             <div className="create-section-heading"><span><ImageIcon size={15} /></span><div><strong>Source media</strong><small>{mode === 'frames' ? 'Set the opening and closing composition.' : 'Choose the frame this shot begins from.'}</small></div><em className={firstFrame && (mode !== 'frames' || lastFrame) ? 'complete' : ''}>{mode === 'frames' ? `${Number(Boolean(firstFrame)) + Number(Boolean(lastFrame))} of 2` : firstFrame ? 'Ready' : 'Required'}</em></div>
           {(mode === 'image' || mode === 'frames') && (
@@ -2558,22 +2754,27 @@ function CreateView(props: CreateViewProps) {
         <div className="ref2va-intent-actions"><label><span className="sr-only">Ref2VA intent</span><select value={activeIntentId} onChange={(event) => selectIntent(event.target.value)}><option value="">Choose an intent…</option>{renderIntents.map((intent) => <option key={intent.id} value={intent.id}>{intent.name}</option>)}</select></label><button type="button" className="secondary-button" onClick={() => setIntentBuilderOpen(true)}><SlidersHorizontal size={15} />Build intents</button></div>
       </section>}
           <div className="panel-heading"><div><span>PREVIEW</span><strong>Current workspace</strong></div><div className="preview-toolbar">{latestJob && <StatusBadge status={latestJob.status} />}<button type="button" className="icon-button" aria-label="Open detachable preview monitor" title="Open detachable preview monitor" onClick={detachPreview}><PanelTopOpen size={15} /></button><button type="button" className="icon-button" aria-label="Toggle fullscreen preview" title="Toggle fullscreen preview" onClick={() => { const panel = document.getElementById('workspace-preview'); if (document.fullscreenElement) void document.exitFullscreen(); else if (panel) void panel.requestFullscreen() }}><Maximize2 size={15} /></button></div></div>
+          <nav className="inspector-tabs" aria-label="Workspace inspector">
+            {(['preview', 'state', 'render'] as const).map(tab => <button key={tab} type="button" data-inspector-tab={tab} className={inspectorTab === tab ? 'selected' : ''} aria-pressed={inspectorTab === tab} onClick={() => setInspectorTab(tab)}>{tab === 'preview' ? 'Preview' : tab === 'state' ? 'Scene State' : 'Render'}</button>)}
+          </nav>
           {livePreviewForActiveJob && activeLiveJob && <figure className={`live-preview workspace-live-preview ${livePreviewForActiveJob.animated ? 'animated' : ''} ${blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 'sensitive-preview' : ''}`} tabIndex={blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 0 : undefined}>{livePreviewForActiveJob.mime === 'video/mp4' ? <video key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} aria-label="Animated MiniMax H3 generation preview" autoPlay loop muted playsInline /> : <img key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} alt={livePreviewForActiveJob.animated ? 'Animated MiniMax H3 generation preview' : 'Live generation preview'} />}{blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) && <span className="sensitive-preview-notice">Sensitive preview · hover or focus to reveal</span>}<figcaption><span>Live preview</span>{livePreviewForActiveJob.animated ? `Animated H3 · ${h3PreviewFrameCount(activeLiveJob.duration)} frames${livePreviewForActiveJob.fps ? ` · ${livePreviewForActiveJob.fps} fps` : ''}${livePreviewForActiveJob.step && livePreviewForActiveJob.totalSteps ? ` · sampler ${livePreviewForActiveJob.step}/${livePreviewForActiveJob.totalSteps}` : ''}` : 'Intermediate decoded frame'}</figcaption></figure>}
           <div className={`preview-stage ${livePreviewForActiveJob ? 'has-live-preview' : ''}`}>
             {latestJob?.outputUrl ? latestJob.mediaType === 'image' ? <img className="reference-still-output" src={latestJob.outputUrl} alt="Generated Ref2VA reference still" /> : <VideoPlayer src={latestJob.outputUrl} /> : latestJob && ['queued', 'running'].includes(latestJob.status) ? livePreviewForActiveJob ? <div className="live-render-status" role="status"><div><span className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</span><strong>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Sampling step ${latestJob.currentStep} of ${latestJob.totalSteps}` : latestJob.status === 'queued' ? 'Waiting in the render queue' : 'Preparing the next preview update'}</strong><small>{latestJob.progressLabel && !/waiting for comfyui to start/i.test(latestJob.progressLabel) ? latestJob.progressLabel : `${latestJob.width} × ${latestJob.height} · ${latestJob.duration}s`}</small></div><span className="live-render-progress"><strong>{Math.round(latestJob.progress)}%</strong><small>live progress</small></span><div className="progress" aria-label={`${Math.round(latestJob.progress)}% render progress`}><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Sampling</span><span>Output</span></div></div> : <div className="render-state constructing" data-render-state={latestJob.status}><RenderConstruction state={latestJob.status} /><div className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</div><strong>{latestJob.progressLabel ?? (latestJob.status === 'queued' ? 'Waiting in queue' : latestJob.mediaType === 'image' ? 'Generating one reference still' : 'Rendering locally')}</strong><span>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Live sampler step ${latestJob.currentStep} of ${latestJob.totalSteps}` : `${latestJob.width} × ${latestJob.height}${latestJob.mediaType === 'image' ? ' · one still' : ` · ${latestJob.duration}s`}`}</span><div className="progress"><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Rendering</span><span>Output</span></div><small>{Math.round(latestJob.progress)}% · live ComfyUI status</small></div> : <PreviewEmptyState job={latestJob} />}
           </div>
+          {inspectorTab === 'preview' && <div className="inspector-tab-panel preview-inspector-panel">
           {latestJob?.mediaType !== 'image' && latestJob?.provider === 'minimax' && latestJob.status === 'completed' && latestJob.outputUrl && <VideoContinuationControls job={latestJob} onContinue={onContinue} onContinueReference={onContinueReference} />}
           {latestJob?.mediaType === 'image' && latestJob.status === 'completed' && latestJob.outputUrl && <div className="still-result-actions"><a className="secondary-button" href={latestJob.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open image</a><div className="still-i2v-actions"><span><ImagePlus size={15} />Send to I2V</span><button className="primary-button" onClick={() => onSendStillToI2v(latestJob, 'ltx25')}><Aperture size={15} />LTX 2.5</button><button className="secondary-button" onClick={() => onSendStillToI2v(latestJob, 'minimax')}><Film size={15} />MiniMax I2V</button></div></div>}
           {latestJob && <JobExecutionChips job={latestJob} expanded />}
           {latestJob && <ComfyActivityConsole job={latestJob} />}
-          <SceneContextPanels state={boundScene} onChange={setSceneState} />
-          <details className="pipeline-summary"><summary>Engine components <ChevronDown size={12} /></summary>
+          </div>}
+          {inspectorTab === 'state' && <div className="inspector-tab-panel state-inspector-panel"><SceneContextPanels state={boundScene} onChange={setSceneState} /></div>}
+          {inspectorTab === 'render' && <div className="inspector-tab-panel render-inspector-panel">{advanced && <details className="pipeline-summary"><summary>Engine components <ChevronDown size={12} /></summary>
             <PipelineItem ready={Boolean(mode === 'reference' ? selection.ref2va : selection.fl2va)} label="Diffusion" value={mode === 'reference' ? selection.ref2va : selection.fl2va} />
             <PipelineItem ready={Boolean(selection.textEncoder)} label="Encoder" value={selection.textEncoder} />
             <PipelineItem ready={Boolean(selection.videoVae && selection.audioVae)} label="Video + audio VAE" value={selection.videoVae && selection.audioVae ? 'Both detected' : 'Missing component'} />
             <PipelineItem ready={turbo === 'off' || Boolean(mode === 'reference' ? selection.ref2vLora : selection.fl2vLora)} label="Acceleration" value={turbo === 'off' ? 'Native sampling' : (mode === 'reference' ? selection.ref2vLora : selection.fl2vLora)} />
-          </details>
-          <details id="workspace-output" className="create-section create-output-section preview-output-settings"><summary><Gauge size={15} /><strong>Render settings</strong><span>{resolution.replace("x", " × ")} · {duration}s</span><ChevronDown size={14} /></summary>
+          </details>}
+          <section id="workspace-output" className={`create-section create-output-section preview-output-settings ${advanced ? 'show-advanced' : 'basic-render'}`}>
             <div className="create-section-heading"><span><Gauge size={15} /></span><div><strong>Output and quality</strong><small>Tune the next render directly beneath its preview.</small></div><em className="complete">{resolution.replace('x', ' × ')} · {duration}s</em></div>
             {mode !== 'reference' && <div className="create-presets" aria-label="Recommended H3 presets"><button type="button" onClick={() => applyCreatePreset('quality')}><strong>Native Quality</strong><small>1344 × 768 · 30 steps</small></button><button type="button" onClick={() => applyCreatePreset('turbo')}><strong>Turbo 8</strong><small>Native canvas · official LoRA</small></button><button type="button" onClick={() => applyCreatePreset('preview')}><strong>Preview</strong><small>864 × 480 · Turbo 8</small></button></div>}
             <RenderSize value={resolution} onChange={setResolution} />
@@ -2594,10 +2795,12 @@ function CreateView(props: CreateViewProps) {
             </section>
             <section className="ref2va-setting-group ref2va-adapter-group" aria-labelledby="user-lora-title"><div className="ref2va-setting-heading"><span>02</span><div><strong>Adapters</strong><small>Add compatible ComfyUI LoRAs after the selected H3 recipe.</small></div></div><section className="user-lora-slots"><div><span><strong id="user-lora-title">Additional ComfyUI LoRAs</strong><small>Apply up to three adapters from your configured LoRAs folder.</small></span><em>{userLoras.filter((slot) => slot.name).length}/3 selected</em></div>{userLoras.map((slot, index) => <div className="user-lora-slot" key={index}><label>LoRA {index + 1}<select value={slot.name} disabled={!userLoraChoices.length} onChange={(event) => setUserLoraSlot(index, { name: event.target.value })}><option value="">No additional LoRA</option>{userLoraChoices.filter((name) => name === slot.name || !userLoras.some((other, otherIndex) => otherIndex !== index && other.name === name)).map((name) => <option key={name} value={name}>{name}</option>)}</select></label><NumberField label="Strength" value={slot.strength} min={0} max={2} step={0.05} disabled={!slot.name} onChange={(strength) => setUserLoraSlot(index, { strength })} /></div>)}<p className="field-help">Official H3 Turbo LoRAs stay automatic and do not consume these slots. Additional adapters are loaded after Turbo; use short fixed-seed tests because unsupported model adapters can reduce stability.</p>{!userLoraChoices.length && <p className="field-help">No extra LoRAs were found. Add compatible files to the configured ComfyUI LoRAs folder, then rescan in Settings.</p>}</section></section>
             <section className="ref2va-setting-group" aria-labelledby="preview-finish-title"><div className="ref2va-setting-heading"><span>03</span><div><strong id="preview-finish-title">Preview and finish</strong><small>Choose what to watch while sampling and what happens after rendering.</small></div></div><div className="render-extras"><div className="ref2va-subsection-title">During the render</div><label><input type="checkbox" checked={liveEnabled} onChange={(event) => setLiveEnabled(event.target.checked)} />Live preview <small>{liveEnabled ? liveConnected ? 'Connected · waiting for preview frames' : 'Connecting to ComfyUI…' : 'Off'}</small></label><label className="live-preview-mode"><span>Preview source</span><select value={livePreviewMode} disabled={!liveEnabled} onChange={(event) => setLivePreviewMode(event.target.value as 'standard' | 'h3-override')}><option value="standard">Standard first frame</option><option value="h3-override">MiniMax H3 animated · clip duration at 12 fps</option></select></label><p className={`field-help ${livePreviewMode === 'h3-override' && !h3PreviewOverrideAvailable ? 'upscale-warning' : ''}`}>{livePreviewMode === 'h3-override' && h3PreviewOverrideAvailable ? `The installed MiniMax H3 Preview Override node is wired between the model and sampler and streams ${h3PreviewFrameCount(duration)} frames at ${H3_PREVIEW_FPS} fps, matching this shot’s ${duration}s output frame grid.` : livePreviewMode === 'h3-override' ? 'Animated preview is selected, but the required Preview Override node is not detected. Install or enable it, restart ComfyUI, then click the Local engine status to refresh before generating.' : h3PreviewOverrideAvailable ? 'MiniMax H3 Preview Override is installed. Select the animated option to preview motion while sampling.' : 'You can select animated preview now. Generation will wait until the MiniMax H3 Preview Override custom node is installed and detected.'}</p><div className="ref2va-subsection-title after-render">After the render</div><div className="upscale-options" role="group" aria-labelledby="upscale-label"><span id="upscale-label">Post-render upscale</span><label><input type="radio" name="upscale" checked={upscaleMode === 'off'} onChange={() => setUpscaleMode('off')} />Off</label><label><input type="radio" name="upscale" checked={upscaleMode === 'h3'} disabled={!h3LearnedUpscaleAvailable} onChange={() => setUpscaleMode('h3')} />H3 learned latent · 1.5×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'ltx'} disabled={!ltxAvailable} onChange={() => setUpscaleMode('ltx')} />LTX 2.5 latent · 2×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'rtx'} disabled={rtxModels.length === 0} onChange={() => setUpscaleMode('rtx')} />RTX / CUDA frames · 2× · experimental</label></div>{upscaleMode === 'rtx' && <SelectField label="AI upscale model" value={rtxModel} onChange={setRtxModel} options={rtxModels.map((name) => [name, name])} />}{upscaleMode === 'h3' && <p className="field-help">H3-native learned 3D latent upscale: the video latent grows 1.5×, the original audio latent is retained, and H3’s VAE decodes only once. Final size: {resolution.split('x').map((value) => h3LatentUpscaleSize(Number(value))).join(' × ')}.</p>}{!h3LearnedUpscaleAvailable && <p className="field-help upscale-warning">To enable H3 learned latent 1.5×, install <a href="https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler" target="_blank" rel="noreferrer">Comfyui_Minimax_h3_latent_Upscaler</a> in <code>ComfyUI/custom_nodes</code>, then put <a href="https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler" target="_blank" rel="noreferrer">minimax_h3_latent_upscaler_3d_fp16.safetensors</a> in <code>ComfyUI/models/latent_upscale_models</code>. Restart ComfyUI and refresh Local engine.{h3LearnedUpscaleMissingNodes.length ? ` Missing nodes: ${h3LearnedUpscaleMissingNodes.join(', ')}.` : !h3LearnedUpscaleModelDetected ? ' The required 3D checkpoint is not detected.' : ''}</p>}<p className={`field-help ${upscaleMode === 'rtx' ? 'upscale-warning' : ''}`}>{upscaleMode === 'ltx' ? `Verified latent pipeline: MiniMax frames are encoded with the LTX‑2.5 video VAE, spatially upsampled exactly 2× in latent space, decoded, trimmed to the original duration, and joined to the untouched MiniMax audio. Final size: ${resolution.split('x').map((value) => Number(value) * 2).join(' × ')}.` : upscaleMode === 'rtx' ? `Experimental frame-by-frame upscale using ${rtxModel || 'the selected model'}. It does not understand motion and can amplify noise, flicker, or temporal shimmer. Diagnose output quality with upscale Off first.` : upscaleMode === 'h3' ? 'The H3 1.5× path is experimental; inspect a short clip before committing a long render.' : !ltxAvailable && ltxMissingNodes.length ? `LTX 2× is unavailable until ComfyUI provides: ${ltxMissingNodes.join(', ')}.` : !ltxAvailable && rtxModels.length === 0 ? 'No compatible upscale models were reported by ComfyUI.' : 'The original MiniMax video is saved without post-processing.'}</p></div></section>
-            <p className="field-help render-duration">{frameCount(duration)} frames · {(frameCount(duration) / 24).toFixed(2)}s actual duration at 24 fps. Rounded up to MiniMax’s frame grid.</p>
-          </details>
+            <button className="advanced-toggle render-advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced} aria-controls="render-advanced-panel"><SlidersHorizontal size={16} /><span><strong>Advanced H3</strong><small>Encoder, sampler, sigma shifts, LoRAs, preview pipeline, and upscale.</small></span><ChevronDown size={15} className={advanced ? 'rotated' : ''} /></button>
+            <section id="render-advanced-panel" className="ref2va-setting-group compact-advanced-grid" aria-hidden={!advanced}><div className="ref2va-setting-heading"><span>04</span><div><strong>Model and sampling</strong><small>Override the validated H3 defaults only when needed.</small></div></div><div className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ'], ["quality", 'Quality · INT8 ConvRot']]} /><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /></div><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Custom sampler and scheduler</label><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' ? turbo8Sampling(turbo8Profile).sampler : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' ? turbo8Sampling(turbo8Profile).scheduler : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", 'Model defaults · 12 / 3'], ["custom", 'Custom shifts']]} /><NumberField label="Video shift" value={shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom'} /><NumberField label="Audio shift" value={shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom'} /></div></section>
+            <p className="field-help render-duration">{frameCount(duration)} frames · {(frameCount(duration) / 24).toFixed(2)}s at 24 fps.</p>
+          </section></div>}
           <div id="h3-render-readiness" className={`h3-render-readiness ${renderBlocker ? 'blocked' : 'ready'}`} role="status"><strong>{renderBlocker ? 'Before you generate' : 'Ready to render'}</strong><span>{renderBlocker || 'Review the output settings, then generate your video. Progress and results appear in Preview.'}</span></div>
-<div className="generate-bar preview-generate-bar"><div className="generation-summary"><Gauge size={17} /><span><strong>{resolution.replace('x', ' × ')}</strong><small>{(frameCount(duration) / 24).toFixed(2)}s · 24 fps · {effectiveSteps} steps · {turbo === 'off' ? 'Native' : `Turbo ${turbo}`}</small></span></div><div className="generate-actions">{latestJob && ['queued', 'running'].includes(latestJob.status) && <button className="danger-button" onClick={() => onCancel(latestJob)} disabled={cancelling}><CircleStop size={16} />{cancelling ? 'Stopping…' : latestJob.mediaType === 'image' ? 'Cancel image' : 'Cancel generation'}</button>}<button className="primary-button generation-button" onClick={() => onGenerate(renderAnyway)} aria-describedby="h3-render-readiness" disabled={submitting || Boolean(renderBlocker)}>{submitting ? <LoaderCircle size={18} className="spin" /> : <Play size={18} fill="currentColor" />}{submitting ? 'Submitting…' : 'Generate video'}</button><label className="scene-render-anyway" title="Submit despite scene conflicts. Engine, models and media must still be available."><input type="checkbox" checked={renderAnyway} onChange={event => setRenderAnyway(event.target.checked)} />Render anyway</label>{renderAnyway && <small className="scene-render-override-note">Scene conflicts will be ignored for this submission.</small>}{mode === 'reference' && <button className="secondary-button generation-image-button" onClick={onGenerateImage} disabled={stillSubmitting || !connected || !modelReady || Boolean(shotBlocker)}>{stillSubmitting ? <LoaderCircle size={16} className="spin" /> : <ImagePlus size={16} />}{stillSubmitting ? 'Generating image…' : 'Generate image'}</button>}</div></div>
+<div className="generate-bar preview-generate-bar"><div className="generation-summary"><Gauge size={17} /><span><strong>{resolution.replace('x', ' × ')}</strong><small>{(frameCount(duration) / 24).toFixed(2)}s · 24 fps · {effectiveSteps} steps · {turbo === 'off' ? 'Native' : `Turbo ${turbo}`}</small></span></div><div className="generate-actions">{latestJob && ['queued', 'running'].includes(latestJob.status) && <button className="danger-button" onClick={() => onCancel(latestJob)} disabled={cancelling}><CircleStop size={16} />{cancelling ? 'Stopping…' : latestJob.mediaType === 'image' ? 'Cancel image' : 'Cancel generation'}</button>}</div></div>
           {previewPopoutRoot && createPortal(<DetachedPreviewMonitor job={latestJob} livePreview={livePreview} liveEnabled={liveEnabled} blurSensitive={blurNsfwPreview} />, previewPopoutRoot)}
         </aside>
       </div>

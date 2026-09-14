@@ -25,13 +25,20 @@ export function compileScene(state: ScenePromptState): CompiledScene {
   }) }
   const error = (code: string, message: string, referenceId?: string) => conflicts.push({ code, message, severity: 'error', referenceId })
   const warning = (code: string, message: string, referenceId?: string) => conflicts.push({ code, message, severity: 'warning', referenceId })
+  const explicitNudityDirection = /\b(?:nude|naked|undressed|topless|bare(?:-chested|-foot)?|without\s+(?:any\s+)?(?:clothes|clothing|garments))\b/i.test(state.scene)
+  let wardrobeConflictReported = false
   const refs = expandEmbeddedAudio(state.references)
   const openings = refs.filter(ref => ref.anchor === 'opening')
   const endings = refs.filter(ref => ref.anchor === 'ending')
   const mode: H3Mode = state.mode === 'reference' ? 'Ref2VA' : openings.length && endings.length ? 'FL2VA' : endings.length ? 'L2VA' : openings.length ? 'I2VA' : 'T2VA'
   const counters = { image: 0, video: 0, audio: 0 }
   const labels = new Map(refs.map(ref => [ref.id, `<${ref.file.kind === 'image' ? 'Picture' : ref.file.kind === 'video' ? 'Video' : 'Audio'} ${++counters[ref.file.kind]}>`]))
-  const mapping = refs.map(ref => ({ id: ref.id, label: labels.get(ref.id)!, role: ref.anchor || ref.audio?.layer || ref.videoRole || ref.preserve.join(', ') || 'unassigned' }))
+  const mapping = refs.map(ref => ({ id: ref.id, label: labels.get(ref.id)!, role: ref.anchor || ref.audio?.layer || ref.videoRole || (ref.file.referenceRole === 'wardrobe' ? 'wardrobe' : '') || ref.preserve.join(', ') || 'unassigned' }))
+  // A wardrobe-role picture is authoritative even if a legacy scene state did
+  // not yet copy `wardrobe` into its preserve list. Keep this normalization in
+  // the compiler so the transport and UI cannot accidentally drop clothing.
+  const wardrobeRefs = refs.filter(ref => ref.file.kind !== 'audio' && (ref.file.referenceRole === 'wardrobe' || ref.preserve.includes('wardrobe')))
+  const unownedWardrobeRefs = wardrobeRefs.filter(ref => !ref.ownerId)
   if (state.view !== 'manual' && !state.scene.trim() && !state.dialogue.length && !state.shots.some(shot => shot.description.trim())) error('empty-scene', 'The Scene field is empty.')
   if (!Number.isFinite(state.duration) || state.duration <= 0 || state.duration > 15) error('duration', 'Choose a clip duration greater than 0 and no longer than 15 seconds.')
   if (openings.length > 1 || endings.length > 1) error('multiple-anchors', 'Only one literal opening frame and one ending frame can be active.')
@@ -53,7 +60,10 @@ export function compileScene(state: ScenePromptState): CompiledScene {
   }
   for (const ref of refs) {
     if (ref.ownerId && !state.characters.some(character => character.id === ref.ownerId)) error('missing-owner', `${ref.name} belongs to a character that is no longer present.`, ref.id)
-    if (!ref.ownerId && ref.preserve.some(attribute => personAttributes.includes(attribute))) error('owner-required', `Assign a character to ${ref.name} before retaining identity or wardrobe.`, ref.id)
+    const retainedPersonAttributes = [...new Set([...ref.preserve, ...(ref.file.referenceRole === 'wardrobe' ? ['wardrobe' as Attribute] : [])])].filter(attribute => personAttributes.includes(attribute))
+    const wardrobeOnly = retainedPersonAttributes.length === 1 && retainedPersonAttributes[0] === 'wardrobe'
+    if (!ref.ownerId && retainedPersonAttributes.length && !(wardrobeOnly && state.characters.length <= 1)) error('owner-required', `Assign a character to ${ref.name} before retaining identity, hair, accessories, or wardrobe shared by multiple subjects.`, ref.id)
+    if (!ref.ownerId && wardrobeOnly && state.characters.length > 1) error('owner-required', `Assign ${ref.name} to the character who should wear it; an unassigned wardrobe cannot be shared by multiple subjects.`, ref.id)
     if (ref.anchor) {
       if (ref.file.kind !== 'image') error('anchor-kind', 'Literal frame anchors must be images.', ref.id)
       const shot = ref.anchor === 'ending' ? shots.at(-1) : shots[0]
@@ -90,7 +100,7 @@ export function compileScene(state: ScenePromptState): CompiledScene {
     if ((line.continues === 'from' || line.continues === 'both') && !dialogue.some(other => other.shotId === shots[shots.findIndex(s => s.id === line.shotId) - 1]?.id && (other.continues === 'to' || other.continues === 'both') && other.speakerIds.join() === line.speakerIds.join())) error('speech-continuation', 'Dialogue across a cut needs matching continuation parts and the same speaker.')
     if ((line.continues === 'to' || line.continues === 'both') && !dialogue.some(other => other.shotId === shots[shots.findIndex(s => s.id === line.shotId) + 1]?.id && (other.continues === 'from' || other.continues === 'both') && other.speakerIds.join() === line.speakerIds.join())) error('speech-continuation', 'Add the dialogue continuation in the following shot.')
   }
-  const definitions: string[] = [], retention: string[] = []
+  const definitions: string[] = [], retention: string[] = [], wardrobeContracts: string[] = []
   const subjects: CompiledScene['subjects'] = []
   const subjectByOwner = new Map<string, string>()
   const assignments = new Map<string, SceneReference[]>()
@@ -98,14 +108,39 @@ export function compileScene(state: ScenePromptState): CompiledScene {
   const defineSubject = (name: string, fields: Array<[Attribute, Value]>, key: string) => {
     const label = `<Subject ${subjects.length + 1}>`
     subjectByOwner.set(key, label)
-    const attributes = fields.map(([attribute, field]) => `${attribute}: ${field.referenceIds?.map(id => labels.get(id)).filter(Boolean).join(' + ') || ''}${field.value ? ` (${clean(field.value)})` : ''}`)
+    const attributes = fields.map(([attribute, field]) => {
+      const references = field.referenceIds?.map(id => labels.get(id)).filter(Boolean).join(' + ') || ''
+      const observed = field.value ? ` (${clean(field.value)})` : ''
+      // A wardrobe preserve assignment needs an explicit clothing contract.
+      // A bare `<Picture N>` is too weak for Ref2VA: the model can keep the
+      // identity while treating the identity photo as irrelevant clothing and
+      // generating an undressed subject. Keep this deterministic and scoped to
+      // the assigned wardrobe source so other preserved attributes remain
+      // independently composable.
+      if (attribute === 'wardrobe' && (references || field.value)) {
+        if (explicitNudityDirection && !wardrobeConflictReported) {
+          error('wardrobe-nudity-conflict', 'Scene explicitly requests nudity while a preserved wardrobe is active. Remove the nudity direction or disable Wardrobe Preserve before rendering.', field.referenceIds?.[0])
+          wardrobeConflictReported = true
+        }
+        const safety = explicitNudityDirection
+          ? 'an explicit nudity direction conflicts with this preserved wardrobe and must be resolved before rendering'
+          : 'do not remove clothing, substitute identity-photo clothing, or render the subject nude or undressed'
+        // Keep the explicit value formatting used by the existing compiler
+        // when a USER/PROJECT wardrobe overrides a reference. The extra
+        // contract is appended without replacing that authored value.
+        const contract = `${attribute}: ${references}${observed} (mandatory complete wardrobe; fully clothed in every assigned garment, layer, and item of footwear; retain the visible fit, coverage, materials, and closures; ${safety})`
+        wardrobeContracts.push(`${label} wardrobe contract: ${contract}. Apply this clothing contract to ${clean(name)} only.`)
+        return contract
+      }
+      return `${attribute}: ${references}${observed}`
+    })
     const excluded = cameraAttributes.filter(attribute => !fields.some(([key]) => key === attribute))
     subjects.push({ label, name, attributes, excluded })
     definitions.push(`${label} is ${clean(name)}. ${attributes.join('; ')}. Only these assigned attributes belong to this subject.${excluded.length ? ` Unassigned ${excluded.join(', ')} are not inherited.` : ''} Do not transfer attributes from another subject's sources.`)
-    retention.push(`${label} (appears in ${shotList}): fully_preserved - retain the defined attributes within their assigned scope; compose each target shot using its own camera direction.`)
+    retention.push(`${label} (appears in ${shotList}): fully_preserved - retain the defined attributes within their assigned scope; compose each target shot using its own camera direction.${fields.some(([attribute, field]) => attribute === 'wardrobe' && (field.referenceIds?.length || field.value)) ? ' The assigned wardrobe is mandatory for every frame; keep the subject clothed throughout the shot.' : ''}`)
   }
   refs.filter(ref => ref.file.kind !== 'audio').forEach(ref => {
-    for (const attribute of [...ref.preserve, ...ref.locks]) {
+    for (const attribute of [...new Set([...ref.preserve, ...(ref.file.referenceRole === 'wardrobe' ? ['wardrobe' as Attribute] : [])]), ...ref.locks]) {
       const key = `${personAttributes.includes(attribute) ? ref.ownerId || ref.id : 'scene'}:${attribute}`
       assignments.set(key, [...(assignments.get(key) || []), ref])
     }
@@ -130,10 +165,35 @@ export function compileScene(state: ScenePromptState): CompiledScene {
   }
   for (const character of state.characters) {
     const fields = fieldsFor(character.id, character.attributes)
+    // A standalone wardrobe is unowned by design when the scene has one
+    // structured character. Attach it to that sole subject so the Ref2VA
+    // subject definition carries the actual clothing source.
+    if (state.characters.length === 1 && unownedWardrobeRefs.length && !fields.some(([attribute]) => attribute === 'wardrobe')) {
+      fields.push(['wardrobe', { value: unownedWardrobeRefs.map(ref => ref.observed.wardrobe).filter(Boolean).join('; '), source: 'PRESERVE', referenceIds: unownedWardrobeRefs.map(ref => ref.id) }])
+    }
     if (fields.length && mode === 'Ref2VA') defineSubject(character.name, fields, character.id)
+  }
+  if (!state.characters.length && unownedWardrobeRefs.length && mode === 'Ref2VA') {
+    defineSubject('the visible subject', [['wardrobe', { value: unownedWardrobeRefs.map(ref => ref.observed.wardrobe).filter(Boolean).join('; '), source: 'PRESERVE', referenceIds: unownedWardrobeRefs.map(ref => ref.id) }]], 'visible-subject')
   }
   const environmentFields = fieldsFor('scene', { ...state.overrides, ...(state.environment.value ? { environment: state.environment } : {}), ...(state.lighting.value ? { lighting: state.lighting } : {}) })
   if (environmentFields.length && mode === 'Ref2VA') defineSubject('the target scene environment and visual treatment', environmentFields, 'scene')
+  // Standalone Wardrobe Studio loads have no character owner. They are valid
+  // for a single visible subject (or a scene with no structured cast), but the
+  // clothing contract must still be emitted so H3 cannot fall back to nudity.
+  unownedWardrobeRefs.filter(() => state.characters.length > 1).forEach(ref => {
+    const label = labels.get(ref.id)!
+    const observed = ref.observed.wardrobe ? ` (${clean(ref.observed.wardrobe)})` : ''
+    const target = state.characters.length === 1 ? clean(state.characters[0].name) : 'the visible subject'
+    if (explicitNudityDirection && !wardrobeConflictReported) {
+      error('wardrobe-nudity-conflict', 'Scene explicitly requests nudity while a preserved wardrobe is active. Remove the nudity direction or disable Wardrobe Preserve before rendering.', ref.id)
+      wardrobeConflictReported = true
+    }
+    const safety = explicitNudityDirection
+      ? 'an explicit nudity direction conflicts with this preserved wardrobe and must be resolved before rendering'
+      : 'do not remove clothing, substitute identity-photo clothing, or render the subject nude or undressed'
+    wardrobeContracts.push(`${label} wardrobe contract: wardrobe: ${label}${observed} (mandatory complete wardrobe; fully clothed in every assigned garment, layer, and item of footwear; retain the visible fit, coverage, materials, and closures; ${safety}). Apply this clothing contract to ${target} only.`)
+  })
   for (const ref of refs) {
     const label = labels.get(ref.id)!
     if (ref.anchor || ref.locks.includes('composition')) {
@@ -185,7 +245,12 @@ export function compileScene(state: ScenePromptState): CompiledScene {
   const task = refs.some(ref => ref.videoRole === 'editing') ? 'video editing' : refs.some(ref => ref.videoRole === 'continuation') ? 'video continuation' : 'reference generation'
   const audioTask = refs.some(ref => ref.audio?.relation === 'fully_copy' || ref.audio?.relation === 'partially_copy') ? ' + audio reuse' : refs.some(ref => ref.audio) ? ' + audio reference' : ''
   const alignment = mode === 'I2VA' ? 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.' : mode === 'FL2VA' ? `How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot ${shots.length}) aligns with the ${state.duration.toFixed(2)}-second mark of the target video.` : mode === 'L2VA' ? `How the reference pictures align with the target video — <Picture 1> (from [Shot ${shots.length}]) aligns with the ${state.duration.toFixed(2)}-second mark of the target video.` : ''
-  const compiled = mode === 'Ref2VA' ? [`subject_definitions:\n${definitions.join('\n')}`, `summary: [${task}${audioTask}] Create a ${state.duration.toFixed(2)}-second target video using the defined reference roles.`, `retention_analysis:\n${retention.join('\n')}`, `detailed_description: ${styles ? `The target video uses ${styles}.\n` : ''}${description}\n${continuity}`, `overall_soundscape: ${sound}`, `non_diegetic_music: ${music}`].join('\n\n') : [alignment, `integrated_multimodal_description: ${description}\n${continuity}`, `overall_soundscape: ${sound}`, `non_diegetic_music: ${music}`].filter(Boolean).join('\n\n')
+  const clothingDirection = wardrobeContracts.length
+    ? explicitNudityDirection
+      ? `WARDROBE PRESERVATION CONFLICT:\n${wardrobeContracts.join('\n')}\nThe authored Scene contains an explicit nudity direction. Resolve this conflict before rendering; the explicit user direction takes priority once the wardrobe preserve assignment is removed.`
+      : `WARDROBE PRESERVATION (mandatory):\n${wardrobeContracts.join('\n')}\nDo not produce nudity or an undressed body when a wardrobe contract is active.`
+    : ''
+  const compiled = mode === 'Ref2VA' ? [`subject_definitions:\n${definitions.join('\n')}`, `summary: [${task}${audioTask}] Create a ${state.duration.toFixed(2)}-second target video using the defined reference roles.`, `retention_analysis:\n${retention.join('\n')}`, `detailed_description: ${styles ? `The target video uses ${styles}.\n` : ''}${clothingDirection ? `${clothingDirection}\n` : ''}${description}\n${continuity}`, `overall_soundscape: ${sound}`, `non_diegetic_music: ${music}`].join('\n\n') : [alignment, `integrated_multimodal_description: ${clothingDirection ? `${clothingDirection}\n` : ''}${description}\n${continuity}`, `overall_soundscape: ${sound}`, `non_diegetic_music: ${music}`].filter(Boolean).join('\n\n')
   const prompt = state.view === 'manual' ? state.manualPrompt : compiled
   if (state.view === 'manual') {
     if (!prompt.trim()) error('empty-manual', 'Manual Override is empty.')

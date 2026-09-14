@@ -14,6 +14,26 @@ export type SceneReference = {
   embeddedAudio?: SceneReference['audio']
   audio?: { relation: 'fully_copy' | 'partially_copy' | 'reference' | 'weak_reference'; layer: 'voice' | 'ambience' | 'music' | 'soundtrack'; speakerId?: string; description: string }
 }
+
+/**
+ * Defaults for the compact Preserve action in Scene Composer. The action
+ * preserves the reference's declared handoff role; it must never turn an
+ * approved wardrobe source into an identity-only source just because the
+ * reference is owned by a character.
+ */
+export function defaultPreservedAttributes(ref: Pick<SceneReference, 'file' | 'ownerId'>): Attribute[] {
+  switch (ref.file.referenceRole) {
+    case 'wardrobe': return ['wardrobe']
+    case 'subject': return ['identity', 'face', 'body']
+    case 'location': return ['environment', 'lighting']
+    case 'prop': return ['props']
+    case 'lighting-style': return ['lighting', 'style']
+    // A reusable shot reference carries the world and any explicitly owned
+    // wardrobe forward, while its framing remains free for the new shot.
+    case 'composition': return ref.ownerId ? ['wardrobe', 'environment', 'lighting'] : ['environment', 'lighting']
+    default: return ref.ownerId ? ['identity', 'face', 'body'] : ['environment', 'lighting']
+  }
+}
 export type SceneCharacter = { id: string; name: string; attributes: Partial<Record<Attribute, Value>>; source?: Source }
 export type SceneShot = { id: string; start: number; end: number; description: string; camera: Camera; characterIds: string[] }
 export type SceneDialogue = { id: string; shotId: string; at: number; speakerIds: string[]; language: string; text: string; delivery: string; voiceover?: boolean; offscreen?: boolean; continues?: 'from' | 'to' | 'both'; cutoff?: boolean }
@@ -45,11 +65,30 @@ export function bindSceneReferences(state: ScenePromptState, bindings: MovieRefe
   const add = (file: MediaFile, binding?: MovieReferenceBinding, anchor?: SceneReference['anchor']) => {
     const id = `${file.kind}:${file.path}${anchor ? `:${anchor}` : ''}`
     const old = previous.get(id)
-    const ownerId = old?.ownerId ?? binding?.characterId
+    // The current allocator is authoritative for ownership. A reference can
+    // move from a standalone scene slot into a Character Studio assignment
+    // (or between characters) while the same path remains in the workspace;
+    // retaining the old owner would orphan wardrobe preservation and allow the
+    // identity subject to render without its assigned clothing.
+    const ownerId = binding?.characterId ?? old?.ownerId
     if (ownerId && !characters.has(ownerId)) characters.set(ownerId, { id: ownerId, name: binding?.label.replace(/^Character:\s*/, '').split(' / ')[0].split(' for ').at(-1) || 'Character', attributes: {}, source: 'CHARACTER' })
     const role = binding?.purpose && binding.purpose !== 'generic' ? binding.purpose : file.referenceRole
+    // A library binding is more authoritative than stale metadata on the
+    // original file. Normalize it before the compiler and before the UI reads
+    // the quick Preserve role.
+    const handoffRole: MediaFile['referenceRole'] = role === 'character' || role === 'character-angle' || role === 'subject' ? 'subject' : role === 'wardrobe' ? 'wardrobe' : role === 'location' ? 'location' : role === 'hair' ? 'subject' : role === 'accessory' || role === 'detail' || role === 'prop' || role === 'product' ? 'prop' : role === 'lighting-style' || role === 'style' ? 'lighting-style' : role === 'continuity' ? 'composition' : role === 'composition' ? 'composition' : undefined
+    const resolvedFile = handoffRole ? { ...file, referenceRole: handoffRole } : file
     const attributes: Attribute[] = role === 'character' || role === 'character-angle' || role === 'subject' ? ['identity', 'face', 'body'] : role === 'location' ? ['environment', 'lighting'] : role === 'hair' ? ['hair'] : role === 'wardrobe' ? ['wardrobe'] : role === 'accessory' ? ['accessories'] : role === 'detail' ? ['body'] : role === 'lighting-style' ? ['lighting', 'style'] : role === 'style' ? ['style'] : role === 'prop' || role === 'product' ? ['props'] : file.referenceRetention === 'preserve' ? ['environment', 'lighting'] : []
-    refs.push(old ? { ...old, file } : { id, file, ownerId, name: binding?.label ?? file.name, preserve: attributes, locks: role === 'composition' ? ['composition'] : [], anchor: anchor ?? (file.openingFrameTreatment === 'match' || file.openingFrameTreatment === 'arc' || binding?.purpose === 'continuity' ? 'opening' : undefined), observed: {}, source: binding?.characterId ? 'CHARACTER' : 'PRESERVE', ...(file.kind === 'video' ? { videoRole: 'motion' as const } : {}), ...(file.kind === 'audio' ? { audio: { relation: 'reference' as const, layer: 'ambience' as const, description: 'Sound texture' } } : {}) })
+    // Library roles are hard assignments. Preserve any authored attributes,
+    // but always add the role's canonical attribute so an assigned wardrobe
+    // cannot silently degrade into an unowned identity or composition source.
+    // If an asset changes handoff role (for example a prior scene reference is
+    // later assigned as a character identity), discard stale role attributes so
+    // environment or clothing cannot bleed into the new owner. Within the same
+    // role, keep authored attribute additions and add the canonical role field.
+    const roleChanged = Boolean(old && (old.file.referenceRole ?? '') !== (resolvedFile.referenceRole ?? ''))
+    const preserve = old && !roleChanged ? [...new Set([...old.preserve, ...attributes])] : attributes
+    refs.push(old ? { ...old, file: resolvedFile, ownerId, preserve } : { id, file: resolvedFile, ownerId, name: binding?.label ?? file.name, preserve, locks: role === 'composition' ? ['composition'] : [], anchor: anchor ?? (file.openingFrameTreatment === 'match' || file.openingFrameTreatment === 'arc' || binding?.purpose === 'continuity' ? 'opening' : undefined), observed: {}, source: binding?.characterId ? 'CHARACTER' : 'PRESERVE', ...(file.kind === 'video' ? { videoRole: 'motion' as const } : {}), ...(file.kind === 'audio' ? { audio: { relation: 'reference' as const, layer: 'ambience' as const, description: 'Sound texture' } } : {}) })
   }
   if (state.mode === 'reference') { bindings.forEach(binding => add(binding.file, binding)); videos.forEach(file => add(file)); audios.forEach(file => add(file)) }
   else { if (first && (state.mode === 'image' || state.mode === 'frames')) add(first, undefined, 'opening'); if (last && state.mode === 'frames') add(last, undefined, 'ending') }
