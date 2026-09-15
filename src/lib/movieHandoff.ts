@@ -1,11 +1,11 @@
 import type { MediaFile } from '../types'
 
 export const movieFrameTargets = [
-  ['h3-reference-first', 'H3 · first-frame reference'],
-  ['h3-i2v', 'H3 · image to video'],
+  ['h3-reference-first', 'H3 Ref2VA · native Frame 0 anchor'],
+  ['h3-i2v', 'H3 I2V · first-frame input'],
   ['h3-first', 'H3 · first + last: opening frame'],
   ['h3-last', 'H3 · first + last: closing frame'],
-  ['h3-reference', 'H3 · additional picture reference'],
+  ['h3-reference', 'H3 Ref2VA · reference only (no frame lock)'],
   ['ltx', 'LTX 2.5 · image to video'],
   ['save', 'Save frame only'],
 ] as const

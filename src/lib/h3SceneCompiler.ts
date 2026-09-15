@@ -41,7 +41,7 @@ export function compileScene(state: ScenePromptState): CompiledScene {
   const unownedWardrobeRefs = wardrobeRefs.filter(ref => !ref.ownerId)
   if (state.view !== 'manual' && !state.scene.trim() && !state.dialogue.length && !state.shots.some(shot => shot.description.trim())) error('empty-scene', 'The Scene field is empty.')
   if (!Number.isFinite(state.duration) || state.duration <= 0 || state.duration > 15) error('duration', 'Choose a clip duration greater than 0 and no longer than 15 seconds.')
-  if (openings.length > 1 || endings.length > 1) error('multiple-anchors', 'Only one literal opening frame and one ending frame can be active.')
+  if (openings.length > 1 || endings.length > 1) error('multiple-anchors', 'Only one native Frame 0 anchor and one ending-frame anchor can be active.')
   if (state.mode === 'image' && !openings.length) error('missing-opening', 'Choose an opening frame for image-to-video.')
   if (state.mode === 'frames' && !endings.length) error('missing-ending', 'Choose an ending frame. The opening frame is optional for last-frame generation.')
   if (mode === 'Ref2VA' && !counters.image && !counters.video) error('visual-required', 'Reference generation requires an image or video; audio cannot be the only input.')
@@ -84,7 +84,7 @@ export function compileScene(state: ScenePromptState): CompiledScene {
     }
     if (mode === 'Ref2VA' && ref.file.kind === 'image' && !ref.preserve.length && !ref.locks.length && !ref.anchor) error('role-required', `Choose what ${ref.name} contributes, or remove it.`, ref.id)
   }
-  if (state.continuity.exactFrame && !openings.length) error('continuation-anchor', 'Exact frame continuation is on, but no Opening Frame is selected.')
+  if (state.continuity.exactFrame && !openings.length) error('continuation-anchor', 'Frame-0 continuation is required, but no picture is assigned as the native Frame 0 anchor.')
   if (state.noDialogue && (state.dialogue.length || /\b(?:says|whispers|shouts|speaks)\b|<d>/i.test(state.scene))) error('speech-disabled', 'Dialogue is present while No dialogue is enabled.')
   if (/<(?:Subject|Picture|Video|Audio)\s+\d+>|(?:subject_definitions|integrated_multimodal_description|retention_analysis):/i.test(state.scene)) warning('legacy-format', 'This scene contains compiled H3 syntax. Use Manual Override to preserve an existing H3 prompt, or replace it with a natural scene description.')
 

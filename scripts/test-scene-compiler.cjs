@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict')
 const { load } = require('./test-ts-loader.cjs')
-const { createSceneState, value, parseStyleValues, applySceneCommand, applySceneSuggestions, bindSceneReferences, defaultPreservedAttributes, extractSceneDialogue } = load('src/lib/scenePromptState.ts')
+const { createSceneState, value, parseStyleValues, applySceneCommand, applySceneSuggestions, bindSceneReferences, defaultPreservedAttributes, extractSceneDialogue, setFrameZeroGuide } = load('src/lib/scenePromptState.ts')
 const { compileScene } = load('src/lib/h3SceneCompiler.ts')
 const { buildMiniMaxWorkflow } = load('src/lib/workflow.ts')
 const { importSceneDraft } = load('src/lib/sceneLegacyAdapter.ts')
@@ -20,6 +20,21 @@ const errors = state => compileScene(state).conflicts.filter(item => item.severi
 const refContinuation = bindSceneReferences(createSceneState('She continues walking.', 5, 'reference'), [{ file: { ...image('Previous final frame'), referenceRole: 'composition', referenceRetention: 'preserve', openingFrameTreatment: 'match' }, purpose: 'generic', label: 'Previous final frame', source: 'shot' }])
 assert.equal(refContinuation.references[0].anchor, 'opening', 'Ref2VA continuation frame is a literal opening anchor')
 assert.ok(refContinuation.references[0].locks.includes('composition'))
+let frameZeroState = bindSceneReferences(createSceneState('Continue the shot.', 5, 'reference'), [
+  { file: image('Identity'), purpose: 'character', label: 'Identity', characterId: 'person', source: 'character-studio' },
+  { file: image('Previous frame'), purpose: 'generic', label: 'Previous frame', source: 'shot' },
+])
+frameZeroState = setFrameZeroGuide(frameZeroState, frameZeroState.references[1].id)
+assert.equal(frameZeroState.references[1].anchor, 'opening', 'Frame 0 setting assigns the selected image as the native opening guide')
+assert.equal(frameZeroState.references[0].anchor, undefined)
+assert.equal(frameZeroState.continuity.exactFrame, true)
+assert.equal(frameZeroState.continuity.scene, true)
+frameZeroState = setFrameZeroGuide(frameZeroState, frameZeroState.references[0].id)
+assert.equal(frameZeroState.references[0].anchor, 'opening', 'Selecting another Frame 0 guide replaces the previous opening guide')
+assert.equal(frameZeroState.references[1].anchor, undefined)
+frameZeroState = setFrameZeroGuide(frameZeroState)
+assert.equal(frameZeroState.references.some(ref => ref.anchor === 'opening'), false)
+assert.equal(frameZeroState.continuity.exactFrame, false)
 assert.equal([...defaultPreservedAttributes({ file: { ...image('Wardrobe'), referenceRole: 'wardrobe' }, ownerId: 'kierra' })].join(','), 'wardrobe', 'Wardrobe Preserve keeps the wardrobe role')
 assert.equal([...defaultPreservedAttributes({ file: { ...image('Identity'), referenceRole: 'subject' }, ownerId: 'kierra' })].join(','), 'identity,face,body', 'Identity Preserve keeps the identity role')
 assert.equal(parseStyleValues('Found ')[0].value, 'Found ', 'style entry preserves a trailing space while typing')
@@ -142,7 +157,7 @@ const conflicting = clone(state)
 conflicting.continuity.exactFrame = true
 conflicting.references = conflicting.references.map(ref => ({ ...ref, anchor: undefined }))
 const overrideOptions = { ...options, sceneState: conflicting }
-assert.throws(() => buildMiniMaxWorkflow(overrideOptions, models, uploads), /Opening Frame/)
+assert.throws(() => buildMiniMaxWorkflow(overrideOptions, models, uploads), /Frame 0 anchor/)
 assert.equal(buildMiniMaxWorkflow({ ...overrideOptions, ignoreSceneConflicts: true }, models, uploads)['10'].inputs.prompt, compileScene(conflicting).prompt)
 assert.throws(() => buildMiniMaxWorkflow({ ...overrideOptions, ignoreSceneConflicts: true }, models, { ...uploads, images: [] }), /upload order\/count/, 'Override must not bypass transport validation')
 const manualOnly = createSceneState('', 5)

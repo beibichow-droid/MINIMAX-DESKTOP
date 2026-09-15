@@ -128,6 +128,10 @@ async function localMediaResponse(filePath: string, request: Request) {
   if (!details.isFile() || details.size === 0) return new Response('Media file is empty', { status: 404 })
   const size = details.size
   const range = request.headers.get('range')
+  const etag = `W/"${size}-${Math.trunc(details.mtimeMs)}"`
+  if (!range && request.headers.get('if-none-match') === etag) {
+    return new Response(null, { status: 304, headers: { etag, 'cache-control': 'private, max-age=3600' } })
+  }
   let start = 0
   let end = size - 1
   let status = 200
@@ -152,6 +156,10 @@ async function localMediaResponse(filePath: string, request: Request) {
     'content-length': String(end - start + 1),
     'content-type': mediaMimeTypes[extname(filePath).toLowerCase()] ?? 'application/octet-stream',
     'cache-control': 'private, max-age=3600',
+    'content-disposition': 'inline',
+    'last-modified': details.mtime.toUTCString(),
+    'x-content-type-options': 'nosniff',
+    etag,
   })
   if (status === 206) headers.set('content-range', `bytes ${start}-${end}/${size}`)
   if (request.method === 'HEAD') return new Response(null, { status, headers })

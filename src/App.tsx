@@ -5,10 +5,10 @@ import { SceneComposer, type SceneInspectorSelection } from './components/SceneC
 import { SceneContextPanels, SceneSelectionInspector } from './components/SceneContextPanels'
 import { buildCharacterDialogueRequest } from './lib/dialogPolicy'
 import { compileScene } from './lib/h3SceneCompiler'
-import { bindSceneReferences, createSceneState, resizeScene, value, type ScenePromptState } from './lib/scenePromptState'
+import { bindSceneReferences, createSceneState, resizeScene, setFrameZeroGuide, value, type ScenePromptState } from './lib/scenePromptState'
 import { MOVIE_HANDOFF_KEY, parseMovieHandoff, type MovieFrameTarget } from './lib/movieHandoff'
 import { MovieEditor } from './components/MovieEditor'
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import QRCode from 'qrcode'
 import { createId } from './lib/createId'
@@ -207,6 +207,13 @@ type WorkspaceSearchEntry = {
 
 function compactSearchText(value: string | null | undefined) {
   return (value ?? '').replace(/\s+/g, ' ').trim()
+}
+
+function highlightWorkspaceSearchText(text: string, query: string) {
+  const terms = compactSearchText(query).split(' ').filter(Boolean)
+  if (!terms.length) return text
+  const matcher = new RegExp(`(${terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
+  return text.split(matcher).map((part, index) => terms.some((term) => part.toLowerCase() === term.toLowerCase()) ? <mark key={`${part}-${index}`}>{part}</mark> : part)
 }
 
 function searchLabelText(label: HTMLLabelElement | null) {
@@ -432,10 +439,10 @@ function withoutPreview(file: MediaFile | null) {
 }
 
 const modeInfo: Array<{ id: GenerationMode; label: string; note: string; icon: typeof Film }> = [
-  { id: 'text', label: 'Text', note: 'Prompt to video', icon: WandSparkles },
-  { id: 'image', label: 'Image', note: 'Animate one frame', icon: ImageIcon },
-  { id: 'frames', label: 'Frame endpoints', note: 'First + last / last only', icon: Aperture },
-  { id: 'reference', label: 'Reference', note: 'Images, video, audio', icon: Sparkles },
+  { id: 'text', label: 'Text video', note: 'Create from a scene prompt', icon: WandSparkles },
+  { id: 'image', label: 'Image video', note: 'Animate one opening frame', icon: ImageIcon },
+  { id: 'frames', label: 'Keyframes', note: 'Guide the start and ending', icon: Aperture },
+  { id: 'reference', label: 'References', note: 'Use images, video, and audio', icon: Sparkles },
 ]
 
 const diagnosticPrompt = 'A woman standing beside a window in soft daylight, natural skin texture, subtle head movement, realistic cinematic photography.'
@@ -1239,11 +1246,11 @@ function App() {
       crop: { x: .5, y: .5, zoom: 1, fit: 'crop', background: 'auto' },
     }
     setReferenceImages(current => [...current, { ...frame, referenceRole: opening.mode === 'reframe' ? 'location' : 'composition', referenceRetention: 'preserve' }])
-    setSceneState(current => ({ ...current, camera: opening.cameraAngle ? { ...current.camera, angle: value(opening.cameraAngle) } : current.camera, continuity: { ...current.continuity, scene: true, exactFrame: opening.mode === 'match' } }))
+    setSceneState(current => ({ ...current, camera: opening.cameraAngle ? { ...current.camera, angle: value(opening.cameraAngle) } : current.camera, continuity: { ...current.continuity, scene: true, exactFrame: opening.mode !== 'reframe' } }))
     setMode('reference')
     setActiveJobId(null)
     setView('create')
-    setNotice({ tone: 'success', text: 'Previous frame added to Scene Composer. Review its preserved attributes and literal frame role before rendering.' })
+    setNotice({ tone: 'success', text: opening.mode === 'reframe' ? 'Previous frame added as a reference-only source. It guides scene continuity but does not lock frame 0.' : 'Previous frame assigned as the native Frame 0 anchor. Ref2VA references remain available for identity, wardrobe, location, motion, and sound.' })
   }
 
   const startRef2vaContinuation = async (job: GenerationJob) => {
@@ -1657,6 +1664,13 @@ function App() {
     }
   }
 
+  const removeJobFromHistory = (job: GenerationJob) => {
+    if (['queued', 'running'].includes(job.status)) return
+    if (!window.confirm('Remove this generation from Queue history? Any rendered file will remain in your output folder.')) return
+    setJobs((current) => current.filter((item) => item.id !== job.id))
+    setNotice({ tone: 'neutral', text: 'Generation removed from Queue history. Rendered files were kept.' })
+  }
+
   const chooseLtxImage = async (): Promise<MediaFile | null> => {
     const picked = await window.minimax.chooseMedia('image')
     if (!picked) return null
@@ -1935,7 +1949,7 @@ function App() {
     const boundScene = bindSceneReferences(sceneState, renderBindings, referenceVideos, referenceAudios, firstFrame, lastFrame)
     const sceneCompilation = compileScene(boundScene)
     const promptAudit = { errors: sceneCompilation.conflicts.filter(item => item.severity === 'error').map(item => item.message) }
-    if (mode === 'reference' && boundScene.references.some(ref => ref.anchor) && !info.MiniMaxH3AddGuide) { setNotice({ tone: 'error', text: 'Literal reference frame anchors require MiniMaxH3AddGuide. Update ComfyUI, or use Frame endpoints mode.' }); return }
+    if (mode === 'reference' && boundScene.references.some(ref => ref.anchor) && !info.MiniMaxH3AddGuide) { setNotice({ tone: 'error', text: 'Frame anchors require ComfyUI’s native MiniMaxH3AddGuide node. Update ComfyUI, turn Frame 0 guide off, or use Keyframes mode.' }); return }
     if (promptAudit.errors.length && !renderAnyway) {
       setNotice({ tone: 'error', text: `Prompt needs attention: ${promptAudit.errors[0]}` })
       return
@@ -2190,6 +2204,23 @@ function App() {
       : { tone: 'error', text: 'The attention benchmark did not produce a completed render. Review the result details and ComfyUI log.' })
   }
 
+  const removeWorkspaceCharacter = (characterId: string) => {
+    const character = sceneState.characters.find((item) => item.id === characterId) ?? characterProjects.find((item) => item.id === characterId)
+    const name = character?.name || 'this character'
+    if (!window.confirm(`Remove “${name}” from this scene? Linked scene references and dialogue assignments will also be removed. The Character Library entry and original media stay available.`)) return
+    setSelectedReferenceCharacterIds((current) => current.filter((id) => id !== characterId))
+    setSceneState((current) => ({
+      ...current,
+      characters: current.characters.filter((item) => item.id !== characterId),
+      references: current.references.filter((reference) => reference.ownerId !== characterId),
+      shots: current.shots.map((shot) => ({ ...shot, characterIds: shot.characterIds.filter((id) => id !== characterId) })),
+      dialogue: current.dialogue
+        .map((line) => ({ ...line, speakerIds: line.speakerIds.filter((id) => id !== characterId) }))
+        .filter((line) => line.speakerIds.length > 0),
+    }))
+    setNotice({ tone: 'neutral', text: `${name} was removed from this scene. The library entry and original media were kept.` })
+  }
+
   const runH3Diagnostics = async () => {
     if (!settings || diagnosticRunning) return
     if (!status.connected) return setNotice({ tone: 'error', text: 'Connect ComfyUI before running the H3 diagnostic.' })
@@ -2263,6 +2294,11 @@ function App() {
       .slice(0, 20)
   }, [workspaceSearchEntries, workspaceSearchQuery])
   useEffect(() => setWorkspaceSearchIndex(0), [workspaceSearchQuery, workspaceSearchResults.length])
+  useEffect(() => {
+    if (!workspaceSearchOpen) return
+    const frame = window.requestAnimationFrame(() => document.querySelector<HTMLElement>('.workspace-search-result.selected')?.scrollIntoView({ block: 'nearest' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [workspaceSearchIndex, workspaceSearchOpen])
   const focusWorkspaceSearchEntry = (entry: WorkspaceSearchEntry) => {
     setWorkspaceSearchOpen(false)
     const root = mainAreaRef.current
@@ -2279,14 +2315,18 @@ function App() {
     }
     const focusTarget = () => {
       if (workspaceSearchHighlightTimer.current !== null) window.clearTimeout(workspaceSearchHighlightTimer.current)
-      root.querySelector<HTMLElement>('.workspace-search-highlight')?.classList.remove('workspace-search-highlight')
+      const previousTarget = root.querySelector<HTMLElement>('.workspace-search-highlight')
+      previousTarget?.classList.remove('workspace-search-highlight')
+      if (previousTarget) delete previousTarget.dataset.workspaceSearchLabel
       entry.target.classList.add('workspace-search-highlight')
+      entry.target.dataset.workspaceSearchLabel = entry.label
       entry.target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
       if (!(entry.focusElement as HTMLInputElement).disabled) entry.focusElement.focus({ preventScroll: true })
       workspaceSearchHighlightTimer.current = window.setTimeout(() => {
         entry.target.classList.remove('workspace-search-highlight')
+        delete entry.target.dataset.workspaceSearchLabel
         workspaceSearchHighlightTimer.current = null
-      }, 1800)
+      }, 3600)
     }
     window.requestAnimationFrame(focusTarget)
   }
@@ -2309,16 +2349,21 @@ function App() {
   }
   useEffect(() => {
     const openFromKeyboard = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault()
-        setWorkspaceSearchQuery('')
-        setWorkspaceSearchIndex(0)
-        setWorkspaceSearchOpen(true)
+        if (workspaceSearchOpen) {
+          workspaceSearchInputRef.current?.focus()
+          workspaceSearchInputRef.current?.select()
+        } else {
+          setWorkspaceSearchQuery('')
+          setWorkspaceSearchIndex(0)
+          setWorkspaceSearchOpen(true)
+        }
       }
     }
     window.addEventListener('keydown', openFromKeyboard)
     return () => window.removeEventListener('keydown', openFromKeyboard)
-  }, [])
+  }, [workspaceSearchOpen])
   if (!settings) {
     return <div className="boot"><LoaderCircle className="spin" /><span>Opening Oyama AI Video Studio…</span></div>
   }
@@ -2360,10 +2405,11 @@ function App() {
       <header className="titlebar" aria-label="Application title bar">
         <button className="titlebar-mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open workspace menu"><Menu size={18} /></button>
         <div className="titlebar-brand"><span className="brand-mark"><Film size={18} /></span><span><strong>Oyama AI Video Studio</strong><small>Create&nbsp;&nbsp;•&nbsp;&nbsp;Visualize&nbsp;&nbsp;•&nbsp;&nbsp;Tell Stories</small></span></div>
-        <button className="titlebar-search" type="button" onClick={openWorkspaceSearch} title={`Search settings in ${workspaceTips[view].title}`} aria-haspopup="dialog" aria-expanded={workspaceSearchOpen}><Search size={15} /><span>Search {workspaceTips[view].title} settings…</span><kbd>Ctrl K</kbd></button>
+        <button className="titlebar-search" type="button" onClick={openWorkspaceSearch} title={`Search settings in ${workspaceTips[view].title}`} aria-haspopup="dialog" aria-expanded={workspaceSearchOpen} aria-keyshortcuts="Control+F Meta+F"><Search size={15} /><span>Find a setting in {workspaceTips[view].title}…</span><kbd>Ctrl F</kbd></button>
         <div className="titlebar-drag" />
         {view === 'create' && <div className="titlebar-generation-actions" aria-label="Video generation actions">
           <button className="titlebar-action titlebar-generate-video" type="button" onClick={() => void generateRef.current?.('video', renderAnyway)} disabled={submitting} aria-describedby="h3-render-readiness"><Play size={14} fill="currentColor" />{submitting ? 'Submitting…' : 'Generate video'}</button>
+          {activeRenderJob && ['queued', 'running'].includes(activeRenderJob.status) && <button className="titlebar-action titlebar-cancel-generation" type="button" onClick={() => void cancelJob(activeRenderJob)} disabled={cancellingIds.has(activeRenderJob.id)} title={activeRenderJob.mediaType === 'image' ? 'Cancel the active image generation' : 'Cancel the active video generation'}><CircleStop size={14} />{cancellingIds.has(activeRenderJob.id) ? 'Stopping…' : activeRenderJob.mediaType === 'image' ? 'Cancel image' : 'Cancel generation'}</button>}
           <label className="titlebar-render-anyway" title="Submit despite scene conflicts. Engine, models, and media must still be available."><input type="checkbox" checked={renderAnyway} onChange={(event) => setRenderAnyway(event.target.checked)} />Render anyway</label>
           {mode === 'reference' && <button className="titlebar-action titlebar-generate-image" type="button" onClick={() => void generateRef.current?.('image')} disabled={stillSubmitting}><ImagePlus size={14} />{stillSubmitting ? 'Generating…' : 'Generate image'}</button>}
         </div>}
@@ -2376,11 +2422,11 @@ function App() {
       {workspaceSearchOpen && <div className="workspace-search-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setWorkspaceSearchOpen(false) }}>
         <section className="workspace-search-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-search-title">
           <div className="workspace-search-input-wrap"><Search size={17} /><input ref={workspaceSearchInputRef} type="search" value={workspaceSearchQuery} onChange={(event) => setWorkspaceSearchQuery(event.target.value)} onKeyDown={handleWorkspaceSearchKeyDown} placeholder={`Search ${workspaceTips[view].title} settings`} autoComplete="off" spellCheck={false} aria-labelledby="workspace-search-title" /><kbd>Esc</kbd></div>
-          <div className="workspace-search-heading"><span><strong id="workspace-search-title">Workspace settings</strong><small>Search controls in {workspaceTips[view].title}, then jump to and highlight a match.</small></span><button type="button" className="icon-button" onClick={() => setWorkspaceSearchOpen(false)} aria-label="Close settings search"><X size={17} /></button></div>
+          <div className="workspace-search-heading"><span><strong id="workspace-search-title">Find workspace settings</strong><small>{workspaceSearchQuery ? `${workspaceSearchResults.length} matching setting${workspaceSearchResults.length === 1 ? '' : 's'} · select one to jump there` : `Search controls in ${workspaceTips[view].title}, then jump directly to one.`}</small></span><button type="button" className="icon-button" onClick={() => setWorkspaceSearchOpen(false)} aria-label="Close settings search"><X size={17} /></button></div>
           <div className="workspace-search-results" role="listbox" aria-label="Workspace setting results">
             {workspaceSearchResults.length === 0
               ? <div className="workspace-search-empty"><Search size={22} /><strong>No settings found</strong><span>Try a label such as resolution, duration, sampler, output, or preview.</span></div>
-              : workspaceSearchResults.map((entry, index) => <button type="button" role="option" aria-selected={index === workspaceSearchIndex} className={`workspace-search-result ${index === workspaceSearchIndex ? 'selected' : ''}`} key={entry.id} onMouseEnter={() => setWorkspaceSearchIndex(index)} onClick={() => focusWorkspaceSearchEntry(entry)}><span><strong>{entry.label}</strong>{entry.context && <small>{entry.context}</small>}</span><kbd>↵</kbd></button>)}
+              : workspaceSearchResults.map((entry, index) => <button type="button" role="option" aria-selected={index === workspaceSearchIndex} className={`workspace-search-result ${index === workspaceSearchIndex ? 'selected' : ''}`} key={entry.id} onMouseEnter={() => setWorkspaceSearchIndex(index)} onClick={() => focusWorkspaceSearchEntry(entry)}><span><strong>{highlightWorkspaceSearchText(entry.label, workspaceSearchQuery)}</strong>{entry.context && <small>{highlightWorkspaceSearchText(entry.context, workspaceSearchQuery)}</small>}</span><kbd>↵</kbd></button>)}
           </div>
           <p className="workspace-search-help"><kbd>↑</kbd><kbd>↓</kbd> to move <span>·</span> <kbd>Enter</kbd> to jump <span>·</span> <kbd>Esc</kbd> to close</p>
         </section>
@@ -2502,6 +2548,7 @@ function App() {
             locations={locationProjects}
             selectedCharacterIds={selectedReferenceCharacterIds}
             selectedLocationIds={selectedReferenceLocationIds}
+            removeCharacter={removeWorkspaceCharacter}
             characterDetailReferencesEnabled={settings.characterDetailReferencesEnabled}
             loadCharacter={(characterId) => void loadReferenceCharacter(characterId)}
             loadWardrobe={(wardrobeId) => void loadReferenceWardrobe(wardrobeId)}
@@ -2522,11 +2569,9 @@ function App() {
              submitting={submitting}
              stillSubmitting={stillSubmitting}
              renderAnyway={renderAnyway}
-             cancelling={Boolean(activeJobId && cancellingIds.has(activeJobId))}
             connected={status.connected}
              onSendStillToI2v={(job, provider) => void sendStillToI2v(job, provider)}
             latestJob={activeJobId ? jobs.find((job) => job.id === activeJobId) : undefined}
-            onCancel={(job) => void cancelJob(job)}
             onContinue={startVideoContinuation}
             onContinueReference={startRef2vaContinuation}
             ollamaAvailable={ollamaModels.length > 0}
@@ -2602,7 +2647,7 @@ function App() {
           const clarityDirection = 'Maintain crisp, sharp frames with a fast shutter and slow stabilized camera movement. No motion blur, temporal smearing, ghosting, rolling-shutter distortion, speed ramps, whip pans, or rapid camera movement.'
           return generateLtx({ mode: 'image', prompt: `${walkthroughDirection} Location description: ${locationProfile} Camera language: ${cameraLanguage} Image clarity: ${clarityDirection} No cuts, no teleporting, no layout changes, no duplicated objects, no people as focal subjects, no dialogue, no text, no logos.`, width: 1344, height: 768, duration: Math.max(5, Math.min(20, options?.duration ?? 10)), preset: 'quality', seed: Math.floor(Math.random() * 1_000_000_000), filenamePrefix: 'MiniMax_location_walkthrough' }, firstFrame, { locationProjectId: project.id })
         }} />}
-        {view === 'queue' && <JobsView title="Queue" note="Running and recent local generations" jobs={jobs} empty="No generations have been queued." cancellingIds={cancellingIds} onCancel={cancelJob} />}
+        {view === 'queue' && <JobsView title="Queue" note="Running and recent local generations" jobs={jobs} empty="No generations have been queued." cancellingIds={cancellingIds} onCancel={cancelJob} onRemove={removeJobFromHistory} />}
         {(view === 'movie' || (view === 'clipmaster' && clipMasterFromMovie)) && <div className="movie-integrated" hidden={view !== 'movie'}><div className="movie-workspace-heading"><div><h1>Oyama AI Movie</h1><p>Assemble renders, refine clips, and send frames to H3 or LTX.</p></div><button className="secondary-button" onClick={() => void window.minimax.openMovieEditor()}><ExternalLink size={15} />Open separate window</button></div><MovieEditor settings={settings} jobs={jobs} onCreate={(kind) => setView(kind === 'music' ? 'music' : 'ltx25')} onNotice={(tone, text) => setNotice({ tone, text })} onOpenClipMaster={clip => { setClipMasterClip(clip); setClipMasterFromMovie(true); setView('clipmaster') }} onUseFrame={receiveMovieFrame} /></div>}
         {view === 'library'  && <LibraryView jobs={jobs.filter((job) => job.status === 'completed')} settings={settings} onEdit={() => setView('movie')} onUseLtx={loadStartFrameInLtx} onUseLastFrameReference={addVideoLastFrameAsReference} onNotice={(tone, text) => setNotice({ tone, text })} />}
         {view === 'clipmaster' && <ClipMasterBeta onUseFrame={receiveMovieFrame} clip={clipMasterClip ?? undefined} jobs={jobs} settings={settings} onClose={() => { setClipMasterClip(null); setView(clipMasterFromMovie ? 'movie' : 'library') }} onNotice={(tone, text) => setNotice({ tone, text })} onExportClip={clipMasterFromMovie ? clip => window.dispatchEvent(new CustomEvent('oyama-movie-add-media', { detail: clip })) : undefined} />}
@@ -2740,13 +2785,13 @@ type CreateViewProps = {
   setFirstFrame(value: MediaFile | null): void; setLastFrame(value: MediaFile | null): void
   chooseMedia(kind: MediaKind, setter: (file: MediaFile) => void): Promise<void>
   referenceImages: MediaFile[]; referenceVideos: MediaFile[]; referenceAudios: MediaFile[]
-  characters: CharacterProject[]; wardrobes: WardrobeProject[]; locations: LocationProject[]; selectedCharacterIds: string[]; selectedLocationIds: string[]; characterDetailReferencesEnabled: boolean; loadCharacter(characterId: string): void; loadWardrobe(wardrobeId: string): void; loadLocation(locationId: string): void
+  characters: CharacterProject[]; wardrobes: WardrobeProject[]; locations: LocationProject[]; selectedCharacterIds: string[]; selectedLocationIds: string[]; removeCharacter(characterId: string): void; characterDetailReferencesEnabled: boolean; loadCharacter(characterId: string): void; loadWardrobe(wardrobeId: string): void; loadLocation(locationId: string): void
   refreshSourceMedia(): Promise<void>
   removeReference(kind: MediaKind, index: number): void
   chooseReference(kind: MediaKind): Promise<void>
   editVideoReference(index: number): void
   h3Validated: boolean
-  modelReady: boolean; selection: ModelSelection; submitting: boolean; stillSubmitting: boolean; cancelling: boolean; connected: boolean
+  modelReady: boolean; selection: ModelSelection; submitting: boolean; stillSubmitting: boolean; connected: boolean
   ollamaAvailable: boolean; ollamaModel: string; llmProviderLabel: string; promptSuggestion: string
   promptingTool: 'enhance' | 'timeline' | 'audio' | null
   dialogueGenerating: boolean
@@ -2754,7 +2799,7 @@ type CreateViewProps = {
   onGenerateDialogue(draft: CharacterDialogueDraft): Promise<string>
   onUseSuggestion(): void; onDismissSuggestion(): void
   renderAnyway: boolean
-  onSendStillToI2v(job: GenerationJob, provider: 'minimax' | 'ltx25'): void; onCancel(job: GenerationJob): void; onContinue(job: GenerationJob): Promise<void>; onContinueReference(job: GenerationJob): Promise<void>; latestJob?: GenerationJob
+  onSendStillToI2v(job: GenerationJob, provider: 'minimax' | 'ltx25'): void; onContinue(job: GenerationJob): Promise<void>; onContinueReference(job: GenerationJob): Promise<void>; latestJob?: GenerationJob
 }
 
 function CreateView(props: CreateViewProps) {
@@ -2764,23 +2809,42 @@ function CreateView(props: CreateViewProps) {
     upscaleMode, setUpscaleMode, h3LearnedUpscaleAvailable, h3LearnedUpscaleMissingNodes, h3LearnedUpscaleModelDetected, ltxAvailable, ltxMissingNodes, noDialogue, setNoDialogue, naturalMovement, setNaturalMovement, clothingPolicy, setClothingPolicy, rtxModels, rtxModel, setRtxModel, updateReference,
     mode, setMode, prompt, setPrompt, duration, setDuration, resolution, setResolution, turbo, setTurbo, turbo8Profile, setTurbo8Profile, textEncoderPreference, setTextEncoderPreference, steps, setSteps,
     seed, setSeed, seedLocked, setSeedLocked, advanced, setAdvanced, firstFrame, lastFrame, setFirstFrame, setLastFrame, chooseMedia,
-    referenceImages, referenceVideos, referenceAudios, characters, wardrobes, locations, selectedCharacterIds, selectedLocationIds, characterDetailReferencesEnabled, loadCharacter, loadWardrobe, loadLocation, refreshSourceMedia, removeReference, chooseReference, editVideoReference, h3Validated, modelReady, selection,
-    submitting, stillSubmitting, renderAnyway, cancelling, connected, ollamaAvailable, ollamaModel, llmProviderLabel, promptSuggestion, promptingTool, dialogueGenerating,
-    onPromptTool, onGenerateDialogue, onUseSuggestion, onDismissSuggestion, onSendStillToI2v, onCancel, onContinue, onContinueReference, latestJob,
+    referenceImages, referenceVideos, referenceAudios, characters, wardrobes, locations, selectedCharacterIds, selectedLocationIds, removeCharacter, characterDetailReferencesEnabled, loadCharacter, loadWardrobe, loadLocation, refreshSourceMedia, removeReference, chooseReference, editVideoReference, h3Validated, modelReady, selection,
+    submitting, stillSubmitting, renderAnyway, connected, ollamaAvailable, ollamaModel, llmProviderLabel, promptSuggestion, promptingTool, dialogueGenerating,
+    onPromptTool, onGenerateDialogue, onUseSuggestion, onDismissSuggestion, onSendStillToI2v, onContinue, onContinueReference, latestJob,
   } = props
   const { sceneState, setSceneState } = props
   const sourceMediaTriggerRef = useRef<HTMLButtonElement>(null)
+  const sceneToolsRef = useRef<HTMLDetailsElement>(null)
   const sourceMediaCloseRef = useRef<HTMLButtonElement>(null)
   const dialogueTriggerRef = useRef<HTMLButtonElement>(null)
   const [sourceMediaOpen, setSourceMediaOpen] = useState(false)
   const [dialogueOpen, setDialogueOpen] = useState(false)
   const [intentBuilderOpen, setIntentBuilderOpen] = useState(false)
   const [activeIntentId, setActiveIntentId] = useState('')
-  const [inspectorTab, setInspectorTab] = useState<'preview' | 'state' | 'render'>('render')
+  const [inspectorTab, setInspectorTab] = useState<'preview' | 'state'>('state')
+  const [renderRailWidth, setRenderRailWidth] = useState(initialRenderRailWidth)
   const [inspectorSelection, setInspectorSelection] = useState<SceneInspectorSelection>({ kind: 'scene' })
   const [previewPopoutRoot, setPreviewPopoutRoot] = useState<HTMLElement | null>(null)
   const previewPopoutRef = useRef<Window | null>(null)
   const h3PreviewOverrideAvailable = Boolean(findH3PreviewOverrideNode(info))
+  useEffect(() => localStorage.setItem('minimax.renderRailWidth', String(renderRailWidth)), [renderRailWidth])
+  const startRenderRailResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = renderRailWidth
+    document.body.classList.add('resizing-workspace-rail')
+    const onMove = (moveEvent: PointerEvent) => setRenderRailWidth(clampRenderRailWidth(startWidth - (moveEvent.clientX - startX)))
+    const onEnd = () => {
+      document.body.classList.remove('resizing-workspace-rail')
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onEnd)
+      window.removeEventListener('pointercancel', onEnd)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onEnd, { once: true })
+    window.addEventListener('pointercancel', onEnd, { once: true })
+  }
   const selectedCharacters = selectedCharacterIds.map((id) => characters.find((character) => character.id === id)).filter(Boolean) as CharacterProject[]
   const selectedLocations = selectedLocationIds.map((id) => locations.find((location) => location.id === id)).filter(Boolean) as LocationProject[]
   const selectedBindings = allocateWorkspaceReferences(selectedCharacters.map((character) => ({ id: character.id, name: character.name, identity: characterReferences(character), detailReferences: characterDetailReferencesEnabled ? character.detailReferences : [], hairStyleIds: character.hairStyleIds, wardrobeIds: character.wardrobeIds, accessoryIds: character.accessoryIds })), wardrobes, selectedLocations.map((location) => ({ id: location.id, name: location.name, images: locationReferences(location), environmentMode: location.environmentMode, locationContext: location.locationContext, accuracyDetails: location.accuracyDetails })))
@@ -2788,13 +2852,15 @@ function CreateView(props: CreateViewProps) {
   const builderReferenceImages = renderBindings.map((binding) => binding.file)
   const boundScene = bindSceneReferences(sceneState, renderBindings, referenceVideos, referenceAudios, firstFrame, lastFrame)
   const sceneCompilation = compileScene(boundScene)
+  const frameZeroGuide = boundScene.references.find(ref => ref.file.kind === 'image' && ref.anchor === 'opening')
+  const frameZeroCandidates = boundScene.references.filter(ref => ref.file.kind === 'image')
   const sourceMediaCount = referenceImages.length + referenceVideos.length + referenceAudios.length
   const shotBlocker = mode === 'image' && !firstFrame ? 'Add the first frame in Sources.'
     : mode === 'frames' && !lastFrame ? 'Add the last frame in Sources.'
     : mode === 'reference' && (referenceImages.length > 9 || referenceVideos.length > 3 || referenceAudios.length > 3) ? 'Keep Sources within 9 pictures, 3 videos, and 3 audio files.'
     : ''
   const sceneBlocker = sceneCompilation.conflicts.find(item => item.severity === 'error')?.message || ''
-  const renderBlocker = shotBlocker || (!renderAnyway ? sceneBlocker : '') || (mode === 'reference' && boundScene.references.some(ref => ref.anchor) && !info.MiniMaxH3AddGuide ? 'Literal reference anchors require MiniMaxH3AddGuide. Update ComfyUI or use Frame endpoints.' : '') || (!connected ? 'Connect ComfyUI using Local engine or Settings.'
+  const renderBlocker = shotBlocker || (!renderAnyway ? sceneBlocker : '') || (mode === 'reference' && boundScene.references.some(ref => ref.anchor) && !info.MiniMaxH3AddGuide ? 'Frame anchors require MiniMaxH3AddGuide. Update ComfyUI, turn Frame 0 guide off, or use Keyframes mode.' : '') || (!connected ? 'Connect ComfyUI using Local engine or Settings.'
     : !modelReady ? 'Check the required H3 models in Settings.'
     : liveEnabled && livePreviewMode === 'h3-override' && (!h3PreviewOverrideAvailable || !selection.previewVae) ? 'Choose Standard first frame, or install the animated preview node and decoder.'
     : upscaleMode === 'h3' && !h3LearnedUpscaleAvailable ? 'Choose upscale Off or install the H3 upscaler.'
@@ -2891,48 +2957,28 @@ function CreateView(props: CreateViewProps) {
 
 
 
-      <nav className="workspace-stage-nav" aria-label="Create workspace sections">
-        <span>WORKFLOW</span>
-        <button type="button" onClick={() => document.getElementById('workspace-direction')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><WandSparkles size={14} />Direction</button>
-        {mode !== 'text' && <button type="button" onClick={() => mode === 'reference' ? void refreshSourceMedia().then(() => setSourceMediaOpen(true)) : document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><ImageIcon size={14} />Sources</button>}
-        <button type="button" onClick={() => { const panel = document.getElementById('workspace-output') as HTMLDetailsElement | null; if (panel) { panel.open = true; panel.scrollIntoView({ behavior: 'smooth', block: 'start' }) } }}><Gauge size={14} />Render settings</button>
-        <button type="button" onClick={() => document.getElementById('workspace-preview')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><Film size={14} />Preview</button>
-      </nav>
-
-      <div className="workspace-grid">
+      <div className="workspace-grid" style={{ '--render-rail-width': `${renderRailWidth}px` } as CSSProperties}>
         <section className="composer-panel">
           <div className="workspace-command-deck">
             <div className="mode-tabs" role="tablist" aria-label="Generation mode">
               {modeInfo.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id} className={mode === item.id ? 'selected' : ''} onClick={() => setMode(item.id)}><item.icon size={18} /><span><strong>{item.label}</strong><small>{item.note}</small></span></button>)}
             </div>
 
-            <div className="creative-tools-bar" aria-label="Creative tools">
-              <span>CREATIVE TOOLS</span>
-              <button type="button" onClick={() => onPromptTool('enhance')} disabled={!ollamaAvailable || Boolean(promptingTool)}>{promptingTool === 'enhance' ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}Refine scene</button>
-              <button type="button" onClick={() => onPromptTool('timeline')} disabled={!ollamaAvailable || Boolean(promptingTool)}>{promptingTool === 'timeline' ? <LoaderCircle size={14} className="spin" /> : <Clock3 size={14} />}Shot timeline</button>
-
-            </div>
+            <details ref={sceneToolsRef} className="scene-tools-menu">
+              <summary><Menu size={15} /><span><strong>Scene tools</strong><small>{ollamaAvailable ? `${ollamaModel} · local` : `${llmProviderLabel} offline`}</small></span><ChevronDown size={14} /></summary>
+              <div className="scene-tools-menu-panel" aria-label="Scene tools">
+                <button type="button" aria-label="Refine scene" onClick={() => { if (sceneToolsRef.current) sceneToolsRef.current.open = false; onPromptTool('enhance') }} disabled={!ollamaAvailable || Boolean(promptingTool)}>{promptingTool === 'enhance' ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}<span><strong>Refine scene</strong><small>Polish the written direction</small></span></button>
+                <button type="button" aria-label="Build shot timeline" onClick={() => { if (sceneToolsRef.current) sceneToolsRef.current.open = false; onPromptTool('timeline') }} disabled={!ollamaAvailable || Boolean(promptingTool)}>{promptingTool === 'timeline' ? <LoaderCircle size={14} className="spin" /> : <Clock3 size={14} />}<span><strong>Shot timeline</strong><small>Build a timed shot sequence</small></span></button>
+                <button type="button" aria-label="Run audio pass" onClick={() => { if (sceneToolsRef.current) sceneToolsRef.current.open = false; onPromptTool('audio') }} disabled={!ollamaAvailable || Boolean(promptingTool)}>{promptingTool === 'audio' ? <LoaderCircle size={14} className="spin" /> : <Volume2 size={14} />}<span><strong>Audio pass</strong><small>Improve ambience and sound cues</small></span></button>
+                {mode === 'reference' && <button ref={dialogueTriggerRef} type="button" aria-label="Open character dialogue" onClick={() => { if (sceneToolsRef.current) sceneToolsRef.current.open = false; setDialogueOpen(true) }}><MessageSquareText size={14} /><span><strong>Character dialogue</strong><small>Write performable dialogue</small></span></button>}
+              </div>
+            </details>
           </div>
 
           <section id="workspace-direction" className={`create-section create-direction-section ${mode === 'reference' ? 'reference-prompt-builder' : ''}`}>
             <div className="create-section-heading"><span><WandSparkles size={15} /></span><div><strong>{'Scene Composer'}</strong><small>{'Direct the scene. The compiler handles H3.'}</small></div><em className={prompt.trim() ? 'complete' : ''}>{prompt.trim() ? 'Ready' : 'Required'}</em></div>
           <div className="field-group prompt-field">
-<SceneComposer selection={inspectorSelection} onInspect={setInspectorSelection} onAnalyzeReference={ollamaAvailable ? props.onAnalyzeReference : undefined} state={boundScene} onChange={next => { setSceneState(next); if (mode !== 'reference' && mode !== 'text') { setFirstFrame(next.references.find(ref => ref.anchor === 'opening')?.file || null); setLastFrame(next.references.find(ref => ref.anchor === 'ending')?.file || null) } }} options={[...smartCharacterOptions, ...smartWardrobeOptions, ...smartLocationOptions]} onAddReference={() => { if (mode === 'image' || mode === 'frames') { document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return } setMode('reference'); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} onManageReferences={() => { if (mode === 'image' || mode === 'frames') { document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return } setMode('reference'); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} />
-            <div className="prompt-policy-toggles" aria-label="Prompt safeguards">
-              <label className="no-dialogue-toggle" title={`Adds a render instruction that blocks spoken words, narration, singing, lip-sync, captions, and text overlays${mode === 'reference' ? ' in this Reference render' : ''}.`}><input type="checkbox" checked={noDialogue} onChange={(event) => setNoDialogue(event.target.checked)} /><span><strong>{mode === 'reference' ? 'No dialogue' : 'No dialogue'}</strong><small>{noDialogue ? 'Ambient sound only' : 'Dialogue and lip-sync allowed'}</small></span></label>
-              <label className="no-dialogue-toggle natural-movement-toggle" title="Adds restrained breathing, blinking, eye movement, and posture adjustment without changing the requested action, pose, camera, identity, wardrobe, or scene."><input type="checkbox" checked={naturalMovement} onChange={(event) => setNaturalMovement(event.target.checked)} /><span><strong>Natural movement</strong><small>{naturalMovement ? 'Subtle subject motion' : 'No added motion direction'}</small></span></label>
-            </div>
-            <div className="prompt-tools" aria-label="Local AI prompt tools">
-              <div className="prompt-tool-buttons">
-                <button type="button" onClick={() => onPromptTool('audio')} disabled={!ollamaAvailable || Boolean(promptingTool)} title="Improve ambience, dialogue, and sound cues">
-                  {promptingTool === 'audio' ? <LoaderCircle size={14} className="spin" /> : <Volume2 size={14} />}Audio pass
-                </button>
-                {mode === 'reference' && <button ref={dialogueTriggerRef} type="button" className="dialogue-tool-button" onClick={() => setDialogueOpen(true)} title="Write performable dialogue for a selected character"><MessageSquareText size={14} />Character dialogue</button>}
-              </div>
-              <span className={`local-model-chip ${ollamaAvailable ? 'online' : ''}`} title={ollamaAvailable ? `Local ${llmProviderLabel} model: ${ollamaModel}` : `Configure ${llmProviderLabel} in Settings`}>
-                <span />{ollamaAvailable ? ollamaModel : `${llmProviderLabel} offline`}
-              </span>
-            </div>
+<SceneComposer selection={inspectorSelection} onInspect={setInspectorSelection} onRemoveCharacter={(characterId) => { setInspectorSelection({ kind: 'scene' }); removeCharacter(characterId) }} onAnalyzeReference={ollamaAvailable ? props.onAnalyzeReference : undefined} state={boundScene} onChange={next => { setSceneState(next); if (mode !== 'reference' && mode !== 'text') { setFirstFrame(next.references.find(ref => ref.anchor === 'opening')?.file || null); setLastFrame(next.references.find(ref => ref.anchor === 'ending')?.file || null) } }} options={[...smartCharacterOptions, ...smartWardrobeOptions, ...smartLocationOptions]} onAddReference={() => { if (mode === 'image' || mode === 'frames') { document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return } setMode('reference'); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} onManageReferences={() => { if (mode === 'image' || mode === 'frames') { document.getElementById('workspace-sources')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return } setMode('reference'); void refreshSourceMedia().then(() => setSourceMediaOpen(true)) }} />
             {promptSuggestion && (
               <div className="assistant-result" role="status">
                 <div className="assistant-result-heading"><span><Sparkles size={14} />Local suggestion</span><small>Review before replacing your prompt</small></div>
@@ -2984,43 +3030,68 @@ function CreateView(props: CreateViewProps) {
             onGenerate={onGenerateDialogue}
             onInsert={(text) => { setNoDialogue(false); insertPromptText(text); closeDialogue() }}
           />}
-
-<PreviewPanel id="workspace-preview"><div className="panel-heading"><strong>Current render</strong><div className="preview-toolbar"><button className="icon-button" aria-label="Detach preview" title="Detach preview" onClick={detachPreview}><PanelTopOpen size={15}/></button></div></div>          {livePreviewForActiveJob && activeLiveJob && <figure className={`live-preview workspace-live-preview ${livePreviewForActiveJob.animated ? 'animated' : ''} ${blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 'sensitive-preview' : ''}`} tabIndex={blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 0 : undefined}>{livePreviewForActiveJob.mime === 'video/mp4' ? <video key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} aria-label="Animated MiniMax H3 generation preview" autoPlay loop muted playsInline /> : <img key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} alt={livePreviewForActiveJob.animated ? 'Animated MiniMax H3 generation preview' : 'Live generation preview'} />}{blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) && <span className="sensitive-preview-notice">Sensitive preview · hover or focus to reveal</span>}<figcaption><span>Live preview</span>{livePreviewForActiveJob.animated ? `Animated H3 · ${h3PreviewFrameCount(activeLiveJob.duration)} frames${livePreviewForActiveJob.fps ? ` · ${livePreviewForActiveJob.fps} fps` : ''}${livePreviewForActiveJob.step && livePreviewForActiveJob.totalSteps ? ` · sampler ${livePreviewForActiveJob.step}/${livePreviewForActiveJob.totalSteps}` : ''}` : 'Intermediate decoded frame'}</figcaption></figure>}
+        </section>
+        <button type="button" className="workspace-rail-resizer" role="separator" aria-label="Resize output and continuity sidebar" aria-orientation="vertical" aria-valuemin={MIN_RENDER_RAIL_WIDTH} aria-valuemax={MAX_RENDER_RAIL_WIDTH} aria-valuenow={renderRailWidth} title="Drag to resize · double-click to reset" onPointerDown={startRenderRailResize} onDoubleClick={() => setRenderRailWidth(DEFAULT_RENDER_RAIL_WIDTH)} onKeyDown={(event) => { if (event.key === 'ArrowLeft') setRenderRailWidth((value) => clampRenderRailWidth(value + 16)); if (event.key === 'ArrowRight') setRenderRailWidth((value) => clampRenderRailWidth(value - 16)); if (event.key === 'Home') setRenderRailWidth(MIN_RENDER_RAIL_WIDTH); if (event.key === 'End') setRenderRailWidth(MAX_RENDER_RAIL_WIDTH) }}><span /></button>
+        <div className="workspace-right-rail">
+          <PreviewPanel id="workspace-preview" title="Render monitor"><div className="panel-heading preview-monitor-heading"><div><small>{latestJob?.status === 'completed' ? 'FINAL OUTPUT' : latestJob && ['queued', 'running'].includes(latestJob.status) ? 'LIVE ENGINE FEED' : 'PRODUCTION MONITOR'}</small><strong>{latestJob?.status === 'completed' ? 'Result ready' : latestJob && ['queued', 'running'].includes(latestJob.status) ? 'Rendering now' : 'Standing by'}</strong>{latestJob && <span>{latestJob.width} × {latestJob.height}{latestJob.mediaType === 'image' ? ' · still' : ` · ${latestJob.duration}s`}</span>}</div><div className="preview-toolbar">{latestJob ? <StatusBadge status={latestJob.status} /> : <em className="monitor-standby">READY</em>}<button className="icon-button" aria-label="Detach preview" title="Detach preview" onClick={detachPreview}><PanelTopOpen size={15}/></button></div></div>          {livePreviewForActiveJob && activeLiveJob && <figure className={`live-preview workspace-live-preview ${livePreviewForActiveJob.animated ? 'animated' : ''} ${blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 'sensitive-preview' : ''}`} tabIndex={blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) ? 0 : undefined}>{livePreviewForActiveJob.mime === 'video/mp4' ? <video key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} aria-label="Animated MiniMax H3 generation preview" autoPlay loop muted playsInline preload="auto" /> : <img key={livePreviewForActiveJob.url} src={livePreviewForActiveJob.url} alt={livePreviewForActiveJob.animated ? 'Animated MiniMax H3 generation preview' : 'Live generation preview'} />}{blurNsfwPreview && hasSensitivePreviewWording(activeLiveJob.prompt) && <span className="sensitive-preview-notice">Sensitive preview · hover or focus to reveal</span>}<figcaption><span>Live preview</span>{livePreviewForActiveJob.animated ? `Animated H3 · ${h3PreviewFrameCount(activeLiveJob.duration)} frames${livePreviewForActiveJob.fps ? ` · ${livePreviewForActiveJob.fps} fps` : ''}${livePreviewForActiveJob.step && livePreviewForActiveJob.totalSteps ? ` · sampler ${livePreviewForActiveJob.step}/${livePreviewForActiveJob.totalSteps}` : ''}` : 'Intermediate decoded frame'}</figcaption></figure>}
           <div className={`preview-stage ${livePreviewForActiveJob ? 'has-live-preview' : ''}`}>
             {latestJob?.outputUrl ? latestJob.mediaType === 'image' ? <img className="reference-still-output" src={latestJob.outputUrl} alt="Generated Ref2VA reference still" /> : <VideoPlayer src={latestJob.outputUrl} /> : latestJob && ['queued', 'running'].includes(latestJob.status) ? livePreviewForActiveJob ? <div className="live-render-status" role="status"><div><span className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</span><strong>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Sampling step ${latestJob.currentStep} of ${latestJob.totalSteps}` : latestJob.status === 'queued' ? 'Waiting in the render queue' : 'Preparing the next preview update'}</strong><small>{latestJob.progressLabel && !/waiting for comfyui to start/i.test(latestJob.progressLabel) ? latestJob.progressLabel : `${latestJob.width} × ${latestJob.height} · ${latestJob.duration}s`}</small></div><span className="live-render-progress"><strong>{Math.round(latestJob.progress)}%</strong><small>live progress</small></span><div className="progress" aria-label={`${Math.round(latestJob.progress)}% render progress`}><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Sampling</span><span>Output</span></div></div> : <div className="render-state constructing" data-render-state={latestJob.status}><RenderConstruction state={latestJob.status} label={latestJob.progressLabel} progress={latestJob.progress || undefined} /><div className="render-status-kicker"><i />{latestJob.status === 'queued' ? 'Queued locally' : 'Local engine active'}</div><strong>{latestJob.progressLabel ?? (latestJob.status === 'queued' ? 'Waiting in queue' : latestJob.mediaType === 'image' ? 'Generating one reference still' : 'Rendering locally')}</strong><span>{latestJob.currentStep !== undefined && latestJob.totalSteps ? `Live sampler step ${latestJob.currentStep} of ${latestJob.totalSteps}` : `${latestJob.width} × ${latestJob.height}${latestJob.mediaType === 'image' ? ' · one still' : ` · ${latestJob.duration}s`}`}</span><div className="progress"><i style={{ width: `${latestJob.progress}%` }} /></div><div className="render-stage-rail" aria-label={`Render status: ${latestJob.status === 'queued' ? 'queued' : 'sampling'}`}><span className="complete">Prepared</span><span className={latestJob.status === 'queued' ? 'active' : 'complete'}>Queued</span><span className={latestJob.status === 'running' ? 'active' : ''}>Rendering</span><span>Output</span></div><small>{Math.round(latestJob.progress)}% · live ComfyUI status</small></div> : <PreviewEmptyState job={latestJob} />}
           </div>
 </PreviewPanel>
-        </section>
 
         <aside id="workspace-inspector" className="preview-panel studio-inspector">
-          <SceneSelectionInspector state={boundScene} selection={inspectorSelection} onChange={setSceneState} />
-      {mode === 'reference' && <section className="ref2va-intent-bar" aria-labelledby="ref2va-intent-label">
-        <div><span className="ref2va-intent-icon"><Sparkles size={16} /></span><span className="ref2va-intent-copy"><strong id="ref2va-intent-label">Intent</strong><small>Apply a named Ref2VA render setup to this workspace.</small></span></div>
-        <div className="ref2va-intent-actions"><label><span className="sr-only">Ref2VA intent</span><select value={activeIntentId} onChange={(event) => selectIntent(event.target.value)}><option value="">Choose an intent…</option>{renderIntents.map((intent) => <option key={intent.id} value={intent.id}>{intent.name}</option>)}</select></label><button type="button" className="secondary-button" onClick={() => setIntentBuilderOpen(true)}><SlidersHorizontal size={15} />Build intents</button></div>
-      </section>}
-          <nav className="inspector-tabs" aria-label="Workspace inspector">
-            {(['preview', 'state', 'render'] as const).map(tab => <button key={tab} type="button" data-inspector-tab={tab} className={inspectorTab === tab ? 'selected' : ''} aria-pressed={inspectorTab === tab} onClick={() => setInspectorTab(tab)}>{tab === 'preview' ? 'Output' : tab === 'state' ? 'Continuity' : 'Render setup'}</button>)}
-          </nav>
+          <header className="inspector-control-header">
+            <div className="inspector-control-title"><small>WORKSPACE INSPECTOR</small><strong>{inspectorTab === 'preview' ? 'Generated output' : 'Scene continuity'}</strong></div>
+            <nav className="inspector-tabs" aria-label="Workspace inspector" role="tablist">
+              {(['preview', 'state'] as const).map(tab => <button key={tab} type="button" role="tab" data-inspector-tab={tab} className={inspectorTab === tab ? 'selected' : ''} aria-selected={inspectorTab === tab} onClick={() => setInspectorTab(tab)}>{tab === 'preview' ? 'Output' : 'Continuity'}</button>)}
+            </nav>
+          </header>
           {inspectorTab === 'preview' && <div className="inspector-tab-panel preview-inspector-panel">
+          {!latestJob && <div className="inspector-empty-state"><Film size={20} /><strong>No output yet</strong><small>Completed renders, generation details, and continuation tools will appear here.</small></div>}
           {latestJob?.mediaType !== 'image' && latestJob?.provider === 'minimax' && latestJob.status === 'completed' && latestJob.outputUrl && <VideoContinuationControls job={latestJob} onContinue={onContinue} onContinueReference={onContinueReference} />}
           {latestJob?.mediaType === 'image' && latestJob.status === 'completed' && latestJob.outputUrl && <div className="still-result-actions"><a className="secondary-button" href={latestJob.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open image</a><div className="still-i2v-actions"><span><ImagePlus size={15} />Send to I2V</span><button className="primary-button" onClick={() => onSendStillToI2v(latestJob, 'ltx25')}><Aperture size={15} />LTX 2.5</button><button className="secondary-button" onClick={() => onSendStillToI2v(latestJob, 'minimax')}><Film size={15} />MiniMax I2V</button></div></div>}
           {latestJob && <JobExecutionChips job={latestJob} expanded />}
           {latestJob && <ComfyActivityConsole job={latestJob} />}
           </div>}
-          {inspectorTab === 'state' && <div className="inspector-tab-panel state-inspector-panel"><SceneContextPanels state={boundScene} onChange={setSceneState} /></div>}
-          {inspectorTab === 'render' && <div className="inspector-tab-panel render-inspector-panel">{advanced && <details open className="pipeline-summary"><summary>Engine components <ChevronDown size={12} /></summary>
+          {inspectorTab === 'state' && <div className="inspector-tab-panel state-inspector-panel"><SceneSelectionInspector state={boundScene} selection={inspectorSelection} onChange={setSceneState} /><SceneContextPanels state={boundScene} onChange={setSceneState} /></div>}
+        </aside>
+        </div>
+
+        <section id="workspace-render-setup" className="workspace-render-setup render-inspector-panel" aria-labelledby="workspace-render-setup-title">
+          <header className="render-workspace-heading"><div><small>04 · PRODUCTION</small><strong id="workspace-render-setup-title">Render setup workspace</strong><p>Review hardware, output, conditioning, sampling, adapters, preview, and finishing before generation.</p></div><span><b>{resolution.replace('x', ' × ')}</b><small>{duration}s · {turbo === 'off' ? 'Native quality' : `Turbo ${turbo}`}</small></span></header>
+          <div className="render-workspace-body">
+          <div className="render-policy-card">
+            <div><small>SCENE BEHAVIOR</small><strong>Performance safeguards</strong><p>These instructions are compiled into the render prompt without changing your written scene direction.</p></div>
+            <div className="prompt-policy-toggles" aria-label="Prompt safeguards">
+              <label className="no-dialogue-toggle" title={`Blocks spoken words, narration, singing, lip-sync, captions, and text overlays${mode === 'reference' ? ' in this Reference render' : ''}.`}><input type="checkbox" checked={noDialogue} onChange={(event) => setNoDialogue(event.target.checked)} /><span><strong>No dialogue</strong><small>{noDialogue ? 'Ambient sound only' : 'Dialogue and lip-sync allowed'}</small></span></label>
+              <label className="no-dialogue-toggle natural-movement-toggle" title="Adds restrained breathing, blinking, eye movement, and posture adjustment without changing the requested action, pose, camera, identity, wardrobe, or scene."><input type="checkbox" checked={naturalMovement} onChange={(event) => setNaturalMovement(event.target.checked)} /><span><strong>Natural movement</strong><small>{naturalMovement ? 'Subtle subject motion' : 'No added motion direction'}</small></span></label>
+            </div>
+          </div>
+          {mode === 'reference' && <section className="ref2va-intent-bar" aria-labelledby="ref2va-intent-label">
+            <div><span className="ref2va-intent-icon"><Sparkles size={16} /></span><span className="ref2va-intent-copy"><strong id="ref2va-intent-label">Intent</strong><small>Apply a named Ref2VA render setup to this workspace.</small></span></div>
+            <div className="ref2va-intent-actions"><label><span className="sr-only">Ref2VA intent</span><select value={activeIntentId} onChange={(event) => selectIntent(event.target.value)}><option value="">Choose an intent…</option>{renderIntents.map((intent) => <option key={intent.id} value={intent.id}>{intent.name}</option>)}</select></label><button type="button" className="secondary-button" onClick={() => setIntentBuilderOpen(true)}><SlidersHorizontal size={15} />Build intents</button></div>
+          </section>}
+          <details open className="pipeline-summary render-engine-card"><summary><span><small>LOCAL PIPELINE</small><strong>Engine components</strong></span><ChevronDown size={12} /></summary><div className="render-engine-grid">
             <PipelineItem ready={Boolean(mode === 'reference' ? selection.ref2va : selection.fl2va)} label="Diffusion" value={mode === 'reference' ? selection.ref2va : selection.fl2va} />
             <PipelineItem ready={Boolean(selection.textEncoder)} label="Encoder" value={selection.textEncoder} />
             <PipelineItem ready={Boolean(selection.videoVae && selection.audioVae)} label="Video + audio VAE" value={selection.videoVae && selection.audioVae ? 'Both detected' : 'Missing component'} />
             <PipelineItem ready={turbo === 'off' || Boolean(mode === 'reference' ? selection.ref2vLora : selection.fl2vLora)} label="Acceleration" value={turbo === 'off' ? 'Native sampling' : (mode === 'reference' ? selection.ref2vLora : selection.fl2vLora)} />
-          </details>}
+          </div>
+          </details>
           <section id="workspace-output" className={`create-section create-output-section preview-output-settings ${advanced ? 'show-advanced' : 'basic-render'}`}>
             <div className="create-section-heading"><span><Gauge size={15} /></span><div><strong>Output and quality</strong><small>Configure the next render.</small></div><em className="complete">{resolution.replace('x', ' × ')} · {duration}s</em></div>
             <div className={`create-gpu-routing-summary ${gpuRoutingWarning ? 'warning' : ''}`}><Gauge size={14} /><span><strong>{gpuRoutingSummary}</strong><small>{gpuRoutingWarning ?? `H3 frame grid resolves this duration to ${frameCount(duration)} frames before generation. Whole-component placement is requested for the next render.`}</small></span></div>
             {mode !== 'reference' && <div className="create-presets" aria-label="Recommended H3 presets"><button type="button" onClick={() => applyCreatePreset('quality')}><strong>Native Quality</strong><small>1344 × 768 · 30 steps</small></button><button type="button" onClick={() => applyCreatePreset('turbo')}><strong>Turbo 8</strong><small>Native canvas · official LoRA</small></button><button type="button" onClick={() => applyCreatePreset('preview')}><strong>Preview</strong><small>864 × 480 · Turbo 8</small></button></div>}
-            <RenderSize value={resolution} onChange={setResolution} />
-            {mode === 'reference' && <details className="output-reference-fidelity"><summary><Gauge size={16} /><span><small>REFERENCE FIDELITY</small><strong>{refImageSize === 'max' ? 'Maximum identity' : 'Balanced'}</strong><em>{refImageSize === 'max' ? 'Keep more original source detail' : 'Fit references to the output canvas'}</em></span><ChevronDown size={15} /></summary><fieldset><legend>Choose how much source-image detail H3 preserves</legend><label className={refImageSize === 'match' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'match'} onChange={() => setRefImageSize('match')} /><span><strong>Balanced</strong><small>Fit references to the output canvas. Faster and uses less memory.</small></span></label><label className={refImageSize === 'max' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'max'} onChange={() => setRefImageSize('max')} /><span><strong>Maximum identity</strong><small>Keep more original image detail. Slower and uses more memory.</small></span></label></fieldset></details>}
-            <section className="ref2va-setting-group" aria-labelledby="render-plan-title"><div className="ref2va-setting-heading"><span>01</span><div><strong id="render-plan-title">Render plan</strong><small>Set timing and the primary H3 sampling recipe.</small></div></div><div className="render-controls"><div className="field-group"><label htmlFor="duration">Duration</label><div className="range-line"><input id="duration" type="range" min="2" max="15" step="0.5" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /><output>{duration}s</output></div></div><SelectField label="Sampling quality" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={mode === 'reference' ? [["off", `Native quality · ${steps} steps`], ["8", 'Turbo 8 · Ref2VA v1.0 · 768p'], ["4", 'Turbo 4 · Ref2VA v0.1']] : [["off", `Native quality · ${steps} steps`], ["8", 'Official Turbo 8'], ["4", 'Turbo 4 · experimental']]} /></div>
+             <RenderSize value={resolution} onChange={setResolution} />
+             {mode === 'reference' && <details className="output-reference-fidelity"><summary><Gauge size={16} /><span><small>REFERENCE FIDELITY</small><strong>{refImageSize === 'max' ? 'Maximum identity' : 'Balanced'}</strong><em>{refImageSize === 'max' ? 'Keep more original source detail' : 'Fit references to the output canvas'}</em></span><ChevronDown size={15} /></summary><fieldset><legend>Choose how much source-image detail H3 preserves</legend><label className={refImageSize === 'match' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'match'} onChange={() => setRefImageSize('match')} /><span><strong>Balanced</strong><small>Fit references to the output canvas. Faster and uses less memory.</small></span></label><label className={refImageSize === 'max' ? 'selected' : ''}><input type="radio" name="output-reference-fidelity" checked={refImageSize === 'max'} onChange={() => setRefImageSize('max')} /><span><strong>Maximum identity</strong><small>Keep more original image detail. Slower and uses more memory.</small></span></label></fieldset></details>}
+             {mode === 'reference' && <section className={`frame-zero-guide-setting ${frameZeroGuide ? 'active' : ''}`} aria-labelledby="frame-zero-guide-title">
+               <div className="frame-zero-guide-heading"><span><Aperture size={17} /></span><div><small>CONTINUATION CONTROL</small><strong id="frame-zero-guide-title">Frame 0 guide</strong><p>Choose one picture to VAE-anchor at native <code>frame_idx 0</code>.</p></div><em>{frameZeroGuide ? '0.00s anchored' : 'Off'}</em></div>
+               <label><span>Literal opening source</span><select aria-label="Frame 0 guide source" value={frameZeroGuide?.id || ''} disabled={!frameZeroCandidates.length} onChange={(event) => setSceneState(setFrameZeroGuide(boundScene, event.target.value || undefined))}><option value="">Off · references do not lock the opening</option>{frameZeroCandidates.map((ref) => { const label = sceneCompilation.references.find(item => item.id === ref.id)?.label.replace(/[<>]/g, '') || 'Picture'; return <option key={ref.id} value={ref.id}>{label} · {ref.name}</option> })}</select></label>
+               <div className="frame-zero-guide-meaning"><span><strong>Frame 0 anchor</strong><small>Native Add Guide conditioning fixes this picture as the opening visual state at 0.00s.</small></span><span><strong>Reference only</strong><small>Guides identity, wardrobe, scene, motion, or style without fixing the first generated frame.</small></span></div>
+               {!frameZeroCandidates.length && <p className="field-help">Add at least one picture in Sources to enable a Frame 0 guide.</p>}
+               {frameZeroGuide && !info.MiniMaxH3AddGuide && <p className="field-help upscale-warning">This ComfyUI installation does not report MiniMaxH3AddGuide. Update ComfyUI or turn Frame 0 guide off.</p>}
+             </section>}
+            <section className="ref2va-setting-group render-plan-card" aria-labelledby="render-plan-title"><div className="ref2va-setting-heading"><span>01</span><div><strong id="render-plan-title">Render plan</strong><small>Set timing and the primary H3 sampling recipe.</small></div></div><div className="render-controls"><div className="field-group"><label htmlFor="duration">Duration</label><div className="range-line"><input id="duration" type="range" min="2" max="15" step="0.5" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /><output>{duration}s</output></div></div><SelectField label="Sampling quality" value={turbo} onChange={(value) => setTurbo(value as 'off' | '4' | '8')} options={mode === 'reference' ? [["off", `Native quality · ${steps} steps`], ["8", 'Turbo 8 · Ref2VA v1.0 · 768p'], ["4", 'Turbo 4 · Ref2VA v0.1']] : [["off", `Native quality · ${steps} steps`], ["8", 'Official Turbo 8'], ["4", 'Turbo 4 · experimental']]} /></div>
             <div className="ref2va-seed-control">
               <div className="field-group"><label htmlFor="h3-ref2va-seed">MiniMax H3 seed</label><input id="h3-ref2va-seed" className="number-input" type="number" min={0} max={999999999999} step={1} value={seed} disabled={seedLocked || submitting || stillSubmitting} onChange={(event) => setSeed(Math.max(0, Math.min(999999999999, Math.floor(Number(event.target.value) || 0))))} /></div>
               <div className="ref2va-seed-actions">
@@ -3035,15 +3106,14 @@ function CreateView(props: CreateViewProps) {
             {turbo === '8' && <><SelectField label="Turbo 8 profile" value={turbo8Profile} onChange={(value) => setTurbo8Profile(value as Turbo8Profile)} options={[["stable", 'Stable · Euler + Simple · faces/dialogue'], ["balanced", 'Balanced · res_multistep + Simple'], ["motion", 'Motion · res_multistep + Beta'], ["euler-beta", 'Euler + Beta · controlled test']]}/><NumberField label="Turbo 8 steps" value={effectiveSteps} min={4} max={12} onChange={setSteps} /><p className="field-help">8 is the trained default. Use 9–12 steps for controlled coherence or detail testing; 12 is the supported maximum for this Turbo recipe.</p></>}
             </section>
             <section className="ref2va-setting-group ref2va-adapter-group" aria-labelledby="user-lora-title"><div className="ref2va-setting-heading"><span>02</span><div><strong>Adapters</strong><small>Add compatible ComfyUI LoRAs after the selected H3 recipe.</small></div></div><section className="user-lora-slots"><div><span><strong id="user-lora-title">Additional ComfyUI LoRAs</strong><small>Apply up to three adapters from your configured LoRAs folder.</small></span><em>{userLoras.filter((slot) => slot.name).length}/3 selected</em></div>{userLoras.map((slot, index) => <div className="user-lora-slot" key={index}><label>LoRA {index + 1}<select value={slot.name} disabled={!userLoraChoices.length} onChange={(event) => setUserLoraSlot(index, { name: event.target.value })}><option value="">No additional LoRA</option>{userLoraChoices.filter((name) => name === slot.name || !userLoras.some((other, otherIndex) => otherIndex !== index && other.name === name)).map((name) => <option key={name} value={name}>{name}</option>)}</select></label><NumberField label="Strength" value={slot.strength} min={0} max={2} step={0.05} disabled={!slot.name} onChange={(strength) => setUserLoraSlot(index, { strength })} /></div>)}<p className="field-help">Official H3 Turbo LoRAs stay automatic and do not consume these slots. Additional adapters are loaded after Turbo; use short fixed-seed tests because unsupported model adapters can reduce stability.</p>{!userLoraChoices.length && <p className="field-help">No extra LoRAs were found. Add compatible files to the configured ComfyUI LoRAs folder, then rescan in Settings.</p>}</section></section>
-            <section className="ref2va-setting-group" aria-labelledby="preview-finish-title"><div className="ref2va-setting-heading"><span>03</span><div><strong id="preview-finish-title">Preview and finish</strong><small>Choose what to watch while sampling and what happens after rendering.</small></div></div><div className="render-extras"><div className="ref2va-subsection-title">During the render</div><label><input type="checkbox" checked={liveEnabled} onChange={(event) => setLiveEnabled(event.target.checked)} />Live preview <small>{liveEnabled ? liveConnected ? 'Connected · waiting for preview frames' : 'Connecting to ComfyUI…' : 'Off'}</small></label><label className="live-preview-mode"><span>Preview source</span><select value={livePreviewMode} disabled={!liveEnabled} onChange={(event) => setLivePreviewMode(event.target.value as 'standard' | 'h3-override')}><option value="standard">Standard first frame</option><option value="h3-override">MiniMax H3 animated · clip duration at 12 fps</option></select></label><p className={`field-help ${livePreviewMode === 'h3-override' && !h3PreviewOverrideAvailable ? 'upscale-warning' : ''}`}>{livePreviewMode === 'h3-override' && h3PreviewOverrideAvailable ? `The installed MiniMax H3 Preview Override node is wired between the model and sampler and streams ${h3PreviewFrameCount(duration)} frames at ${H3_PREVIEW_FPS} fps, matching this shot’s ${duration}s output frame grid.` : livePreviewMode === 'h3-override' ? 'Animated preview is selected, but the required Preview Override node is not detected. Install or enable it, restart ComfyUI, then click the Local engine status to refresh before generating.' : h3PreviewOverrideAvailable ? 'MiniMax H3 Preview Override is installed. Select the animated option to preview motion while sampling.' : 'You can select animated preview now. Generation will wait until the MiniMax H3 Preview Override custom node is installed and detected.'}</p><div className="ref2va-subsection-title after-render">After the render</div><div className="upscale-options" role="group" aria-labelledby="upscale-label"><span id="upscale-label">Post-render upscale</span><label><input type="radio" name="upscale" checked={upscaleMode === 'off'} onChange={() => setUpscaleMode('off')} />Off</label><label><input type="radio" name="upscale" checked={upscaleMode === 'h3'} disabled={!h3LearnedUpscaleAvailable} onChange={() => setUpscaleMode('h3')} />H3 learned latent · 1.5×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'ltx'} disabled={!ltxAvailable} onChange={() => setUpscaleMode('ltx')} />LTX 2.5 latent · 2×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'rtx'} disabled={rtxModels.length === 0} onChange={() => setUpscaleMode('rtx')} />RTX / CUDA frames · 2× · experimental</label></div>{upscaleMode === 'rtx' && <SelectField label="AI upscale model" value={rtxModel} onChange={setRtxModel} options={rtxModels.map((name) => [name, name])} />}{upscaleMode === 'h3' && <p className="field-help">H3-native learned 3D latent upscale: the video latent grows 1.5×, the original audio latent is retained, and H3’s VAE decodes only once. Final size: {resolution.split('x').map((value) => h3LatentUpscaleSize(Number(value))).join(' × ')}.</p>}{!h3LearnedUpscaleAvailable && <p className="field-help upscale-warning">To enable H3 learned latent 1.5×, install <a href="https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler" target="_blank" rel="noreferrer">Comfyui_Minimax_h3_latent_Upscaler</a> in <code>ComfyUI/custom_nodes</code>, then put <a href="https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler" target="_blank" rel="noreferrer">minimax_h3_latent_upscaler_3d_fp16.safetensors</a> in <code>ComfyUI/models/latent_upscale_models</code>. Restart ComfyUI and refresh Local engine.{h3LearnedUpscaleMissingNodes.length ? ` Missing nodes: ${h3LearnedUpscaleMissingNodes.join(', ')}.` : !h3LearnedUpscaleModelDetected ? ' The required 3D checkpoint is not detected.' : ''}</p>}<p className={`field-help ${upscaleMode === 'rtx' ? 'upscale-warning' : ''}`}>{upscaleMode === 'ltx' ? `Verified latent pipeline: MiniMax frames are encoded with the LTX‑2.5 video VAE, spatially upsampled exactly 2× in latent space, decoded, trimmed to the original duration, and joined to the untouched MiniMax audio. Final size: ${resolution.split('x').map((value) => Number(value) * 2).join(' × ')}.` : upscaleMode === 'rtx' ? `Experimental frame-by-frame upscale using ${rtxModel || 'the selected model'}. It does not understand motion and can amplify noise, flicker, or temporal shimmer. Diagnose output quality with upscale Off first.` : upscaleMode === 'h3' ? 'The H3 1.5× path is experimental; inspect a short clip before committing a long render.' : !ltxAvailable && ltxMissingNodes.length ? `LTX 2× is unavailable until ComfyUI provides: ${ltxMissingNodes.join(', ')}.` : !ltxAvailable && rtxModels.length === 0 ? 'No compatible upscale models were reported by ComfyUI.' : 'The original MiniMax video is saved without post-processing.'}</p></div></section>
+            <section className="ref2va-setting-group render-finish-card" aria-labelledby="preview-finish-title"><div className="ref2va-setting-heading"><span>03</span><div><strong id="preview-finish-title">Preview and finish</strong><small>Choose what to watch while sampling and what happens after rendering.</small></div></div><div className="render-extras"><div className="ref2va-subsection-title">During the render</div><label><input type="checkbox" checked={liveEnabled} onChange={(event) => setLiveEnabled(event.target.checked)} />Live preview <small>{liveEnabled ? liveConnected ? 'Connected · waiting for preview frames' : 'Connecting to ComfyUI…' : 'Off'}</small></label><label className="live-preview-mode"><span>Preview source</span><select value={livePreviewMode} disabled={!liveEnabled} onChange={(event) => setLivePreviewMode(event.target.value as 'standard' | 'h3-override')}><option value="standard">Standard first frame</option><option value="h3-override">MiniMax H3 animated · clip duration at 12 fps</option></select></label><p className={`field-help ${livePreviewMode === 'h3-override' && !h3PreviewOverrideAvailable ? 'upscale-warning' : ''}`}>{livePreviewMode === 'h3-override' && h3PreviewOverrideAvailable ? `The installed MiniMax H3 Preview Override node is wired between the model and sampler and streams ${h3PreviewFrameCount(duration)} frames at ${H3_PREVIEW_FPS} fps, matching this shot’s ${duration}s output frame grid.` : livePreviewMode === 'h3-override' ? 'Animated preview is selected, but the required Preview Override node is not detected. Install or enable it, restart ComfyUI, then click the Local engine status to refresh before generating.' : h3PreviewOverrideAvailable ? 'MiniMax H3 Preview Override is installed. Select the animated option to preview motion while sampling.' : 'You can select animated preview now. Generation will wait until the MiniMax H3 Preview Override custom node is installed and detected.'}</p><div className="ref2va-subsection-title after-render">After the render</div><div className="upscale-options" role="group" aria-labelledby="upscale-label"><span id="upscale-label">Post-render upscale</span><label><input type="radio" name="upscale" checked={upscaleMode === 'off'} onChange={() => setUpscaleMode('off')} />Off</label><label><input type="radio" name="upscale" checked={upscaleMode === 'h3'} disabled={!h3LearnedUpscaleAvailable} onChange={() => setUpscaleMode('h3')} />H3 learned latent · 1.5×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'ltx'} disabled={!ltxAvailable} onChange={() => setUpscaleMode('ltx')} />LTX 2.5 latent · 2×</label><label><input type="radio" name="upscale" checked={upscaleMode === 'rtx'} disabled={rtxModels.length === 0} onChange={() => setUpscaleMode('rtx')} />RTX / CUDA frames · 2× · experimental</label></div>{upscaleMode === 'rtx' && <SelectField label="AI upscale model" value={rtxModel} onChange={setRtxModel} options={rtxModels.map((name) => [name, name])} />}{upscaleMode === 'h3' && <p className="field-help">H3-native learned 3D latent upscale: the video latent grows 1.5×, the original audio latent is retained, and H3’s VAE decodes only once. Final size: {resolution.split('x').map((value) => h3LatentUpscaleSize(Number(value))).join(' × ')}.</p>}{!h3LearnedUpscaleAvailable && <p className="field-help upscale-warning">To enable H3 learned latent 1.5×, install <a href="https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler" target="_blank" rel="noreferrer">Comfyui_Minimax_h3_latent_Upscaler</a> in <code>ComfyUI/custom_nodes</code>, then put <a href="https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler" target="_blank" rel="noreferrer">minimax_h3_latent_upscaler_3d_fp16.safetensors</a> in <code>ComfyUI/models/latent_upscale_models</code>. Restart ComfyUI and refresh Local engine.{h3LearnedUpscaleMissingNodes.length ? ` Missing nodes: ${h3LearnedUpscaleMissingNodes.join(', ')}.` : !h3LearnedUpscaleModelDetected ? ' The required 3D checkpoint is not detected.' : ''}</p>}<p className={`field-help ${upscaleMode === 'rtx' ? 'upscale-warning' : ''}`}>{upscaleMode === 'ltx' ? `Verified latent pipeline: MiniMax frames are encoded with the LTX‑2.5 video VAE, spatially upsampled exactly 2× in latent space, decoded, trimmed to the original duration, and joined to the untouched MiniMax audio. Final size: ${resolution.split('x').map((value) => Number(value) * 2).join(' × ')}.` : upscaleMode === 'rtx' ? `Experimental frame-by-frame upscale using ${rtxModel || 'the selected model'}. It does not understand motion and can amplify noise, flicker, or temporal shimmer. Diagnose output quality with upscale Off first.` : upscaleMode === 'h3' ? 'The H3 1.5× path is experimental; inspect a short clip before committing a long render.' : !ltxAvailable && ltxMissingNodes.length ? `LTX 2× is unavailable until ComfyUI provides: ${ltxMissingNodes.join(', ')}.` : !ltxAvailable && rtxModels.length === 0 ? 'No compatible upscale models were reported by ComfyUI.' : 'The original MiniMax video is saved without post-processing.'}</p></div></section>
             <button className="advanced-toggle render-advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced} aria-controls="render-advanced-panel"><SlidersHorizontal size={16} /><span><strong>Advanced H3</strong><small>Encoder, sampler, sigma shifts, LoRAs, preview pipeline, and upscale.</small></span><ChevronDown size={15} className={advanced ? 'rotated' : ''} /></button>
             <section id="render-advanced-panel" className="ref2va-setting-group compact-advanced-grid" aria-hidden={!advanced}><div className="ref2va-setting-heading"><span>04</span><div><strong>Model and sampling</strong><small>Override the validated H3 defaults only when needed.</small></div></div><div className="advanced-grid"><SelectField label="Text encoder" value={textEncoderPreference} onChange={(value) => setTextEncoderPreference(value as 'fast' | 'quality')} options={[["fast", 'Fast · NVFP4-AWQ'], ["quality", 'Quality · INT8 ConvRot']]} /><NumberField label="Full-quality steps" value={steps} min={16} max={30} onChange={setSteps} disabled={turbo !== 'off'} /><div className="turbo-lora-weight"><NumberField label="Official Turbo LoRA weight" value={loraStrength} min={0} max={2} step={0.05} onChange={setLoraStrength} disabled={turbo === 'off'} /></div><label className="sampling-opt-in"><input type="checkbox" checked={experimentalSampling} onChange={(event) => setExperimentalSampling(event.target.checked)} />Custom sampler and scheduler</label><SelectField label="Sampler" value={experimentalSampling ? sampler : turbo === '8' ? turbo8Sampling(turbo8Profile).sampler : 'res_multistep'} onChange={setSampler} disabled={!experimentalSampling} options={[...new Set([sampler, 'euler', 'res_multistep', ...choices(info, 'KSamplerSelect', 'sampler_name')])].map((value) => [value, value])} /><SelectField label="Scheduler" value={experimentalSampling ? scheduler : turbo === '8' ? turbo8Sampling(turbo8Profile).scheduler : 'simple'} onChange={setScheduler} disabled={!experimentalSampling} options={[...new Set([scheduler, 'simple', 'beta', ...choices(info, 'BasicScheduler', 'scheduler')])].map((value) => [value, value])} /><SelectField label="Sigma shifts" value={sigmaShiftMode} onChange={(value) => setSigmaShiftMode(value as 'model' | 'custom')} options={[["model", 'Model defaults · 12 / 3'], ["custom", 'Custom shifts']]} /><NumberField label="Video shift" value={shiftVideo} min={0.01} max={100} step={0.01} onChange={setShiftVideo} disabled={sigmaShiftMode !== 'custom'} /><NumberField label="Audio shift" value={shiftAudio} min={0.01} max={100} step={0.01} onChange={setShiftAudio} disabled={sigmaShiftMode !== 'custom'} /></div></section>
             <p className="field-help render-duration">{frameCount(duration)} frames · {(frameCount(duration) / 24).toFixed(2)}s at 24 fps.</p>
-          </section></div>}
+          </section></div>
           <div id="h3-render-readiness" className={`h3-render-readiness ${renderBlocker ? 'blocked' : 'ready'}`} role="status"><strong>{renderBlocker ? 'Before you generate' : 'Ready to render'}</strong><span>{renderBlocker || 'Review the output settings, then generate your video. Progress and results appear in Preview.'}</span></div>
-{latestJob && ['queued', 'running'].includes(latestJob.status) && <div className="generate-bar preview-generate-bar"><div className="generation-summary"><Gauge size={17} /><span><strong>{resolution.replace('x', ' × ')}</strong><small>{(frameCount(duration) / 24).toFixed(2)}s · 24 fps · {effectiveSteps} steps · {turbo === 'off' ? 'Native' : `Turbo ${turbo}`}</small></span></div><div className="generate-actions"><button className="danger-button" onClick={() => onCancel(latestJob)} disabled={cancelling}><CircleStop size={16} />{cancelling ? 'Stopping…' : latestJob.mediaType === 'image' ? 'Cancel image' : 'Cancel generation'}</button></div></div>}
-          {previewPopoutRoot && createPortal(<DetachedPreviewMonitor job={latestJob} livePreview={livePreview} liveEnabled={liveEnabled} blurSensitive={blurNsfwPreview} />, previewPopoutRoot)}
-        </aside>
+        </section>
+        {previewPopoutRoot && createPortal(<DetachedPreviewMonitor job={latestJob} livePreview={livePreview} liveEnabled={liveEnabled} blurSensitive={blurNsfwPreview} />, previewPopoutRoot)}
       </div>
     </div>
   )
@@ -3099,20 +3169,49 @@ function Ref2vaIntentBuilder({ intents, values, onApply, onSave, onDelete, onClo
 function VideoPlayer({ src, onDuration }: { src: string; onDuration?(duration: number): void }) {
   const [failure, setFailure] = useState('')
   const [attempt, setAttempt] = useState(0)
+  const [playbackState, setPlaybackState] = useState<'loading' | 'ready' | 'buffering'>('loading')
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const autoplayAttempted = useRef(false)
 
-  useEffect(() => setFailure(''), [src])
+  useEffect(() => {
+    setFailure('')
+    setPlaybackState('loading')
+    autoplayAttempted.current = false
+    videoRef.current?.load()
+  }, [src, attempt])
+
+  const markPlayable = (video: HTMLVideoElement) => {
+    setPlaybackState('ready')
+    if (autoplayAttempted.current) return
+    autoplayAttempted.current = true
+    void video.play().catch(() => undefined)
+  }
 
   if (failure) {
     return <div className="playback-error" role="alert"><AlertCircle size={25} /><strong>Video could not be decoded</strong><span>{failure}</span><button className="secondary-button" onClick={() => { setFailure(''); setAttempt((value) => value + 1) }}><RefreshCw size={15} />Retry playback</button></div>
   }
 
-  return <video key={`${src}-${attempt}`} src={src} controls autoPlay loop playsInline preload="auto" onLoadedMetadata={(event) => onDuration?.(event.currentTarget.duration)} onCanPlay={(event) => void event.currentTarget.play().catch(() => undefined)} onError={(event) => { const mediaError = event.currentTarget.error; setFailure(mediaError?.message || `Electron media error ${mediaError?.code ?? 'unknown'}`) }} />
+  return <div className="stable-video-player" data-playback-state={playbackState}>
+    <video ref={videoRef} src={src} controls autoPlay loop playsInline preload="auto" onLoadStart={() => setPlaybackState('loading')} onLoadedMetadata={(event) => onDuration?.(event.currentTarget.duration)} onLoadedData={(event) => markPlayable(event.currentTarget)} onCanPlay={(event) => markPlayable(event.currentTarget)} onPlaying={() => setPlaybackState('ready')} onWaiting={() => setPlaybackState('buffering')} onStalled={() => setPlaybackState('buffering')} onError={(event) => { const mediaError = event.currentTarget.error; setFailure(mediaError?.message || `Electron media error ${mediaError?.code ?? 'unknown'}`) }} />
+    {playbackState === 'loading' && <div className="video-readiness" role="status"><LoaderCircle size={18} className="spin" /><span><strong>Preparing local playback</strong><small>Loading the first playable frame…</small></span></div>}
+    {playbackState === 'buffering' && <div className="video-buffering-status" role="status"><span />Stabilizing playback</div>}
+  </div>
 }
 
 function VideoContinuationControls({ job, onContinue, onContinueReference }: { job: GenerationJob; onContinue(job: GenerationJob): Promise<void>; onContinueReference(job: GenerationJob): Promise<void> }) {
   const [busy, setBusy] = useState<'i2v' | 'ref2va' | null>(null)
   const run = async (target: 'i2v' | 'ref2va') => { setBusy(target); try { await (target === 'i2v' ? onContinue(job) : onContinueReference(job)) } finally { setBusy(null) } }
-  return <section className="video-continuation" aria-labelledby="video-continuation-title"><header><strong id="video-continuation-title">Continue from this final frame</strong><small>The final frame becomes a literal 0.00-second opening anchor. Choose the generation workflow for the next shot.</small></header><div className="video-continuation-options"><button className="primary-button" disabled={!!busy} onClick={() => void run('ref2va')}>{busy === 'ref2va' ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />}Use in Ref2VA<span>Keep characters and other references</span></button><button className="secondary-button" disabled={!!busy} onClick={() => void run('i2v')}>{busy === 'i2v' ? <LoaderCircle className="spin" size={14} /> : <SkipForward size={14} />}Use in I2V<span>Use only the opening frame</span></button></div></section>
+  return <section className="video-continuation" aria-labelledby="video-continuation-title"><header><strong id="video-continuation-title">Continue from this final frame</strong><small>Both choices condition the extracted image at 0.00s. Ref2VA uses a native Frame 0 Add Guide and keeps other references; reference-only sources never lock the opening.</small></header><div className="video-continuation-options"><button className="primary-button" disabled={!!busy} onClick={() => void run('ref2va')}>{busy === 'ref2va' ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />}Ref2VA + Frame 0 anchor<span>Native frame_idx 0 guide · keep other references</span></button><button className="secondary-button" disabled={!!busy} onClick={() => void run('i2v')}>{busy === 'i2v' ? <LoaderCircle className="spin" size={14} /> : <SkipForward size={14} />}I2V first-frame input<span>FL2VA route · opening image only</span></button></div></section>
+}
+
+const DEFAULT_RENDER_RAIL_WIDTH = 400
+const MIN_RENDER_RAIL_WIDTH = 320
+const MAX_RENDER_RAIL_WIDTH = 620
+const clampRenderRailWidth = (value: number) => Math.min(MAX_RENDER_RAIL_WIDTH, Math.max(MIN_RENDER_RAIL_WIDTH, Math.round(value)))
+
+function initialRenderRailWidth() {
+  const stored = Number(localStorage.getItem('minimax.renderRailWidth'))
+  return Number.isFinite(stored) && stored > 0 ? clampRenderRailWidth(stored) : DEFAULT_RENDER_RAIL_WIDTH
 }
 
 function MediaDrop({ label, note, file, onChoose, onRemove }: { label: string; note: string; file: MediaFile | null; onChoose(): void; onRemove(): void }) {
@@ -3270,13 +3369,13 @@ function LibraryView({ jobs, settings, onEdit, onUseLtx, onUseLastFrameReference
   return <div className="standard-page library-page"><div className="page-heading"><div><p className="eyebrow">LOCAL LIBRARY</p><h1>Video library</h1><p>Review renders, collect reusable frames, or assemble clips without changing the originals.</p></div><button className="primary-button" onClick={onEdit}><Scissors size={16} />Open clip editor</button></div>
     <div className="library-toolbar"><label><span>Search renders</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search prompts…" /></label><label><span>Provider</span><select value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="all">All providers</option><option value="minimax">MiniMax H3</option><option value="ltx25">LTX 2.5</option></select></label><label><span>Sort</span><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label><div><strong>{filtered.length}</strong><span>of {available.length} videos</span></div></div>
     {available.length === 0 ? <div className="empty-page"><History size={28} /><strong>Completed generations will appear here.</strong><span>New work is saved automatically on this device.</span></div> : filtered.length === 0 ? <div className="empty-page compact"><Film size={25} /><strong>No results match these filters.</strong><button className="secondary-button" onClick={() => { setQuery(''); setProvider('all') }}>Clear filters</button></div> : <div className="library-grid">{filtered.map((job) => { const image = job.mediaType === 'image'; const video = videos.find((item) => item.id === `job-${job.id}`); const rifeBusy = rifeBusyId === job.id; return <article className="library-card" key={job.id}>{image ? <img src={job.outputUrl} alt="Generated Ref2VA reference still" /> : <video src={job.outputUrl} controls preload="metadata" />}<div><div className="library-card-meta"><span className={`library-provider ${job.provider === 'ltx25' ? 'ltx' : ''}`}>{image ? 'Ref2VA still' : job.provider === 'ltx25' ? 'LTX 2.5' : 'MiniMax H3'}</span><time dateTime={new Date(job.createdAt).toISOString()}>{new Date(job.createdAt).toLocaleDateString()}</time></div><strong title={job.prompt}>{shortPrompt(job.prompt)}</strong><small>{job.width} × {job.height} · {image ? 'one image' : `${job.duration}s · ${job.mode}`}</small><div className="library-card-actions"><button className="secondary-button" onClick={() => setLightbox(job)}><Watch size={15} />Preview</button>{!image && video && <button className="primary-button" onClick={() => setBookmarkVideo(video)}><Bookmark size={15} />Frame bookmarks</button>}{!image && <details className="library-rife"><summary><Gauge size={14} />RIFE motion tool</summary><span>{rife?.installed ? 'Optical-flow derivative · original remains unchanged.' : 'Installs the official local RIFE tool on first use.'}</span><div><button className="secondary-button" disabled={Boolean(rifeBusyId)} onClick={() => void runRife(job, 'fps-2x')}>{rifeBusy ? <LoaderCircle className="spin" size={14} /> : <Gauge size={14} />}48 fps</button><button className="secondary-button" disabled={Boolean(rifeBusyId)} onClick={() => void runRife(job, 'slow-motion')}>{rifeBusy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}Cinematic slow motion</button></div></details>}<a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a></div></div></article> })}</div>}
-    {lightbox && <div className="media-lightbox-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setLightbox(null) }}><section className="media-lightbox" role="dialog" aria-modal="true" aria-labelledby="library-preview-title"><header><span><small>LIBRARY PREVIEW</small><strong id="library-preview-title">{shortPrompt(lightbox.prompt)}</strong></span><button className="icon-button" onClick={() => setLightbox(null)} aria-label="Close preview"><X size={18} /></button></header><div className="media-lightbox-stage">{lightbox.mediaType === 'image' ? <img src={lightbox.outputUrl} alt="Generated reference still" /> : <video src={lightbox.outputUrl} controls autoPlay playsInline preload="metadata" />}</div><footer><span>{lightbox.width} × {lightbox.height} · {lightbox.mediaType === 'image' ? 'Still image' : `${lightbox.duration}s video`}</span><div className="media-lightbox-actions">{lightbox.mediaType !== 'image' && <div className="opening-frame-builder"><div><strong>Opening-frame reference</strong><small>Extract the absolute final frame, then choose its truthful relationship to the next shot.</small></div><fieldset disabled={referenceBusyId === lightbox.id}><legend>Opening treatment</legend><label><input type="radio" name="opening-treatment" checked={openingMode === 'match'} onChange={() => setOpeningMode('match')} /><span><strong>Match visual state</strong><small>Keep the opening composition and framing as the visual anchor.</small></span></label><label><input type="radio" name="opening-treatment" checked={openingMode === 'reframe'} onChange={() => setOpeningMode('reframe')} /><span><strong>Reframe opening</strong><small>Partially preserve the scene while intentionally changing the first angle.</small></span></label><label><input type="radio" name="opening-treatment" checked={openingMode === 'arc'} onChange={() => setOpeningMode('arc')} /><span><strong>Match, then arc</strong><small>Establish the opening state, then move physically to the selected angle.</small></span></label></fieldset>{openingMode !== 'match' && <label className="opening-camera-angle"><span>{openingMode === 'arc' ? 'Target camera angle' : 'Opening camera angle'}</span><select value={openingCameraAngle} onChange={(event) => setOpeningCameraAngle(event.target.value)}><option value="side camera angle">Side camera angle</option><option value="three-quarter camera angle">Three-quarter camera angle</option><option value="front-facing camera angle">Front-facing camera angle</option><option value="low camera angle">Low camera angle</option><option value="high camera angle">High camera angle</option><option value="over-the-shoulder camera angle">Over-the-shoulder camera angle</option></select></label>}<button className="primary-button" disabled={referenceBusyId === lightbox.id} onClick={() => void addLastFrameReference(lightbox)} title="Experimental: extract the video's absolute final frame and add it to the Ref2VA prompt as the selected opening-frame reference">{referenceBusyId === lightbox.id ? <LoaderCircle className="spin" size={15} /> : <ImagePlus size={15} />}{referenceBusyId === lightbox.id ? 'Extracting final frame…' : openingMode === 'match' ? 'Use matched visual state' : openingMode === 'reframe' ? 'Use reframed opening' : 'Use opening camera arc'}<small>Experimental</small></button></div>}<button className="secondary-button" onClick={() => setLightbox(null)}>Close</button></div></footer></section></div>}
+    {lightbox && <div className="media-lightbox-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setLightbox(null) }}><section className="media-lightbox" role="dialog" aria-modal="true" aria-labelledby="library-preview-title"><header><span><small>LIBRARY PREVIEW</small><strong id="library-preview-title">{shortPrompt(lightbox.prompt)}</strong></span><button className="icon-button" onClick={() => setLightbox(null)} aria-label="Close preview"><X size={18} /></button></header><div className="media-lightbox-stage">{lightbox.mediaType === 'image' ? <img src={lightbox.outputUrl} alt="Generated reference still" /> : <VideoPlayer src={lightbox.outputUrl!} />}</div><footer><span>{lightbox.width} × {lightbox.height} · {lightbox.mediaType === 'image' ? 'Still image' : `${lightbox.duration}s video`}</span><div className="media-lightbox-actions">{lightbox.mediaType !== 'image' && <div className="opening-frame-builder"><div><strong>Next-shot frame conditioning</strong><small>Extract the absolute final frame, then choose native Frame 0 conditioning or reference-only guidance.</small></div><fieldset disabled={referenceBusyId === lightbox.id}><legend>Conditioning treatment</legend><label><input type="radio" name="opening-treatment" checked={openingMode === 'match'} onChange={() => setOpeningMode('match')} /><span><strong>Frame 0 anchor</strong><small>Native Add Guide conditioning at frame_idx 0; fixes the opening visual state.</small></span></label><label><input type="radio" name="opening-treatment" checked={openingMode === 'reframe'} onChange={() => setOpeningMode('reframe')} /><span><strong>Reference only · reframe</strong><small>Guides scene identity while H3 generates a new opening angle; frame 0 is not locked.</small></span></label><label><input type="radio" name="opening-treatment" checked={openingMode === 'arc'} onChange={() => setOpeningMode('arc')} /><span><strong>Frame 0 anchor, then arc</strong><small>Native frame_idx 0 guide first, followed by the requested camera movement.</small></span></label></fieldset>{openingMode !== 'match' && <label className="opening-camera-angle"><span>{openingMode === 'arc' ? 'Target camera angle' : 'Opening camera angle'}</span><select value={openingCameraAngle} onChange={(event) => setOpeningCameraAngle(event.target.value)}><option value="side camera angle">Side camera angle</option><option value="three-quarter camera angle">Three-quarter camera angle</option><option value="front-facing camera angle">Front-facing camera angle</option><option value="low camera angle">Low camera angle</option><option value="high camera angle">High camera angle</option><option value="over-the-shoulder camera angle">Over-the-shoulder camera angle</option></select></label>}<button className="primary-button" disabled={referenceBusyId === lightbox.id} onClick={() => void addLastFrameReference(lightbox)} title="Extract the final frame and use it as a native Frame 0 anchor or a reference-only reframe source">{referenceBusyId === lightbox.id ? <LoaderCircle className="spin" size={15} /> : <ImagePlus size={15} />}{referenceBusyId === lightbox.id ? 'Extracting final frame…' : openingMode === 'match' ? 'Use native Frame 0 anchor' : openingMode === 'reframe' ? 'Use reference-only reframe' : 'Use Frame 0 anchor + arc'}<small>Experimental</small></button></div>}<button className="secondary-button" onClick={() => setLightbox(null)}>Close</button></div></footer></section></div>}
     {bookmarkVideo && <FrameBookmarkStudio key={bookmarkVideo.id} initialVideo={bookmarkVideo} videos={videos} settings={settings} onClose={() => setBookmarkVideo(null)} onUseLtx={onUseLtx} onNotice={onNotice} />}
   </div>
 }
 
-function JobsView({ title, note, jobs, empty, cancellingIds, onCancel }: { title: string; note: string; jobs: GenerationJob[]; empty: string; cancellingIds: Set<string>; onCancel(job: GenerationJob): Promise<void> }) {
-  return <div className="standard-page"><div className="page-heading"><div><p className="eyebrow">LOCAL WORKSPACE</p><h1>{title}</h1><p>{note}</p></div></div>{jobs.length === 0 ? <div className="empty-page"><History size={28} /><strong>{empty}</strong><span>New work is saved automatically on this device.</span></div> : <div className="job-list">{jobs.map((job) => { const audio = job.mediaType === 'audio'; const image = job.mediaType === 'image'; return <article className={`job-row ${['running', 'queued'].includes(job.status) ? 'constructing' : ''}`} key={job.id}><div className={`job-thumbnail ${audio ? 'audio' : ''}`}>{job.outputUrl ? audio ? <Music2 /> : image ? <img src={job.outputUrl} alt="Generated reference still" /> : <video src={job.outputUrl} muted /> : job.status === 'running' ? <LoaderCircle className="spin" /> : audio ? <Music2 /> : image ? <ImageIcon /> : <Film />}</div><div className="job-copy"><div><StatusBadge status={job.status} /><span>{new Date(job.createdAt).toLocaleString()}</span></div><strong>{shortPrompt(job.prompt)}</strong><small>{audio ? `ACE-Step · ${job.duration}s · audio` : `${job.width} × ${job.height} · ${image ? 'Ref2VA still' : `${job.duration}s · ${job.mode}`}`}</small><JobExecutionChips job={job} />{job.outputUrl && audio && <audio className="job-audio" src={job.outputUrl} controls preload="metadata" />}{['running', 'queued'].includes(job.status) && <><small className="job-progress-label">{job.progressLabel ?? (job.status === 'queued' ? 'Waiting in queue' : audio ? 'Generating music locally' : image ? 'Generating one reference still' : 'Rendering locally')}{job.queuePosition ? ` · position ${job.queuePosition}` : ''}{job.currentStep !== undefined && job.totalSteps ? ` · ${job.currentStep}/${job.totalSteps}` : ''}</small><div className="progress compact"><i style={{ width: `${job.progress}%` }} /></div></>}{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.outputUrl && <a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a>}{['running', 'queued'].includes(job.status) && <button className="danger-button" disabled={cancellingIds.has(job.id)} onClick={() => void onCancel(job)}>{cancellingIds.has(job.id) ? <LoaderCircle size={15} className="spin" /> : <CircleStop size={15} />}{cancellingIds.has(job.id) ? 'Stopping…' : 'Stop'}</button>}</div></article> })}</div>}</div>
+function JobsView({ title, note, jobs, empty, cancellingIds, onCancel, onRemove }: { title: string; note: string; jobs: GenerationJob[]; empty: string; cancellingIds: Set<string>; onCancel(job: GenerationJob): Promise<void>; onRemove(job: GenerationJob): void }) {
+  return <div className="standard-page"><div className="page-heading"><div><p className="eyebrow">LOCAL WORKSPACE</p><h1>{title}</h1><p>{note}</p></div></div>{jobs.length === 0 ? <div className="empty-page"><History size={28} /><strong>{empty}</strong><span>New work is saved automatically on this device.</span></div> : <div className="job-list">{jobs.map((job) => { const audio = job.mediaType === 'audio'; const image = job.mediaType === 'image'; return <article className={`job-row ${['running', 'queued'].includes(job.status) ? 'constructing' : ''}`} key={job.id}><div className={`job-thumbnail ${audio ? 'audio' : ''}`}>{job.outputUrl ? audio ? <Music2 /> : image ? <img src={job.outputUrl} alt="Generated reference still" /> : <video src={job.outputUrl} muted /> : job.status === 'running' ? <LoaderCircle className="spin" /> : audio ? <Music2 /> : image ? <ImageIcon /> : <Film />}</div><div className="job-copy"><div><StatusBadge status={job.status} /><span>{new Date(job.createdAt).toLocaleString()}</span></div><strong>{shortPrompt(job.prompt)}</strong><small>{audio ? `ACE-Step · ${job.duration}s · audio` : `${job.width} × ${job.height} · ${image ? 'Ref2VA still' : `${job.duration}s · ${job.mode}`}`}</small><JobExecutionChips job={job} />{job.outputUrl && audio && <audio className="job-audio" src={job.outputUrl} controls preload="metadata" />}{['running', 'queued'].includes(job.status) && <><small className="job-progress-label">{job.progressLabel ?? (job.status === 'queued' ? 'Waiting in queue' : audio ? 'Generating music locally' : image ? 'Generating one reference still' : 'Rendering locally')}{job.queuePosition ? ` · position ${job.queuePosition}` : ''}{job.currentStep !== undefined && job.totalSteps ? ` · ${job.currentStep}/${job.totalSteps}` : ''}</small><div className="progress compact"><i style={{ width: `${job.progress}%` }} /></div></>}{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.outputUrl && <a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a>}{['running', 'queued'].includes(job.status) && <button className="danger-button" disabled={cancellingIds.has(job.id)} onClick={() => void onCancel(job)}>{cancellingIds.has(job.id) ? <LoaderCircle size={15} className="spin" /> : <CircleStop size={15} />}{cancellingIds.has(job.id) ? 'Stopping…' : 'Stop'}</button>}{!['running', 'queued'].includes(job.status) && <button className="secondary-button" title="Remove from Queue history; rendered files stay on disk" onClick={() => onRemove(job)}><Trash2 size={15} />Remove</button>}</div></article> })}</div>}</div>
 }
 
 function SettingsView({ settings, setSettings, info, models, jobs, gpu, h3Report, scanning, status, checking, diagnosticRunning, benchmarkRunning, benchmarkConfig, setBenchmarkConfig, benchmarkResults, ollamaModels, legacyMigration, legacyMigrationRunning, onRefreshOllama, onScan, onCheck, onSave, onApplyDefaults, onRunDiagnostics, onRunBenchmark, onRunLegacyMigration, onFactoryReset }: { settings: AppSettings; setSettings(value: AppSettings): void; info: ObjectInfo; models: ModelFile[]; jobs: GenerationJob[]; gpu: GpuTelemetry | null; h3Report: ReturnType<typeof h3StackReport>; scanning: boolean; status: ComfyStatus; checking: boolean; diagnosticRunning: boolean; benchmarkRunning: boolean; benchmarkConfig: H3BenchmarkConfig; setBenchmarkConfig(value: H3BenchmarkConfig): void; benchmarkResults: H3BenchmarkResult[]; ollamaModels: OllamaModel[]; legacyMigration: { available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null; legacyMigrationRunning: boolean; onRefreshOllama(): void; onScan(): void; onCheck(): void; onSave(): void; onApplyDefaults(): void; onRunDiagnostics(): void; onRunBenchmark(): void; onRunLegacyMigration(): void; onFactoryReset(): void }) {

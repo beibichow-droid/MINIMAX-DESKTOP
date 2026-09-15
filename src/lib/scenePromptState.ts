@@ -56,6 +56,28 @@ export function createSceneState(scene = '', duration = 5, mode: GenerationMode 
   return { version: 1, scene, mode, duration, references: [], characters: [], camera: {}, environment: value('', 'DEFAULT'), lighting: value('', 'DEFAULT'), styles: [], shots: [{ id: 'shot-1', start: 0, end: duration, description: '', camera: {}, characterIds: [] }], dialogue: [], soundscape: value('', 'DEFAULT'), music: value('', 'DEFAULT'), noDialogue: false, naturalMovement: false, continuity: { scene: false, camera: false, exactFrame: false, notes: value('', 'DEFAULT') }, overrides: {}, conflicts: [], inferred: [], view: 'creative', manualPrompt: '' }
 }
 
+/**
+ * Assign one image as Ref2VA's native frame-index-0 guide. A normal reference
+ * influences reusable appearance or composition, while this opening anchor is
+ * VAE-encoded into MiniMaxH3AddGuide and attached to frame_idx 0.
+ */
+export function setFrameZeroGuide(state: ScenePromptState, referenceId?: string): ScenePromptState {
+  const selected = referenceId ? state.references.find(ref => ref.id === referenceId && ref.file.kind === 'image') : undefined
+  return {
+    ...state,
+    references: state.references.map(ref => ({
+      ...ref,
+      anchor: ref.id === selected?.id ? 'opening' : ref.anchor === 'opening' ? undefined : ref.anchor,
+      ...(ref.id === selected?.id ? { reviewed: false } : {}),
+    })),
+    continuity: {
+      ...state.continuity,
+      scene: selected ? true : state.continuity.scene,
+      exactFrame: Boolean(selected),
+    },
+  }
+}
+
 // Compatibility boundary: library allocation decides transport order; this adapter
 // owns role semantics. No reference prose is appended to the author's scene.
 export function bindSceneReferences(state: ScenePromptState, bindings: MovieReferenceBinding[], videos: MediaFile[] = [], audios: MediaFile[] = [], first?: MediaFile | null, last?: MediaFile | null): ScenePromptState {
