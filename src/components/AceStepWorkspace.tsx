@@ -33,7 +33,7 @@ function readState(): MusicState {
   catch { return defaults }
 }
 
-export function AceStepWorkspace({ settings, models, connected, pipelineReady, missingNodes, latestJob, submitting, cancelling, ollamaAvailable, onGenerate, onCancel }: {
+export function AceStepWorkspace({ settings, models, connected, pipelineReady, missingNodes, latestJob, submitting, cancelling, ollamaAvailable, onGenerate, onCancel, onSelectMusic3 }: {
   settings: AppSettings
   models: AceStepModelSelection
   connected: boolean
@@ -45,6 +45,7 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
   ollamaAvailable: boolean
   onGenerate(options: AceStepGenerationOptions): void
   onCancel(job: GenerationJob): void
+  onSelectMusic3(): void
 }) {
   const initial = useMemo(readState, [])
   const [state, setState] = useState(initial)
@@ -82,7 +83,7 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
     </div>
     <div className="workspace-grid ace-workspace-grid">
       <section className="composer-panel">
-        <div className="provider-note ace-provider-note"><Music2 size={18} /><span><strong>Native ComfyUI generation</strong><small>Choose XL SFT or XL Base. Music settings and history stay separate from video projects.</small></span><button type="button" onClick={reset}><RotateCcw size={14} />Reset music</button></div>
+        <div className="provider-note ace-provider-note"><Music2 size={18} /><span><strong>Native ComfyUI generation</strong><small>Choose XL SFT or XL Base. Music settings and history stay separate from video projects.</small></span><button type="button" onClick={onSelectMusic3}>Music 3</button><button type="button" onClick={reset}><RotateCcw size={14} />Reset music</button></div>
 
         <fieldset className="model-picker"><legend>ACE-Step model</legend><div className="model-choice-grid">
           <label className={state.model === 'sft' ? 'selected' : ''}><input type="radio" name="ace-model" checked={state.model === 'sft'} disabled={!models.sft} onChange={() => set('model', 'sft')} /><span><strong>XL SFT</strong><small>Instruction-tuned · official CFG 7</small></span><em>{models.sft ? 'Ready' : 'Missing'}</em></label>

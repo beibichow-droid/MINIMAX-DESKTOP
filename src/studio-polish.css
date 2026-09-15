@@ -1,0 +1,124 @@
+/* Final visual layer: shared chrome and the primary video workspace.
+   Keep geometry controlled by the existing workspace and rail-width state. */
+:root {
+  --bg: #11151b;
+  --surface: #191f27;
+  --surface-1: #1c232d;
+  --surface-2: #222b36;
+  --surface-3: #2c3745;
+  --surface-raised: #202833;
+  --line: #303a47;
+  --line-strong: #4a586b;
+  --text: #edf2fa;
+  --muted: #afbbcb;
+  --muted-2: #939fb0;
+  --accent: #91baff;
+  --accent-soft: rgb(145 186 255 / 12%);
+  --radius: 12px;
+  --titlebar-surface: #171d25;
+}
+.app-shell .titlebar { background: var(--titlebar-surface); border-bottom-color: var(--line); box-shadow: none; }
+.app-shell .titlebar .brand-mark { border-radius: 9px; background: #263750; color: #b4d0ff; }
+.app-shell .titlebar .titlebar-search { background: #111820; border: 1px solid #354252; box-shadow: none; animation: none; }
+.app-shell .titlebar .titlebar-search::before,
+.app-shell .titlebar .titlebar-search::after { display: none; }
+.app-shell .titlebar .titlebar-search svg { color: var(--accent); filter: none; }
+.app-shell .sidebar { background: #151b23; border-right: 1px solid var(--line); }
+.app-shell .nav-button { border-radius: 9px; min-height: 39px; margin-block: 3px; transition: background-color .15s, color .15s; }
+.app-shell .nav-button:hover { background: #232e3c; }
+.app-shell .nav-button.active { background: #263850; color: #e4eeff; box-shadow: inset 3px 0 #91baff; }
+.app-shell .nav-button.active svg { color: #a8caff; }
+.app-shell .nav-section-label { color: #95a3b6; letter-spacing: .12em; font-size: 10px; }
+.page-heading h1 { line-height: 1.2; letter-spacing: -.035em; font-weight: 650; }
+.page-heading p { line-height: 1.6; }
+.app-shell :is(.secondary-button, .danger-button, .primary-button) { border-radius: 9px; }
+.app-shell .secondary-button { background: var(--surface-2); border-color: var(--line); }
+.app-shell .secondary-button:hover:not(:disabled) { background: var(--surface-3); border-color: var(--line-strong); }
+.app-shell :is(.settings-section, .library-card, .job-list) { border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 4px 16px #0001; }
+.app-shell .job-row { border-color: var(--line); }
+.app-shell :is(input, select, textarea):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.app-shell :is(button, a, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+.minimax-workspace {
+  --surface: #191f27;
+  --surface-2: #222b36;
+  --line: #303a47;
+  --text: #edf2fa;
+  --muted: #afbbcb;
+  --workflow-lime: #a7c9ff;
+  --workflow-cyan: #91baff;
+  background: radial-gradient(ellipse at top right, #25385335, transparent 55%);
+}
+.minimax-workspace .workspace-grid { gap: 20px; }
+.minimax-workspace .workspace-command-deck { padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: #171e28; box-shadow: none; }
+.minimax-workspace .mode-tabs { gap: 6px; }
+.minimax-workspace .mode-tabs button { padding: 10px 12px; border: 1px solid transparent; border-radius: 9px; background: transparent; box-shadow: none; }
+.minimax-workspace .mode-tabs button.active { background: #283b55; border-color: #4c6687; box-shadow: none; }
+.minimax-workspace .mode-tabs button small { color: var(--muted); line-height: 1.45; }
+.minimax-workspace .scene-composer { gap: 18px; }
+.minimax-workspace .scene-composer .scene-authoring { gap: 14px; }
+.minimax-workspace .scene-composer .scene-authoring > div,
+.minimax-workspace .scene-section,
+.minimax-workspace .scene-suggestions { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: none; }
+.minimax-workspace .scene-heading { gap: 12px; flex-wrap: wrap; margin-bottom: 14px; padding-bottom: 12px; border-color: var(--line); }
+.minimax-workspace .scene-heading strong { font-size: 14px; font-weight: 650; letter-spacing: -.01em; }
+.minimax-workspace .scene-heading small { color: var(--muted); }
+.minimax-workspace .scene-composer .smart-prompt-input { min-height: 230px; font-size: 14px; line-height: 1.75; }
+.minimax-workspace .scene-composer :is(input:not([type=checkbox]), textarea, select) { background: #111820; border: 1px solid #425064; border-radius: 8px; color: var(--text); padding: 10px; }
+.minimax-workspace .scene-composer button { border-radius: 8px; border-color: #3a485a; background: #222e3d; color: #d7e4f6; box-shadow: none; }
+.minimax-workspace .scene-composer button:hover:not(:disabled) { border-color: #7596c4; background: #2c3d54; }
+.minimax-workspace .scene-composer button.selected { background: #2b4263; border-color: #819fca; color: #f2f7ff; }
+.minimax-workspace .scene-composer summary { min-height: 30px; font-weight: 600; color: #dae5f4; }
+.minimax-workspace .scene-composer .scene-lower-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.minimax-workspace .scene-references-panel { border: 1px solid #465b75; border-radius: 14px; background: #192330; box-shadow: none; animation: none; }
+.minimax-workspace .scene-reference-card { border: 1px solid #3b4c61; border-radius: 12px; background: #1c2633; box-shadow: none; animation: none; }
+.minimax-workspace .scene-reference-card.anchored { border-color: #91baff; }
+.minimax-workspace .scene-add-reference { border-color: #58708f; box-shadow: none; animation: none; }
+.minimax-workspace .workspace-right-rail { gap: 16px; }
+.minimax-workspace :is(.studio-panel, .studio-inspector, .preview-panel) { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 8px 24px #0002; }
+.minimax-workspace :is(.studio-panel-heading, .preview-monitor-heading) { padding: 14px 16px; background: #202936; border-bottom: 1px solid #354355; }
+.minimax-workspace .preview-stage { background: #090d12; border-radius: 0; }
+.minimax-workspace .preview-toolbar { gap: 8px; }
+.minimax-workspace .preview-toolbar .icon-button { background: #2a3749; border-color: #43556d; }
+.minimax-workspace .generate-bar { padding: 16px; border-color: #3a4a60; background: #202c3c; border-radius: 12px; }
+.minimax-workspace .generate-bar .primary-button { min-height: 44px; border-radius: 10px; background: #8eb9ff; border: 1px solid #b1cfff; color: #10223e; font-weight: 700; box-shadow: none; }
+.minimax-workspace .generate-bar .primary-button:hover:not(:disabled) { background: #b0ceff; }
+.minimax-workspace .field-help { color: var(--muted); line-height: 1.6; }
+@media (max-width: 700px) {
+  .minimax-workspace .scene-composer .scene-lower-grid { grid-template-columns: minmax(0, 1fr); }
+  .minimax-workspace .scene-composer .scene-authoring > div { padding: 14px; }
+}
+@media (prefers-reduced-motion: reduce) { .app-shell .nav-button { transition: none; } }
+
+/* References stay visible in a single, scrollable filmstrip. Detailed controls
+   are opt-in, while the inspector remains reachable from every thumbnail. */
+.minimax-workspace .scene-workbench .reference-filmstrip { min-width: 0; padding: 12px; }
+.minimax-workspace .reference-filmstrip .scene-heading { gap: 8px; margin-bottom: 10px; padding-bottom: 8px; }
+.minimax-workspace .reference-filmstrip .scene-heading > strong { margin-right: auto; }
+.minimax-workspace .scene-workbench .reference-filmstrip .scene-reference-grid {
+  display: flex; flex-wrap: nowrap; gap: 8px; align-items: flex-start;
+  overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin;
+  scrollbar-color: #526780 #121922; padding: 3px 3px 9px; min-width: 0;
+}
+.minimax-workspace .reference-filmstrip .scene-reference-card {
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 76px auto;
+  flex: 0 0 176px; width: 176px; min-width: 0; border-radius: 8px;
+}
+.minimax-workspace .reference-filmstrip .scene-reference-image { height: 76px!important; min-height: 76px; width: 100%; }
+.minimax-workspace .reference-filmstrip .scene-reference-image > img { height: 76px!important; max-height: 76px!important; object-fit: contain; }
+.minimax-workspace .reference-filmstrip .scene-reference-image b { font-size: 10px; padding: 3px 5px; }
+.minimax-workspace .reference-filmstrip .opening-frame-badge { font-size: 8px; padding: 2px 4px; }
+.minimax-workspace .reference-filmstrip .scene-reference-body { display: flex; flex-direction: column; gap: 5px; min-height: 0; padding: 8px; }
+.minimax-workspace .reference-filmstrip .scene-reference-body > strong { font-size: 11px; }
+.minimax-workspace .reference-filmstrip.compact .scene-reference-body > :not(strong):not(.scene-reference-inspect) { display: none; }
+.minimax-workspace .reference-filmstrip .scene-reference-inspect { width: 100%; min-height: 28px; padding: 4px 6px; font-size: 10px; }
+.minimax-workspace .reference-filmstrip .scene-reference-card.selected { border-color: #91baff; box-shadow: 0 0 0 1px #91baff40; }
+.minimax-workspace .reference-filmstrip .scene-add-reference,
+.minimax-workspace .reference-filmstrip .scene-reference-grid > .scene-add-reference:only-child {
+  flex: 0 0 144px; width: 144px; min-width: 144px; min-height: 143px!important;
+  flex-direction: column; gap: 6px; align-self: stretch; border-radius: 8px;
+}
+.minimax-workspace .reference-filmstrip.show-details .scene-reference-card { flex-basis: 256px; width: 256px; }
+.minimax-workspace .reference-filmstrip .scene-reference-toggles { gap: 5px 10px; }
+.minimax-workspace .reference-filmstrip .scene-retained { line-height: 1.5; }
+.minimax-workspace .reference-filmstrip .scene-analysis-review { max-height: 260px; overflow-y: auto; }

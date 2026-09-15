@@ -1,5 +1,6 @@
 import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
+import { ErrorBoundary } from './components/ErrorBoundary'
 const App = lazy(() => import('./App'))
 const MobileApp = lazy(() => import('./MobileApp'))
 const MovieEditorWindow = lazy(() => import('./MovieEditorWindow').then((module) => ({ default: module.MovieEditorWindow })))
@@ -18,11 +19,14 @@ document.documentElement.classList.toggle('movie-editor-route', movieEditor)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <Suspense fallback={<main className="oyama-movie-loading" role="status">Opening workspace…</main>}>
-      {movieEditor ? <MovieEditorWindow /> : mobile ? <MobileApp /> : <App />}
-    </Suspense>
+    <ErrorBoundary>
+      <Suspense fallback={<main className="oyama-movie-loading" role="status">Opening workspace…</main>}>
+        {movieEditor ? <MovieEditorWindow /> : mobile ? <MobileApp /> : <App />}
+      </Suspense>
+    </ErrorBoundary>
   </StrictMode>,
 )
 
 import './scene-composer.css'
 import './production-workspace.css'
+import './studio-polish.css'

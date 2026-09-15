@@ -75,6 +75,7 @@ import { attentionBackendLabel, resolveAttentionBackend } from './lib/attentionB
 import { hasSensitivePreviewWording } from './lib/previewSafety'
 import { appendLtxVisionGrounding, buildLtxImageHandoffPrompt } from './lib/ltxImageHandoff'
 import { ACE_STEP_REQUIRED_NODES, buildAceStepWorkflow, inferAceStepSelections } from './lib/aceStepWorkflow'
+import { MUSIC3_REQUIRED_NODES, buildMusic3Workflow, inferMusic3Selection, type Music3GenerationOptions } from './lib/music3Workflow'
 import { fitWholeCharacter, prepareImage } from './lib/imageCrop'
 import { inferLtx25Selections, inferSelections } from './lib/modelSelection'
 import { choices, type ObjectInfo } from './lib/comfyInfo'
@@ -90,6 +91,7 @@ import { ClipMasterBeta } from './components/ClipMasterBeta'
 import { FrameBookmarkStudio, type BookmarkVideo } from './components/FrameBookmarkStudio'
 import { Ltx25Workspace } from './components/Ltx25Workspace'
 import { AceStepWorkspace } from './components/AceStepWorkspace'
+import { Music3Workspace } from './components/Music3Workspace'
 import { VideoReferenceClipper } from './components/VideoReferenceClipper'
 import { ReferencePrepStudio } from './components/ReferencePrepStudio'
 import { CharacterStudio } from './components/CharacterStudio'
@@ -769,6 +771,8 @@ function App() {
   const [stillSubmitting, setStillSubmitting] = useState(false)
   const [ltxSubmitting, setLtxSubmitting] = useState(false)
   const [aceSubmitting, setAceSubmitting] = useState(false)
+  const [music3Submitting, setMusic3Submitting] = useState(false)
+  const [musicEngine, setMusicEngine] = useState<'acestep' | 'music3'>('acestep')
   const [diagnosticRunning, setDiagnosticRunning] = useState(false)
   const [benchmarkRunning, setBenchmarkRunning] = useState(false)
   const [benchmarkConfig, setBenchmarkConfig] = useState<H3BenchmarkConfig>(loadH3BenchmarkConfig)
@@ -872,6 +876,7 @@ function App() {
   const h3Report = useMemo(() => h3StackReport(models), [models])
   const ltxSelection = useMemo(() => inferLtx25Selections(models, choices(info, 'LatentUpscaleModelLoader', 'model_name')), [models, info])
   const aceSelection = useMemo(() => inferAceStepSelections(models), [models])
+  const music3Selection = useMemo(() => inferMusic3Selection(models), [models])
   const activeModel = mode === 'reference' ? selection.ref2va : selection.fl2va
   const activeLora = mode === 'reference' ? selection.ref2vLora : selection.fl2vLora
   const requiredModels = [activeModel, selection.textEncoder, selection.videoVae, selection.audioVae]
@@ -1883,6 +1888,31 @@ function App() {
     }
   }
 
+  const generateMusic3 = async (options: Music3GenerationOptions) => {
+    if (!settings) return
+    if (!status.connected) { setNotice({ tone: 'error', text: 'Start ComfyUI and verify the server connection in Settings.' }); return }
+    if (!music3Selection.diffusion || !music3Selection.textEncoder || !music3Selection.vae) { setNotice({ tone: 'error', text: 'Music 3 needs its diffusion model, text encoder, and audio VAE. Install them and rescan models.' }); return }
+    const missing = MUSIC3_REQUIRED_NODES.filter((node) => !info[node])
+    if (missing.length) { setNotice({ tone: 'error', text: `Update ComfyUI before using Music 3. Missing core nodes: ${missing.join(', ')}.` }); return }
+    const localId = createId()
+    const job: GenerationJob = { id: localId, provider: 'music3', mediaType: 'audio', mode: 'text', prompt: options.caption, createdAt: Date.now(), status: 'queued', progress: 2, progressLabel: 'Preparing MiniMax Music 3 workflow', width: 0, height: 0, duration: options.duration, execution: { diffusionModel: music3Selection.diffusion, sampler: 'Euler + simple' } }
+    setJobs((current) => [job, ...current]); setMusic3Submitting(true); setNotice({ tone: 'neutral', text: 'Preparing the official MiniMax Music 3 ComfyUI graph…' })
+    try {
+      const response = await window.minimax.submitPrompt(settings.comfyUrl, buildMusic3Workflow(options, music3Selection), live.clientId)
+      if (cancellationRequests.current.has(localId)) {
+        await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
+        setJobs((current) => current.map((item) => item.id === localId ? { ...item, promptId: response.prompt_id, status: 'cancelled' } : item))
+      } else {
+        setJobs((current) => current.map((item) => item.id === localId ? { ...item, promptId: response.prompt_id, status: 'running', progress: 4, progressLabel: 'Waiting for ComfyUI to start' } : item))
+        setNotice({ tone: 'success', text: 'MiniMax Music 3 song generation added to ComfyUI.' })
+      }
+    } catch (error) {
+      const cancelled = cancellationRequests.current.has(localId)
+      setJobs((current) => current.map((item) => item.id === localId ? { ...item, status: cancelled ? 'cancelled' : 'failed', error: cancelled ? undefined : error instanceof Error ? error.message : String(error) } : item))
+      setNotice(cancelled ? { tone: 'success', text: 'Music generation cancelled.' } : { tone: 'error', text: error instanceof Error ? error.message : String(error) })
+    } finally { cancellationRequests.current.delete(localId); setMusic3Submitting(false) }
+  }
+
   const generate = async (target: 'video' | 'image' = 'video', renderAnyway = false) => {
     if (!settings) return
     if (target === 'image' && mode !== 'reference') {
@@ -2446,7 +2476,8 @@ function App() {
             <NavButton active={view === 'zimage'} icon={ImageIcon} label="Image" onClick={() => setView('zimage')} />
             <NavButton active={view === 'referenceprep'} icon={Scan} label="Reference Prep" onClick={() => setView('referenceprep')} />
             <NavButton active={view === 'ltx25'} icon={Aperture} label="LTX 2.5" onClick={() => setView('ltx25')} />
-            <NavButton active={view === 'music'} icon={Music2} label="Music" onClick={() => setView('music')} />
+            <NavButton active={view === 'music' && musicEngine === 'acestep'} icon={Music2} label="ACE-Step" onClick={() => { setMusicEngine('acestep'); setView('music') }} />
+            <NavButton active={view === 'music' && musicEngine === 'music3'} icon={Music2} label="Music 3" onClick={() => { setMusicEngine('music3'); setView('music') }} />
           </div>
           <div className="nav-group"><span className="nav-section-label">Assets</span>
             <NavButton active={view === 'characters'} icon={Users} label="Characters" itemType="character" onClick={() => setView('characters')} />
@@ -2607,7 +2638,7 @@ function App() {
           onGenerate={(options, file) => void generateLtx(options, file)}
           onCancel={(job) => void cancelJob(job)}
         />}
-        {view === 'music' && <AceStepWorkspace key={`acestep-${aceResetKey}`}
+        {view === 'music' && musicEngine === 'acestep' && <AceStepWorkspace key={`acestep-${aceResetKey}`}
           settings={settings}
           models={aceSelection}
           connected={status.connected}
@@ -2619,6 +2650,21 @@ function App() {
           ollamaAvailable={ollamaModels.length > 0}
           onGenerate={(options) => void generateAceStep(options)}
           onCancel={(job) => void cancelJob(job)}
+          onSelectMusic3={() => setMusicEngine('music3')}
+        />}
+        {view === 'music' && musicEngine === 'music3' && <Music3Workspace
+          settings={settings}
+          models={music3Selection}
+          connected={status.connected}
+          pipelineReady={MUSIC3_REQUIRED_NODES.every((node) => Boolean(info[node]))}
+          missingNodes={MUSIC3_REQUIRED_NODES.filter((node) => !info[node])}
+          latestJob={jobs.find((job) => job.provider === 'music3')}
+          submitting={music3Submitting}
+          ollamaAvailable={ollamaModels.length > 0}
+          cancelling={Boolean(jobs.find((job) => job.provider === 'music3' && ['queued', 'running'].includes(job.status)) && cancellingIds.has(jobs.find((job) => job.provider === 'music3' && ['queued', 'running'].includes(job.status))!.id))}
+          onGenerate={(options) => void generateMusic3(options)}
+          onCancel={(job) => void cancelJob(job)}
+          onSelectAceStep={() => setMusicEngine('acestep')}
         />}
         <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={settings.outputDirectory} attentionBackend={resolvedH3AttentionBackend} gpuRouting={h3GpuRouting?.workflow} onUse={(file, frameResolution) => {
           setFirstFrame(file); setResolution(frameResolution); setMode('image'); setActiveJobId(null); setView('create'); setNotice({ tone: 'success', text: 'Z-Image frame loaded into the MiniMax I2V workspace.' })
