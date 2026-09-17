@@ -72,9 +72,18 @@ The phone uses the model folders, ComfyUI address, and output settings configure
 ## Local services
 
 - ComfyUI defaults to `http://127.0.0.1:8188`.
-- Ollama defaults to `http://127.0.0.1:11434`. The app lists installed local text models and deliberately excludes embedding and cloud-backed entries. Prompt text never needs to leave the workstation.
+- Ollama defaults to `http://127.0.0.1:11434`. The app distinguishes a reachable Ollama server from a server with no usable models, and deliberately excludes embedding and cloud-backed entries. Prompt text never needs to leave the workstation.
 
 Both addresses, every model directory, and the ComfyUI output directory can be changed from Settings.
+
+### Ollama setup
+
+1. Install and start Ollama.
+2. Install at least one local generation model. The default selection can be installed with `ollama pull qwen3:latest`.
+3. In **Settings → Local AI prompt assistant**, select **Ollama**, keep `http://127.0.0.1:11434` unless the server uses another address, and choose **Test & refresh**.
+4. Select the discovered model. Text models support Ask and prompt-refinement tools; inspecting reference images additionally requires a vision-capable model.
+
+**Connected · no models** means the Ollama service is running but `ollama list` contains no usable generation model. **Unreachable** means the app could not contact the configured server; start Ollama, verify the URL, and test again. Provider errors are shown in the feature that made the request.
 
 ## Models and ComfyUI setup
 
@@ -129,7 +138,7 @@ Turbo is the fast 8-step option. Original Z-Image is the 40-step detail option. 
 
 ### Optional local AI and acceleration
 
-- **Ollama:** optional prompt enhancement at `http://127.0.0.1:11434`; any installed local generation model may be selected. Embedding and cloud-backed models are intentionally excluded.
+- **Ollama:** optional conversational Ask mode, prompt enhancement, structured prompt creation, and reference-image inspection at `http://127.0.0.1:11434`. Any installed local generation model may be selected; image inspection requires a vision-capable model. Embedding and cloud-backed models are intentionally excluded.
 - **Kitchen INT8 / SageAttention:** optional attention acceleration. Select it only after ComfyUI reports it as available in **Settings → Render performance**.
 - **Sol-Attn:** optional H3-only sparse attention. It is applied exclusively to H3/Ref2VA graphs, not stacked with the generic attention patch. Benchmark it on the target PC before selecting it for production.
 - **Multi-GPU routing:** **Settings → GPU Routing** only exposes the device-aware routes that the connected ComfyUI server advertises. Core ComfyUI can route a VAE to another GPU through `SelectVAEDevice`; it cannot route that VAE to CPU. CPU VAE placement requires a compatible `VAELoaderMultiGPU` custom node.

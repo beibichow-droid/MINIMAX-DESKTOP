@@ -216,6 +216,10 @@ function finalOllamaAnswer(value: string) {
 
 type LlmProvider = AppSettings['llmProvider']
 
+function llmLabel(provider: LlmProvider) {
+  return provider === 'lmstudio' ? 'LM Studio' : 'Ollama'
+}
+
 function lmStudioPath(url: string, path: string) {
   return /\/v1\/?$/i.test(cleanUrl(url)) ? path : `/v1${path}`
 }
@@ -228,25 +232,55 @@ function assertLocalLmStudioUrl(value: string) {
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('LM Studio must use an HTTP or HTTPS URL.')
 }
 
+function assertLlmUrl(value: string, provider: LlmProvider) {
+  let parsed: URL
+  try { parsed = new URL(value) } catch { throw new Error(`Enter a valid ${llmLabel(provider)} server URL.`) }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(`${llmLabel(provider)} must use an HTTP or HTTPS URL.`)
+  if (provider === 'lmstudio') assertLocalLmStudioUrl(value)
+}
+
+async function llmFetch(url: string, path: string, provider: LlmProvider, init?: RequestInit, timeoutMs = 600_000) {
+  assertLlmUrl(url, provider)
+  const label = llmLabel(provider)
+  let response: Response
+  try {
+    response = await fetch(`${cleanUrl(url)}${path}`, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) })
+  } catch (cause) {
+    const timedOut = cause instanceof Error && (cause.name === 'TimeoutError' || cause.name === 'AbortError')
+    if (timedOut) throw new Error(`${label} did not respond in time. Confirm the selected model is loaded, then try again.`)
+    throw new Error(`Could not reach ${label} at ${cleanUrl(url)}. ${provider === 'ollama' ? 'Start Ollama' : 'Start the LM Studio local server'}, check the server URL, then try again.`)
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    let detail = body.trim()
+    try {
+      const parsed = JSON.parse(body) as { error?: string | { message?: string }; message?: string }
+      detail = typeof parsed.error === 'string' ? parsed.error : parsed.error?.message ?? parsed.message ?? detail
+    } catch { /* Keep a non-JSON provider response as the detail. */ }
+    if (response.status === 404 && /model/i.test(detail)) throw new Error(`${detail.replace(/\s+/g, ' ')} Refresh models in Settings and choose an installed model.`)
+    throw new Error(`${label} returned ${response.status}${detail ? `: ${detail.replace(/\s+/g, ' ').slice(0, 500)}` : '.'}`)
+  }
+  const contentType = response.headers.get('content-type') ?? ''
+  return contentType.includes('application/json') ? response.json() : response.text()
+}
+
 async function listLlmModels(url: string, provider: LlmProvider) {
   if (provider === 'lmstudio') {
-    assertLocalLmStudioUrl(url)
-    const result = await comfyFetch(url, lmStudioPath(url, '/models')) as { data?: Array<{ id?: string; owned_by?: string }> }
+    const result = await llmFetch(url, lmStudioPath(url, '/models'), provider, undefined, 10_000) as { data?: Array<{ id?: string; owned_by?: string }> }
     return (result.data ?? []).filter((model) => model.id).map((model) => ({ name: model.id!, size: 0, family: model.owned_by ?? 'lmstudio', parameterSize: '', local: true }))
   }
-  const data = await comfyFetch(url, '/api/tags') as { models?: Array<{ name: string; size?: number; remote_model?: string; details?: { family?: string; parameter_size?: string } }> }
+  const data = await llmFetch(url, '/api/tags', provider, undefined, 10_000) as { models?: Array<{ name: string; size?: number; remote_model?: string; details?: { family?: string; parameter_size?: string } }> }
   return (data.models ?? []).map((model) => ({ name: model.name, size: model.size ?? 0, family: model.details?.family ?? '', parameterSize: model.details?.parameter_size ?? '', local: !model.remote_model && model.size !== 342 }))
 }
 
 async function generateWithLlm(url: string, model: string, prompt: string, provider: LlmProvider) {
   if (provider === 'lmstudio') {
-    assertLocalLmStudioUrl(url)
-    const data = await comfyFetch(url, lmStudioPath(url, '/chat/completions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false, temperature: 0.65, max_tokens: 1800 }) }) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } | string }
+    const data = await llmFetch(url, lmStudioPath(url, '/chat/completions'), provider, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false, temperature: 0.65, max_tokens: 1800 }) }) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } | string }
     const answer = finalOllamaAnswer(data.choices?.[0]?.message?.content ?? '')
     if (!answer) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'LM Studio returned an empty response.')
     return answer
   }
-  const data = await comfyFetch(url, '/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, stream: false, keep_alive: 0, think: false, options: { temperature: 0.65, num_predict: 1200 } }) }) as { response?: string; error?: string }
+  const data = await llmFetch(url, '/api/generate', provider, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, stream: false, keep_alive: 0, think: false, options: { temperature: 0.65, num_predict: 1200 } }) }) as { response?: string; error?: string }
   const answer = data.response ? finalOllamaAnswer(data.response) : ''
   if (!answer) throw new Error(data.error || 'Ollama returned an empty response.')
   return answer
@@ -1086,7 +1120,7 @@ app.whenReady().then(async () => {
     form.append('overwrite', 'true')
     return comfyFetch(url, '/upload/image', { method: 'POST', body: form })
   })
-  ipcMain.handle('ollama:list', async (_event, url: string, provider: LlmProvider = 'ollama') => listLlmModels(url, provider))
+  ipcMain.handle('ollama:status', async (_event, url: string, provider: LlmProvider = 'ollama') => ({ connected: true, models: await listLlmModels(url, provider) }))
   ipcMain.handle('ollama:generate', async (_event, url: string, model: string, prompt: string, provider: LlmProvider = 'ollama') => generateWithLlm(url, model, prompt, provider))
   ipcMain.handle('ollama:vision', async (_event, url: string, model: string, prompt: string, imagePaths: string[], provider: LlmProvider = 'ollama') => {
     const allowedImages = new Set(['.png', '.jpg', '.jpeg', '.webp'])
@@ -1101,17 +1135,15 @@ app.whenReady().then(async () => {
       }
     }
     if (!images.length) throw new Error('No readable local reference images were available to the copilot.')
-    if (provider === 'lmstudio') assertLocalLmStudioUrl(url)
     const data = provider === 'lmstudio'
-      ? await comfyFetch(url, lmStudioPath(url, '/chat/completions'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } }))] }], stream: false, temperature: 0.45, max_tokens: 1800 }) }) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } | string }
-      : await comfyFetch(url, '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt, images: images.map((image) => image.base64) }], stream: false, keep_alive: 0, think: false, options: { temperature: 0.45, num_predict: 1800 } }) }) as { message?: { content?: string }; error?: string }
+      ? await llmFetch(url, lmStudioPath(url, '/chat/completions'), provider, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } }))] }], stream: false, temperature: 0.45, max_tokens: 1800 }) }) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } | string }
+      : await llmFetch(url, '/api/chat', provider, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt, images: images.map((image) => image.base64) }], stream: false, keep_alive: 0, think: false, options: { temperature: 0.45, num_predict: 1800 } }) }) as { message?: { content?: string }; error?: string }
     const answer = provider === 'lmstudio' ? finalOllamaAnswer(('choices' in data ? data.choices?.[0]?.message?.content : '') ?? '') : finalOllamaAnswer(('message' in data ? data.message?.content : '') ?? '')
     const error = 'error' in data ? data.error : undefined
     if (!answer) throw new Error(typeof error === 'string' ? error : error?.message || `${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'} could not inspect the supplied reference images. Choose a local vision-capable model in Settings.`)
     return answer
   })
   ipcMain.handle('ollama:structured', async (_event, url: string, model: string, prompt: string, schema: Record<string, unknown>, provider: LlmProvider = 'ollama', imagePaths: string[] = []) => {
-    if (provider === 'lmstudio') assertLocalLmStudioUrl(url)
     const allowedImages = new Set(['.png', '.jpg', '.jpeg', '.webp'])
     const requestedPaths = imagePaths.slice(0, 6)
     const images: Array<{ base64: string; mime: string }> = []
@@ -1127,7 +1159,7 @@ app.whenReady().then(async () => {
       const mime = extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg'
       images.push({ base64: bytes.toString('base64'), mime })
     }
-    const data = await comfyFetch(url, provider === 'lmstudio' ? lmStudioPath(url, '/chat/completions') : '/api/chat', {
+    const data = await llmFetch(url, provider === 'lmstudio' ? lmStudioPath(url, '/chat/completions') : '/api/chat', provider, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(provider === 'lmstudio' ? { model, messages: [{ role: 'user', content: images.length ? [{ type: 'text', text: prompt }, ...images.map((image) => ({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } }))] : prompt }], stream: false, response_format: { type: 'json_schema', json_schema: { name: 'oyama_ai_video_studio_response', strict: true, schema } }, temperature: 0.2, max_tokens: 6000 } : {

@@ -52,6 +52,7 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
   const llm = resolveLlmConnection(settings)
   const [refining, setRefining] = useState(false)
   const [suggestion, setSuggestion] = useState('')
+  const [assistantError, setAssistantError] = useState('')
   const set = <K extends keyof MusicState>(key: K, value: MusicState[K]) => setState((current) => ({ ...current, [key]: value }))
   const selectedModel = state.model === 'sft' ? models.sft : models.base
   const sharedReady = Boolean(models.vae && models.textEncoderSmall && models.textEncoderLarge)
@@ -65,11 +66,12 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
 
   const refine = async () => {
     if (!state.tags.trim() || !llm.model) return
-    setRefining(true); setSuggestion('')
+    setRefining(true); setSuggestion(''); setAssistantError('')
     try {
       const result = await window.minimax.generateWithOllama(llm.url, llm.model, `Rewrite this as a concise production brief for ACE-Step 1.5 music generation. Preserve the intent and specify genre, mood, tempo feel, instruments, vocal character, arrangement, and production texture. Do not write lyrics. Return only the finished music direction.\n\nDRAFT:\n${state.tags.trim()}`, llm.provider)
       setSuggestion(result)
-    } finally { setRefining(false) }
+    } catch (cause) { setAssistantError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setRefining(false) }
   }
 
   const reset = () => { setState({ ...defaults, seed: Math.floor(Math.random() * 1_000_000_000), model: models.sft ? 'sft' : 'base' }); setSuggestion('') }
@@ -93,6 +95,7 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
         <div className="field-group prompt-field ace-direction-field"><div className="field-label"><label htmlFor="ace-tags">Music direction</label><span>{state.tags.length.toLocaleString()} characters</span></div><SmartPromptEditor id="ace-tags" value={state.tags} onChange={(value) => set('tags', value)} placeholder="Genre, mood, instruments, vocal style, arrangement, and production texture… Type // for production commands." />
           <div className="prompt-tools"><div className="prompt-tool-buttons"><button type="button" onClick={() => void refine()} disabled={!ollamaAvailable || refining || !state.tags.trim()}>{refining ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}Refine music direction</button></div><span className={`local-model-chip ${ollamaAvailable ? 'online' : ''}`}><span />{ollamaAvailable ? llm.model : `${llm.label} offline`}</span></div>
           {suggestion && <div className="assistant-result"><div className="assistant-result-heading"><span><Sparkles size={14} />Local suggestion</span><small>Review before applying</small></div><textarea aria-label="ACE-Step music direction suggestion" value={suggestion} readOnly /><div className="assistant-actions"><button className="secondary-button" onClick={() => setSuggestion('')}>Dismiss</button><button className="primary-button" onClick={() => { set('tags', suggestion); setSuggestion('') }}><Check size={14} />Use suggestion</button></div></div>}
+          {assistantError && <p className="field-help error"><AlertCircle size={13} />{assistantError}</p>}
         </div>
 
         <div className="ace-lyrics-heading"><span><strong>Lyrics</strong><small>Use section labels such as [Verse], [Chorus], and [Bridge].</small></span><label className="compact-toggle"><input type="checkbox" checked={state.instrumental} onChange={(event) => set('instrumental', event.target.checked)} /><span>Instrumental</span></label></div>

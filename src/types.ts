@@ -43,7 +43,7 @@ export type ResolvedMovieShot = { preferredMode: GenerationMode; effectiveMode: 
 export type GenerationDefaults = {
   resolution: string
   duration: number
-  turbo: 'off' | '4' | '8'
+  turbo: 'off' | '4' | '8' | 'fast'
   steps: number
   sampler: string
   scheduler: string
@@ -224,7 +224,7 @@ export type MovieProject = {
   genre: string
   visualStyle: string
   autoContinueCleanScenes?: boolean
-  productionSettings?: { resolution: string; turbo: 'off' | '4' | '8'; steps: number; seed?: number; noDialogue?: boolean; naturalMovement?: boolean }
+  productionSettings?: { resolution: string; turbo: 'off' | '4' | '8' | 'fast'; steps: number; seed?: number; noDialogue?: boolean; naturalMovement?: boolean }
   story: string
   visualRules: string
   characters: MovieCharacter[]
@@ -264,6 +264,8 @@ export type MediaFile = {
 export type ModelSelection = {
   fl2va: string
   ref2va: string
+  /** FastVideo FastH3 8-Step V2; text-to-audio-video only. */
+  fastH3: string
   textEncoder: string
   videoVae: string
   audioVae: string
@@ -288,7 +290,7 @@ export type Ltx25GenerationOptions = {
   renderWidth?: number
   renderHeight?: number
   duration: number
-  turbo?: 'off' | '4' | '8'
+  turbo?: 'off' | '4' | '8' | 'fast'
   steps?: number
   noDialogue?: boolean
   naturalMovement?: boolean
@@ -339,7 +341,7 @@ export type GenerationOptions = {
   duration: number
   seed: number
   steps: number
-  turbo: 'off' | '4' | '8'
+  turbo: 'off' | '4' | '8' | 'fast'
   experimentalSampling?: boolean
   attentionBackend?: string
   solAttention?: { nodeType: string; tau: number }
@@ -405,6 +407,14 @@ export type GpuTelemetry = {
   devices?: Array<{ index: number; name: string; usagePercent: number; vramPercent: number; vramUsedMb: number; vramTotalMb: number; vramFreeMb: number }>
 }
 
+export type LocalLlmStatus = {
+  connected: boolean
+  models: OllamaModel[]
+  error?: string
+  provider?: AppSettings['llmProvider']
+  url?: string
+}
+
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 export type JobExecutionInfo = {
@@ -457,7 +467,7 @@ export type GenerationJob = {
   renderHeight?: number
   duration: number
   renderDurationMs?: number
-  turbo?: 'off' | '4' | '8'
+  turbo?: 'off' | '4' | '8' | 'fast'
   steps?: number
   noDialogue?: boolean
   naturalMovement?: boolean
@@ -513,7 +523,7 @@ export type DesktopApi = {
   showOutput(path: string): Promise<void>
   findLatestOutput(outputDirectory: string, since: number, kind?: 'video' | 'audio'): Promise<string | null>
   resolveOutput(outputDirectory: string, file: { filename: string; subfolder?: string; type?: string }): Promise<string | null>
-  listOllamaModels(url: string, provider?: AppSettings['llmProvider']): Promise<OllamaModel[]>
+  getLocalLlmStatus(url: string, provider?: AppSettings['llmProvider']): Promise<LocalLlmStatus>
   generateWithOllama(url: string, model: string, prompt: string, provider?: AppSettings['llmProvider']): Promise<string>
   generateWithOllamaVision(url: string, model: string, prompt: string, imagePaths: string[], provider?: AppSettings['llmProvider']): Promise<string>
   generateStructuredWithOllama(url: string, model: string, prompt: string, schema: Record<string, unknown>, provider?: AppSettings['llmProvider'], imagePaths?: string[]): Promise<unknown>

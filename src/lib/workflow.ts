@@ -27,6 +27,7 @@ export const OFFICIAL_H3_SCHEDULER = 'simple'
 
 export function h3SamplingSteps(turbo: GenerationOptions['turbo'], steps: number) {
   if (turbo === '4') return 4
+  if (turbo === 'fast') return 8
   if (turbo === 'off') return steps
   const requested = Math.round(Number(steps))
   return requested >= 4 && requested <= 12 ? requested : 8
@@ -66,6 +67,7 @@ export function buildMiniMaxWorkflow(
     audios: UploadedFile[]
   },
 ): ComfyPrompt {
+  if (options.turbo === 'fast' && options.mode !== 'text') throw new Error('FastVideo FastH3 supports text-to-audio-video only. Use the base MiniMax H3 model for image, first/last-frame, or reference generation.')
   const scene = options.sceneState
   if (!Number.isFinite(options.duration) || options.duration <= 0 || options.duration > 15) throw new Error('Clip duration must be greater than 0 and no longer than 15 seconds.')
   const compiled = scene ? compileScene(scene) : undefined
@@ -78,19 +80,19 @@ export function buildMiniMaxWorkflow(
   }
   const prompt: ComfyPrompt = {}
   const routed = options.gpuRouting
-  let modelLink = addRoutedLoader(prompt, '1', 'UNETLoader', { unet_name: options.mode === 'reference' ? models.ref2va : models.fl2va, weight_dtype: 'default' }, routed?.diffusion, '801')
+  let modelLink = addRoutedLoader(prompt, '1', 'UNETLoader', { unet_name: options.turbo === 'fast' ? models.fastH3 : options.mode === 'reference' ? models.ref2va : models.fl2va, weight_dtype: 'default' }, routed?.diffusion, '801')
   const clipLink = addRoutedLoader(prompt, '2', 'CLIPLoader', { clip_name: models.textEncoder, type: 'minimax', device: 'default' }, routed?.textEncoder, '802')
   const videoVaeLink = addRoutedLoader(prompt, '3', 'VAELoader', { vae_name: models.videoVae }, routed?.videoVae, '803')
   const audioVaeLink = addRoutedLoader(prompt, '4', 'VAELoader', { vae_name: models.audioVae }, routed?.audioVae, '804')
   const loraName = options.mode === 'reference' ? models.ref2vLora : models.fl2vLora
-  if (options.turbo !== 'off' && loraName) {
+  if (options.turbo !== 'off' && options.turbo !== 'fast' && loraName) {
     prompt['5'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: loraName, strength_model: options.loraStrength ?? 1 } }
     modelLink = ['5', 0]
   }
   // User-selected adapters are intentionally loaded after the official Turbo
   // adapter. This keeps Turbo automatic and allows up to three additional
   // ComfyUI LoRAs without treating the Turbo file as a manual slot.
-  options.userLoras?.filter((lora) => lora.name.trim()).slice(0, 3).forEach((lora, index) => {
+  (options.turbo === 'fast' ? [] : options.userLoras ?? []).filter((lora) => lora.name.trim()).slice(0, 3).forEach((lora, index) => {
     const id = `${90 + index}`
     prompt[id] = { class_type: 'LoraLoaderModelOnly', inputs: { model: modelLink, lora_name: lora.name, strength_model: lora.strength } }
     modelLink = [id, 0]
@@ -201,7 +203,7 @@ export function buildMiniMaxWorkflow(
   // Turbo 8 profiles are intentional, tested recipes—not an accidental custom
   // override. Full-quality and Turbo 4 retain the upstream safe pair unless a
   // user explicitly opts into experimental sampling.
-  const useRequestedSampling = options.experimentalSampling || options.turbo === '8'
+  const useRequestedSampling = options.experimentalSampling || options.turbo === '8' || options.turbo === 'fast'
   const sampler = useRequestedSampling ? options.sampler : OFFICIAL_H3_SAMPLER
   const scheduler = useRequestedSampling ? options.scheduler : OFFICIAL_H3_SCHEDULER
   prompt['13'] = { class_type: 'KSamplerSelect', inputs: { sampler_name: sampler } }

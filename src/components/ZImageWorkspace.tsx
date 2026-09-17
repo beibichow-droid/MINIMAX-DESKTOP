@@ -1,7 +1,7 @@
 import { PreviewPanel, ProductionLoading } from './Workspace'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, Check, CircleStop, Dices, Film, Gauge, ImagePlus, LoaderCircle, Sparkles, WandSparkles } from 'lucide-react'
-import { buildZImage, type ZImageVariant } from '../lib/zimage'
+import { buildZImage, ZIMAGE_DEFAULT_NEGATIVE_PROMPT, type ZImageVariant } from '../lib/zimage'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { RenderSize } from './RenderSize'
 import { SmartPromptEditor } from './SmartPromptEditor'
@@ -11,6 +11,7 @@ import { useLivePreview, type LiveProgress } from '../lib/useLivePreview'
 type StoredWorkspace = {
   prompt: string
   negativePrompt: string
+  negativePromptInitialized: boolean
   resolution: string
   variant: ZImageVariant
   model: string
@@ -23,7 +24,8 @@ type StoredWorkspace = {
 
 const defaults: StoredWorkspace = {
   prompt: '',
-  negativePrompt: '',
+  negativePrompt: ZIMAGE_DEFAULT_NEGATIVE_PROMPT,
+  negativePromptInitialized: true,
   resolution: '1344x768',
   variant: 'turbo',
   model: 'z_image_turbo_bf16.safetensors',
@@ -37,7 +39,10 @@ const defaults: StoredWorkspace = {
 function readWorkspace(): StoredWorkspace {
   try {
     const saved = JSON.parse(localStorage.getItem('minimax.zimage-workspace') ?? '{}') as Partial<StoredWorkspace>
-    return { ...defaults, ...saved, variant: saved.variant === 'base' ? 'base' : 'turbo' }
+    const negativePrompt = saved.negativePromptInitialized || saved.negativePrompt?.trim()
+      ? saved.negativePrompt ?? ZIMAGE_DEFAULT_NEGATIVE_PROMPT
+      : ZIMAGE_DEFAULT_NEGATIVE_PROMPT
+    return { ...defaults, ...saved, negativePrompt, negativePromptInitialized: true, variant: saved.variant === 'base' ? 'base' : 'turbo' }
   }
   catch { return defaults }
 }
@@ -110,7 +115,7 @@ export function ZImageWorkspace({
   }, [])
 
   useEffect(() => {
-    localStorage.setItem('minimax.zimage-workspace', JSON.stringify({ prompt, negativePrompt, resolution, variant, model, encoder, vae, seed, steps, guidance }))
+    localStorage.setItem('minimax.zimage-workspace', JSON.stringify({ prompt, negativePrompt, negativePromptInitialized: true, resolution, variant, model, encoder, vae, seed, steps, guidance }))
   }, [encoder, guidance, model, negativePrompt, prompt, resolution, seed, steps, vae, variant])
 
   useEffect(() => {
@@ -230,7 +235,7 @@ export function ZImageWorkspace({
           <div className="zimage-prompt-actions"><button className="secondary-button" onClick={() => void enhance()} disabled={busy || assisting || !ollamaAvailable || !prompt.trim()} title={ollamaAvailable ? `Enhance with ${ollamaModel}` : `Configure ${llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'} in Settings`}>{assisting ? <LoaderCircle size={15} className="spin" /> : <WandSparkles size={15} />}Enhance with {llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'}</button><small>{ollamaAvailable ? `${ollamaModel} · local` : `${llmProvider === 'lmstudio' ? 'LM Studio' : 'Ollama'} unavailable`}</small></div>
         </div>
 
-        {variant === 'base' && <div className="field-group zimage-negative-prompt"><div className="field-label"><label htmlFor="zimage-negative-prompt">Negative prompt <small>Optional</small></label><span>{negativePrompt.length.toLocaleString()} characters</span></div><textarea id="zimage-negative-prompt" value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="Describe artifacts or unwanted elements to suppress…" disabled={busy} /></div>}
+        {variant === 'base' && <div className="field-group zimage-negative-prompt"><div className="field-label"><label htmlFor="zimage-negative-prompt">Negative prompt <small>Quality preset</small></label><span>{negativePrompt.length.toLocaleString()} characters</span></div><textarea id="zimage-negative-prompt" value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="Describe artifacts or unwanted elements to suppress…" disabled={busy} /><p className="field-help">Prefilled with a balanced artifact, anatomy, geometry, and unwanted-text filter. Edit or clear it when those elements are intentional.</p></div>}
 
         <RenderSize value={resolution} onChange={setResolution} provider="zimage" />
         <div className="zimage-seed-row"><label>Seed<input type="number" min="0" max="999999999999" value={seed} disabled={busy} onChange={(event) => setSeed(Number(event.target.value))} /></label><button className="secondary-button" disabled={busy} onClick={() => setSeed(Math.floor(Math.random() * 1_000_000_000))}><Dices size={15} />Randomize</button></div>

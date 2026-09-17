@@ -44,6 +44,7 @@ const examples: Array<[ModelFile['kind'], string, number]> = [
   ['diffusion_models', 'minimax_h3_ref2va_pruned_int8_convrot.safetensors', 20_970_379_616],
   ['diffusion_models', 'minimax_h3_fl2va_pruned_nvfp4.safetensors', 12_500_000_000],
   ['diffusion_models', 'minimax_h3_ref2va_pruned_nvfp4.safetensors', 12_500_000_000],
+  ['diffusion_models', 'fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors', 22_100_000_000],
   ['text_encoders', 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors', 15_687_142_551],
   ['text_encoders', 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors', 27_100_000_000],
   ['vae', 'minimax_h3_video_vae_fp16.safetensors', 5_207_808_496],
@@ -133,12 +134,12 @@ export function installBrowserMock() {
     showOutput: async () => undefined,
     findLatestOutput: async () => null,
     resolveOutput: async () => null,
-    listOllamaModels: async (_url, provider = 'ollama') => provider === 'lmstudio'
+    getLocalLlmStatus: async (_url, provider = 'ollama') => ({ connected: true, models: provider === 'lmstudio'
       ? [{ name: 'local-vision-model', size: 0, family: 'lmstudio', parameterSize: '', local: true }]
       : [
         { name: 'qwen3:latest', size: 5_225_388_164, family: 'qwen3', parameterSize: '8.2B', local: true },
         { name: 'llama3.1:8b', size: 4_920_753_328, family: 'llama', parameterSize: '8.0B', local: true },
-      ],
+      ] }),
     generateWithOllama: async () => 'A cinematic wide shot with deliberate subject motion, controlled camera movement, natural lighting, and synchronized environmental audio.',
     generateWithOllamaVision: async () => 'A MiniMax-ready prompt grounded in the visible identity, composition, lighting, and continuity details of the supplied reference images.',
     generateStructuredWithOllama: async (_url, _model, prompt, schema) => {

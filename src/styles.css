@@ -765,6 +765,11 @@ textarea::placeholder, input::placeholder { color: var(--line-strong); }
 .reference-files { display: flex; flex-wrap: wrap; gap: 7px; min-width: 0; }
 .file-pill { display: flex; align-items: center; gap: 7px; max-width: 190px; padding: 5px 5px 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); }
 .file-pill > img { width: 26px; height: 26px; border-radius: 5px; object-fit: cover; }
+.file-pill { position: relative; }
+.reference-hover-preview { position: absolute; z-index: 40; left: 0; bottom: calc(100% + 9px); display: grid; width: min(340px, 70vw); gap: 6px; padding: 8px; border: 1px solid rgba(195,255,74,.52); border-radius: 9px; background: rgba(9,14,10,.98); box-shadow: 0 14px 36px rgba(0,0,0,.48); opacity: 0; pointer-events: none; transform: translateY(5px) scale(.98); transition: opacity .14s ease, transform .14s ease; visibility: hidden; }
+.reference-hover-preview img { display: block; width: 100%; max-height: min(360px, 48vh); height: auto; border-radius: 5px; object-fit: contain; background: #050806; }
+.reference-hover-preview b { overflow: hidden; color: var(--text); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.file-pill:has(> img):hover .reference-hover-preview, .file-pill:has(> img):focus-within .reference-hover-preview { opacity: 1; transform: translateY(0) scale(1); visibility: visible; }
 .file-pill > svg { flex: 0 0 auto; color: var(--muted); }
 .file-pill > span { display: grid; min-width: 0; }
 .file-pill strong { font-size: 9px; }
@@ -1708,6 +1713,16 @@ textarea::placeholder, input::placeholder { color: var(--line-strong); }
 .llm-provider-picker strong { color: var(--text); font-size: 10px; }
 .llm-provider-picker small { color: var(--muted-2); font-size: 9px; line-height: 1.35; }
 .ollama-grid { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto; align-items: end; gap: 12px; padding: 16px 17px 8px; }
+.llm-setup-message { display: flex; align-items: flex-start; gap: 9px; margin: 4px 17px 12px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); }
+.llm-setup-message > svg { flex: 0 0 auto; margin-top: 1px; color: var(--accent); }
+.llm-setup-message > span { display: grid; gap: 3px; min-width: 0; }
+.llm-setup-message strong { color: var(--text); font-size: 10px; }
+.llm-setup-message small { color: var(--muted); font-size: 9px; line-height: 1.55; }
+.llm-setup-message code { padding: 1px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); user-select: all; }
+.llm-setup-message.warning { border-color: rgba(255, 193, 92, .28); background: rgba(255, 193, 92, .06); }
+.llm-setup-message.warning > svg { color: #ffc15c; }
+.llm-setup-message.error { border-color: rgba(255, 104, 104, .3); background: rgba(255, 104, 104, .06); }
+.llm-setup-message.error > svg { color: #ff6868; }
 .settings-note { margin: 0; padding: 0 17px 16px; color: var(--muted-2); font-size: 9px; line-height: 1.5; }
 .generation-defaults-section { overflow: hidden; }
 .preset-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 14px 17px 4px; }
@@ -4871,7 +4886,7 @@ select option { background: var(--surface-2); color: var(--text); }
 /* Focused writing desk and listening panel. Scoped to the Music 3 route. */
 .music3-page { --text: #f1f5f3; --muted: #a7b3af; --line: #303a36; --surface: #181e1b; --surface-2: #202824; --accent: #7ee2ae; background: radial-gradient(ellipse at top right, #233c32 0, transparent 55%), #101513; }
 .music3-page .page-heading h1 { letter-spacing: -.04em; }
-.music3-page .music3-editor { min-width: 0; padding: 0; border: 0; background: transparent; box-shadow: none; }
+.music3-page .music3-editor { display: grid; min-width: 0; gap: 24px; padding: 0; border: 0; background: transparent; box-shadow: none; }
 .music3-page .music3-lyrics-first { margin-top: 0; padding: 24px; border: 1px solid #334039; border-radius: 20px; background: #181e1b; }
 .music3-page .music3-main-lyrics { display: block; min-height: 440px; padding: 20px; margin: 18px 0; border: 1px solid #35413b; border-radius: 12px; background: #101613; color: #edf5f0; font-size: 15px; line-height: 1.8; }
 .music3-page .music3-now-playing { grid-template-columns: 1fr; justify-items: center; gap: 24px; padding: 12px 0 22px; min-height: 0; background: transparent; text-align: center; }
@@ -4879,7 +4894,7 @@ select option { background: var(--surface-2); color: var(--text); }
 .music3-page .music3-track-copy { width: 100%; }
 .music3-page .music3-track-copy strong { font-size: clamp(24px, 2.5vw, 36px); white-space: normal; overflow-wrap: anywhere; line-height: 1.15; }
 .music3-page .music3-track-copy > small { color: #9ce8bc; letter-spacing: .15em; font-size: 10px; }
-.music3-page .music3-preset-library { padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: #181e1b; }
+.music3-page .music3-preset-library { margin: 0; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: #181e1b; }
 .music3-page .music3-preset-grid { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 390px; overflow-y: auto; }
 .music3-page .music3-preset-grid button { min-width: 0; min-height: 100px; }
 .music3-page .music3-structure-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
@@ -4893,5 +4908,34 @@ select option { background: var(--surface-2); color: var(--text); }
 .music3-page .music3-caption-preview summary { cursor: pointer; font-size: 13px; color: var(--text); }
 .music3-page .music3-caption-preview pre { margin-top: 12px; overflow-wrap: anywhere; }
 .music3-page :is(button, input, textarea, summary):focus-visible { outline: 2px solid #91e6b8; outline-offset: 3px; }
+.music3-page .music3-lyrics-first { margin-bottom: 0; }
+.music3-page .music3-section-heading,
+.music3-page .music3-preset-heading { align-items: flex-start; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid #34413b; }
+.music3-page .music3-section-heading.compact { margin-bottom: 20px; }
+.music3-page .music3-section-heading.compact strong { font-size: 16px; }
+.music3-page .music3-section-heading.compact small { margin-top: 4px; line-height: 1.5; }
+.music3-page .music3-lyric-helpers { gap: 14px; margin: 0; padding-top: 18px; border-top: 1px solid #34413b; }
+.music3-page .music3-lyric-helpers > div { gap: 8px; padding-block: 2px; }
+.music3-page .music3-editor-section {
+  position: relative; min-width: 0; padding: 24px; overflow: hidden;
+  border: 1px solid #303a35; border-radius: 16px; background: #181e1b;
+}
+.music3-page .music3-editor-section::before {
+  position: absolute; inset: 0 0 auto; height: 3px; content: '';
+  background: linear-gradient(90deg, #83dfae, #4c8e70 38%, transparent 82%);
+}
+.music3-page .music3-song-setup .music3-structure-controls { margin-bottom: 22px; }
+.music3-page .music3-song-setup .music3-auto-toggle { margin: 0; padding-top: 18px; border-top: 1px solid #34413b; }
+.music3-page .music3-editor-section > .field-group { display: block; margin: 0; }
+.music3-page .music3-editor-section > .field-group textarea { min-height: 112px; }
+.music3-page .music3-editor-section > .music3-keywords {
+  gap: 8px; margin-top: 16px; padding: 14px;
+  border: 1px solid #303a35; border-radius: 12px; background: #111713;
+}
+.music3-page .music3-editor-section > .music3-keywords::before {
+  width: 100%; content: 'PRESET IDEAS'; color: #83cda6;
+  font-size: 9px; font-weight: 750; letter-spacing: .11em;
+}
+.music3-page .music3-editor-section > .music3-auto-suggestions { margin-top: 14px; }
 @media (max-width: 1050px) { .music3-page .music3-layout { grid-template-columns: minmax(0, 1fr); } .music3-page .music3-player { position: static; } }
-@media (max-width: 600px) { .music3-page .music3-lyrics-first, .music3-page .music3-player { padding: 16px; } .music3-page .music3-structure-controls { grid-template-columns: minmax(0, 1fr); } .music3-page .music3-main-lyrics { min-height: 360px; } }
+@media (max-width: 600px) { .music3-page .music3-editor { gap: 16px; } .music3-page .music3-lyrics-first, .music3-page .music3-preset-library, .music3-page .music3-editor-section, .music3-page .music3-player { padding: 16px; } .music3-page .music3-structure-controls { grid-template-columns: minmax(0, 1fr); } .music3-page .music3-main-lyrics { min-height: 360px; } }

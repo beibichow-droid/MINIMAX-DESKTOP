@@ -3,9 +3,11 @@ import { addRoutedLoader, type ComfyPrompt } from './workflow'
 
 export type ZImageVariant = 'turbo' | 'base'
 
+export const ZIMAGE_DEFAULT_NEGATIVE_PROMPT = 'low quality, low resolution, blurry, out of focus, jpeg artifacts, compression artifacts, color banding, posterization, oversharpened, overprocessed, distorted anatomy, malformed hands, extra fingers, missing fingers, fused fingers, extra limbs, duplicate subjects, warped geometry, inconsistent perspective, text, watermark, logo, signature'
+
 // Comfy-Org workflow_templates/templates/image_z_image_turbo.json
 // Comfy-Org workflow_templates/templates/image_z_image.json
-export function buildZImage(prompt: string, width: number, height: number, seed: number, model: string, encoder: string, vae: string, steps = 8, cfg = 1, variant: ZImageVariant = 'turbo', negativePrompt = '', attentionBackend?: string, gpuRouting?: WorkflowGpuRouting): ComfyPrompt {
+export function buildZImage(prompt: string, width: number, height: number, seed: number, model: string, encoder: string, vae: string, steps = 8, cfg = 1, variant: ZImageVariant = 'turbo', negativePrompt = ZIMAGE_DEFAULT_NEGATIVE_PROMPT, attentionBackend?: string, gpuRouting?: WorkflowGpuRouting): ComfyPrompt {
   const graph: ComfyPrompt = {}
   const modelBaseLink = addRoutedLoader(graph, '1', 'UNETLoader', { unet_name: model, weight_dtype: 'default' }, gpuRouting?.diffusion, '801')
   const clipLink = addRoutedLoader(graph, '2', 'CLIPLoader', { clip_name: encoder, type: 'lumina2', device: 'default' }, gpuRouting?.textEncoder, '802')

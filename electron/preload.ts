@@ -1,5 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+async function invokeLocalLlm(channel: string, ...args: unknown[]) {
+  try {
+    return await ipcRenderer.invoke(channel, ...args)
+  } catch (cause) {
+    const raw = cause instanceof Error ? cause.message : String(cause)
+    const message = raw.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, '').trim()
+    throw new Error(message || 'The local AI provider request failed.')
+  }
+}
+
 contextBridge.exposeInMainWorld('minimax', {
   getObjectInfo: (url: string) => ipcRenderer.invoke('comfy:info', url),
   uploadImageData: (url: string, data: string) => ipcRenderer.invoke('comfy:upload-data', url, data),
@@ -41,10 +51,10 @@ contextBridge.exposeInMainWorld('minimax', {
   showOutput: (outputPath: string) => ipcRenderer.invoke('shell:show-output', outputPath),
   findLatestOutput: (outputPath: string, since: number, kind: 'video' | 'audio' = 'video') => ipcRenderer.invoke('outputs:latest', outputPath, since, kind),
   resolveOutput: (outputPath: string, file: { filename: string; subfolder?: string; type?: string }) => ipcRenderer.invoke('outputs:resolve', outputPath, file),
-  listOllamaModels: (url: string, provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:list', url, provider),
-  generateWithOllama: (url: string, model: string, prompt: string, provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:generate', url, model, prompt, provider),
-  generateWithOllamaVision: (url: string, model: string, prompt: string, imagePaths: string[], provider: 'ollama' | 'lmstudio' = 'ollama') => ipcRenderer.invoke('ollama:vision', url, model, prompt, imagePaths, provider),
-  generateStructuredWithOllama: (url: string, model: string, prompt: string, schema: Record<string, unknown>, provider: 'ollama' | 'lmstudio' = 'ollama', imagePaths: string[] = []) => ipcRenderer.invoke('ollama:structured', url, model, prompt, schema, provider, imagePaths),
+  getLocalLlmStatus: (url: string, provider: 'ollama' | 'lmstudio' = 'ollama') => invokeLocalLlm('ollama:status', url, provider),
+  generateWithOllama: (url: string, model: string, prompt: string, provider: 'ollama' | 'lmstudio' = 'ollama') => invokeLocalLlm('ollama:generate', url, model, prompt, provider),
+  generateWithOllamaVision: (url: string, model: string, prompt: string, imagePaths: string[], provider: 'ollama' | 'lmstudio' = 'ollama') => invokeLocalLlm('ollama:vision', url, model, prompt, imagePaths, provider),
+  generateStructuredWithOllama: (url: string, model: string, prompt: string, schema: Record<string, unknown>, provider: 'ollama' | 'lmstudio' = 'ollama', imagePaths: string[] = []) => invokeLocalLlm('ollama:structured', url, model, prompt, schema, provider, imagePaths),
   getLanStatus: () => ipcRenderer.invoke('lan:status'),
   syncMobileCharacters: (characters: unknown[]) => ipcRenderer.invoke('lan:sync-characters', characters),
   rotateLanToken: () => ipcRenderer.invoke('lan:rotate-token'),
