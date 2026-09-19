@@ -107,8 +107,18 @@ export function resolveGpuRouting(settings: GpuRoutingSettings, gpus: RoutingGpu
       : assigned.reduce((sum, item) => sum + (sizes[item] ?? 0), 0)
     if (estimate > gpu.freeBytes && gpu.freeBytes > 0) vramWarnings.push(`GPU ${gpu.index} (${gpu.name}) has ${formatGiB(gpu.freeBytes)} free; routed components are estimated to need ${formatGiB(estimate)}${requested.strategy === 'sequential' ? ' at peak with sequential offload' : ''}.`)
   }
+  if (settings.preloadDiffusionDuringTextEncoding) {
+    const diffusionDevice = placements.diffusion?.resolved
+    const encoderDevice = placements.textEncoder?.resolved
+    const helperReady = Boolean(info.OyamaH3PreloadStart && info.OyamaH3PreloadAwait)
+    if (requested.strategy !== 'resident') warnings.push('DiT preload requires Keep Resident; normal sequential loading remains active.')
+    else if (!helperReady) warnings.push('DiT preload helper nodes are not detected; normal resident loading remains active until ComfyUI is restarted with the Oyama helper installed.')
+    else if (!diffusionDevice?.startsWith('gpu:') || !encoderDevice?.startsWith('gpu:') || diffusionDevice === encoderDevice) warnings.push('DiT preload requires the diffusion model and text encoder on two different CUDA GPUs; normal resident loading remains active.')
+    else if (vramWarnings.length) warnings.push('DiT preload was withheld because the current resident placement exceeds a free-VRAM estimate; normal resident loading remains active.')
+    else workflow.preloadDiffusion = { startNodeType: 'OyamaH3PreloadStart', awaitNodeType: 'OyamaH3PreloadAwait' }
+  }
   const deviceName = (placement: RoutingPlacement) => placement.resolved === 'auto' ? 'Auto' : placement.resolved === 'cpu' ? 'CPU' : gpus[Number(placement.resolved.slice(4))]?.name ?? placement.resolved
-  const summary = `H3: ${deviceName(placements.diffusion)} | VAE: ${deviceName(placements.videoVae)} | TE: ${deviceName(placements.textEncoder)}${requested.strategy === 'sequential' ? ' sequential' : ''} | Sol: Triton/Sol node | Sage fallback: launch setting | ${requested.strategy === 'sequential' ? 'Sequential Offload' : requested.strategy === 'cpu-fallback' ? 'CPU Fallback' : 'Keep Resident'}`
+  const summary = `H3: ${deviceName(placements.diffusion)} | VAE: ${deviceName(placements.videoVae)} | TE: ${deviceName(placements.textEncoder)}${requested.strategy === 'sequential' ? ' sequential' : ''}${workflow.preloadDiffusion ? ' · async preload' : ''} | Sol: Triton/Sol node | Sage fallback: launch setting | ${requested.strategy === 'sequential' ? 'Sequential Offload' : requested.strategy === 'cpu-fallback' ? 'CPU Fallback' : 'Keep Resident'}`
   const runtimeDevice = (placement: RoutingPlacement) => placement.resolved === 'auto' ? 'auto' : placement.resolved === 'cpu' ? 'cpu' : `cuda:${placement.resolved.slice(4)}`
   const logLine = components.map((component) => `${labels[component]}: ${runtimeDevice(placements[component])}`).join(' | ')
   return { workflow, placements, gpus, warnings, vramWarnings, summary, logLine }

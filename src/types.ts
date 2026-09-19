@@ -18,6 +18,7 @@ export type GpuRoutingSettings = {
   audioVae: GpuRouteDevice
   previewVae: GpuRouteDevice
   allowOvercommit: boolean
+  preloadDiffusionDuringTextEncoding: boolean
 }
 export type WorkflowComponentRoute = {
   device: Exclude<GpuRouteDevice, 'auto'>
@@ -32,6 +33,7 @@ export type WorkflowGpuRouting = {
   videoVae?: WorkflowComponentRoute
   audioVae?: WorkflowComponentRoute
   previewVae?: WorkflowComponentRoute
+  preloadDiffusion?: { startNodeType: string; awaitNodeType: string }
 }
 export type AppliedLora = { name: string; strength: number }
 export type ReferencePurpose = 'character' | 'character-angle' | 'detail' | 'hair' | 'wardrobe' | 'accessory' | 'location' | 'continuity' | 'product' | 'style' | 'generic'
@@ -149,6 +151,12 @@ export type CharacterProject = {
   identityTemplate: 'custom' | 'cinematic' | 'editorial' | 'everyday'
   hairPreset: string
   skinTone: string
+  /** Canonical emphasis used when the reference budget cannot preserve every identity angle equally. */
+  identityPriority: 'balanced' | 'face' | 'full-body'
+  bodyNotes: string
+  voiceSpeakerId: string
+  voiceLanguage: string
+  favorite: boolean
 }
 export type CharacterDetailReference = { id: string; label: string; notes: string; images: MediaFile[]; image?: MediaFile }
 export type WardrobeProject = { id: string; name: string; description: string; accessories: string[]; materials: string; colors: string; visualStyle: string; referencePrompt: string; referenceImages: MediaFile[]; selectedReferencePaths?: string[]; createdAt: number; updatedAt: number }
@@ -356,7 +364,7 @@ export type GenerationOptions = {
   refImageSize: 'match' | 'max'
   sigmaShift?: { video: number; audio: number }
   filenamePrefix: string
-  upscale?: { type: 'h3'; model: string } | { type: 'ltx'; model: string; vae: string } | { type: 'rtx'; model: string }
+  upscale?: { type: 'h3'; model: string; scale: number; refineSteps: number; refineDenoise: number } | { type: 'ltx'; model: string; vae: string } | { type: 'rtx'; model: string }
   firstFrame?: string
   lastFrame?: string
   referenceImages: string[]
@@ -405,6 +413,22 @@ export type GpuTelemetry = {
   vramUsedMb?: number
   vramTotalMb?: number
   devices?: Array<{ index: number; name: string; usagePercent: number; vramPercent: number; vramUsedMb: number; vramTotalMb: number; vramFreeMb: number }>
+}
+
+export type RenderBenchmark = {
+  jobId: string
+  hardwareKey: string
+  hardwareLabel: string
+  provider: 'minimax'
+  mode: GenerationMode
+  turbo: NonNullable<GenerationJob['turbo']>
+  attention: string
+  width: number
+  height: number
+  duration: number
+  steps: number
+  engineMs: number
+  measuredAt: number
 }
 
 export type LocalLlmStatus = {
@@ -469,6 +493,9 @@ export type GenerationJob = {
   renderDurationMs?: number
   turbo?: 'off' | '4' | '8' | 'fast'
   steps?: number
+  h3ProReviewPending?: boolean
+  h3ProSourceSignature?: string
+  h3ProParentJobId?: string
   noDialogue?: boolean
   naturalMovement?: boolean
   loraStrength?: number
@@ -492,6 +519,8 @@ export type DesktopApi = {
   getLegacyMigrationStatus(): Promise<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean }>
   migrateLegacyData(replaceBrowserStorage?: boolean): Promise<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean }>
   getGpuTelemetry(): Promise<GpuTelemetry>
+  getRenderBenchmarks(): Promise<RenderBenchmark[]>
+  saveRenderBenchmarks(benchmarks: RenderBenchmark[]): Promise<RenderBenchmark[]>
   saveSettings(settings: AppSettings): Promise<AppSettings>
   factoryResetSettings(confirmation: string): Promise<void>
   exportWorkflowJson(suggestedName: string, workflow: unknown): Promise<string | null>

@@ -25,7 +25,7 @@ const settings: AppSettings = {
   solAttnTau: 1,
   solCacheEnabled: true,
   h3DiffusionPrecision: 'int8',
-  gpuRouting: { preset: 'automatic', strategy: 'sequential', diffusion: 'auto', textEncoder: 'auto', videoVae: 'auto', audioVae: 'auto', previewVae: 'auto', allowOvercommit: false },
+  gpuRouting: { preset: 'automatic', strategy: 'sequential', diffusion: 'auto', textEncoder: 'auto', videoVae: 'auto', audioVae: 'auto', previewVae: 'auto', allowOvercommit: false, preloadDiffusionDuringTextEncoding: false },
   h3ParallelAttentionEnabled: false,
   experimentalLtxMsrEnabled: false,
   blurNsfwLivePreviews: false,
@@ -98,6 +98,8 @@ export function installBrowserMock() {
     getLegacyMigrationStatus: async () => ({ available: false, migrated: false, needsBrowserStorageRepair: false }),
     migrateLegacyData: async () => ({ available: false, migrated: false, needsBrowserStorageRepair: false }),
     getGpuTelemetry: async () => ({ available: true, name: 'NVIDIA GeForce RTX 3090', usagePercent: 38, vramPercent: 62, vramUsedMb: 14880, vramTotalMb: 24000, devices: [{ index: 0, name: 'NVIDIA GeForce RTX 3090', usagePercent: 38, vramPercent: 62, vramUsedMb: 14880, vramTotalMb: 24000, vramFreeMb: 9120 }, { index: 1, name: 'NVIDIA GeForce RTX 5060 Ti', usagePercent: 4, vramPercent: 18, vramUsedMb: 2880, vramTotalMb: 16000, vramFreeMb: 13120 }] }),
+    getRenderBenchmarks: async () => [],
+    saveRenderBenchmarks: async (benchmarks) => benchmarks,
     saveSettings: async (next) => (current = next),
     factoryResetSettings: async (confirmation) => {
       if (confirmation !== 'Reset') throw new Error('Type Reset exactly to confirm factory reset.')

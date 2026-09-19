@@ -6,6 +6,7 @@ const MobileApp = lazy(() => import('./MobileApp'))
 const MovieEditorWindow = lazy(() => import('./MovieEditorWindow').then((module) => ({ default: module.MovieEditorWindow })))
 import { installBrowserMock } from './browserMock'
 import './styles.css'
+import './styles/tokens.css'
 import './guided-studio.css'
 import './workspace-theme.css'
 import './movie-workspace.css'

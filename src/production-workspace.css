@@ -553,6 +553,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .minimax-workspace .render-inspector-panel .preview-output-settings>.create-section-heading,
 .minimax-workspace .render-inspector-panel .preview-output-settings>.create-gpu-routing-summary,
 .minimax-workspace .render-inspector-panel .preview-output-settings>.create-presets,
+.minimax-workspace .render-inspector-panel .preview-output-settings>.render-settings-masonry,
 .minimax-workspace .render-inspector-panel .preview-output-settings>.frame-zero-guide-setting,
 .minimax-workspace .render-inspector-panel .preview-output-settings>.render-finish-card,
 .minimax-workspace .render-inspector-panel .preview-output-settings>.render-advanced-toggle,
@@ -560,6 +561,27 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .minimax-workspace .render-inspector-panel .preview-output-settings>.render-duration { grid-column:1 / -1; }
 .minimax-workspace .render-inspector-panel .preview-output-settings>.create-section-heading { position:static; min-height:52px; margin:0!important; padding:11px 13px!important; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); }
 .minimax-workspace .render-inspector-panel .preview-output-settings>.create-gpu-routing-summary { margin:0; padding:11px 13px; border-radius:9px; }
+.minimax-workspace .render-settings-masonry {
+  columns:3 300px;
+  column-gap:12px;
+  column-fill:balance;
+  width:100%;
+}
+.minimax-workspace .render-settings-masonry>* {
+  display:inline-block;
+  width:100%;
+  margin:0 0 12px!important;
+  vertical-align:top;
+  break-inside:avoid;
+}
+.minimax-workspace .render-settings-masonry>:is(.render-size,.output-reference-fidelity,.ref2va-setting-group) {
+  min-width:0;
+  padding:14px;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:var(--surface-2);
+}
+.minimax-workspace .render-settings-masonry>.frame-zero-guide-setting { padding:14px; }
 .minimax-workspace .render-inspector-panel .preview-output-settings>.render-size,
 .minimax-workspace .render-inspector-panel .preview-output-settings>.output-reference-fidelity,
 .minimax-workspace .render-inspector-panel .preview-output-settings>.ref2va-setting-group { min-width:0; margin:0; padding:14px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); }
@@ -639,6 +661,7 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
   .minimax-workspace .render-engine-card .pipeline-item:nth-of-type(4) { border-top:1px solid var(--line); }
   .minimax-workspace .render-inspector-panel .preview-output-settings { grid-template-columns:1fr; }
   .minimax-workspace .render-inspector-panel .preview-output-settings>* { grid-column:1!important; }
+  .minimax-workspace .render-settings-masonry { columns:1; }
 }
 
 @media(max-width:620px) {
@@ -866,6 +889,65 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .minimax-workspace .scene-tools-menu-panel button>span { display:grid; gap:2px; }
 .minimax-workspace .scene-tools-menu-panel button strong { font-size:10px; }
 .minimax-workspace .scene-tools-menu-panel button small { color:var(--muted); font-size:8px; }
+
+.minimax-workspace .create-options-menu { width:min(330px,100%); }
+.minimax-workspace .create-options-menu>summary { width:100%; }
+.minimax-workspace .create-options-menu-panel { width:min(430px,calc(100vw - 40px)); gap:7px; }
+.minimax-workspace .create-options-label { padding:5px 8px 2px; color:var(--workflow-lime); font-size:8px; font-weight:800; letter-spacing:.12em; }
+.minimax-workspace .create-options-menu-panel .mode-tabs { display:grid!important; grid-template-columns:1fr 1fr; gap:4px; width:100%; }
+.minimax-workspace .create-options-menu-panel .mode-tabs:before { display:none!important; }
+.minimax-workspace .create-options-menu-panel .mode-tabs button { min-height:48px!important; padding:8px 10px!important; border-radius:7px; }
+.minimax-workspace .create-options-menu-panel .mode-tabs button small { display:block; }
+.minimax-workspace .create-options-actions { display:grid; }
+.minimax-workspace .create-options-actions button { width:100%; }
+.minimax-workspace .reference-crop-item { overflow:hidden; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); }
+.minimax-workspace .reference-crop-item>header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 10px; }
+.minimax-workspace .reference-crop-item>header>span { display:grid; min-width:0; }
+.minimax-workspace .reference-crop-item>header strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.minimax-workspace .reference-crop-item>header small { color:var(--muted); font-size:8px; text-transform:capitalize; }
+.minimax-workspace .reference-fit-toggle { display:flex; flex:0 0 auto; padding:2px; border:1px solid var(--line); border-radius:7px; background:var(--bg); }
+.minimax-workspace .reference-fit-toggle button { min-height:25px; padding:3px 9px; border:0; border-radius:5px; background:transparent; color:var(--muted); font-size:9px; }
+.minimax-workspace .reference-fit-toggle button.selected { background:var(--accent-soft); color:#d9eaff; }
+.minimax-workspace .reference-crop-item>details { border-top:1px solid var(--line); }
+.minimax-workspace .reference-crop-item>details>summary { padding:8px 10px; color:var(--muted-2); font-size:9px; }
+.minimax-workspace .h3-pro-review-toggle { align-items:flex-start!important; gap:9px; margin-top:8px; padding:10px; border:1px solid rgb(180 104 255 / 32%); border-radius:8px; background:rgb(153 76 255 / 7%); }
+.minimax-workspace .h3-pro-review-toggle>span { display:grid; gap:3px; }
+.minimax-workspace .h3-pro-review-toggle strong { color:#d8b6ff; font-size:10px; }
+.minimax-workspace .h3-pro-review-toggle small { color:var(--muted-2); font-size:9px; line-height:1.4; }
+.minimax-workspace .h3-pro-refine-control { display:grid; grid-template-columns:minmax(150px,220px) minmax(0,1fr); align-items:end; gap:10px; margin-top:8px; padding:10px; border:1px solid rgb(180 104 255 / 24%); border-radius:8px; background:rgb(153 76 255 / 5%); }
+.minimax-workspace .h3-pro-refine-control>.field-group { margin:0; }
+.minimax-workspace .h3-pro-refine-control>small { padding-bottom:6px; color:var(--muted-2); font-size:9px; line-height:1.45; }
+@media(max-width:700px) { .minimax-workspace .h3-pro-refine-control { grid-template-columns:1fr; } }
+.minimax-workspace .reference-framing-badge { position:absolute; z-index:2; top:7px; right:7px; padding:3px 6px; border-radius:5px; background:rgb(8 12 17 / 82%); color:#d8b6ff; font-size:8px; font-style:normal; font-weight:800; letter-spacing:.08em; }
+.minimax-workspace .scene-reference-framing { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted-2); font-size:9px; }
+.minimax-workspace .scene-reference-framing select { min-height:28px; padding:3px 24px 3px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--text); font-size:9px; }
+
+/* Keep the consolidated Create menu attached to its trigger. The generic scene
+   menu is right-aligned, which pushed this wider variant underneath the sidebar. */
+.minimax-workspace .workspace-command-deck .create-options-menu { width:min(300px,100%); }
+.minimax-workspace .workspace-command-deck .create-options-menu-panel {
+  right:auto;
+  left:0;
+  width:min(320px,calc(100vw - 260px));
+  max-height:min(440px,calc(100vh - 150px));
+  overflow:auto;
+}
+.minimax-workspace .create-options-menu-panel .mode-tabs { grid-template-columns:1fr 1fr; }
+.minimax-workspace .create-options-menu-panel .mode-tabs button {
+  display:grid!important;
+  grid-template-columns:22px minmax(0,1fr);
+  min-height:42px!important;
+  padding:6px 8px!important;
+  text-align:left;
+}
+.minimax-workspace .create-options-menu-panel .mode-tabs button>span { display:grid; min-width:0; gap:1px; }
+.minimax-workspace .create-options-menu-panel .mode-tabs button strong,
+.minimax-workspace .create-options-menu-panel .mode-tabs button small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.minimax-workspace .create-options-actions button { min-height:40px; padding:6px 8px; }
+
+@media(max-width:700px) {
+  .minimax-workspace .workspace-command-deck .create-options-menu-panel { width:min(320px,calc(100vw - 24px)); }
+}
 
 .minimax-workspace .scene-composer { gap:9px; }
 .minimax-workspace .scene-view-tabs {

@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('minimax', {
   getLegacyMigrationStatus: () => ipcRenderer.invoke('migration:legacy-status'),
   migrateLegacyData: (replaceBrowserStorage = false) => ipcRenderer.invoke('migration:run', replaceBrowserStorage),
   getGpuTelemetry: () => ipcRenderer.invoke('system:gpu-telemetry'),
+  getRenderBenchmarks: () => ipcRenderer.invoke('render-benchmarks:get'),
+  saveRenderBenchmarks: (benchmarks: unknown[]) => ipcRenderer.invoke('render-benchmarks:save', benchmarks),
   saveSettings: (settings: unknown) => ipcRenderer.invoke('settings:save', settings),
   factoryResetSettings: (confirmation: string) => ipcRenderer.invoke('settings:factory-reset', confirmation),
   exportWorkflowJson: (suggestedName: string, workflow: unknown) => ipcRenderer.invoke('workflow:export-json', suggestedName, workflow),

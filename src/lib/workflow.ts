@@ -198,6 +198,16 @@ export function buildMiniMaxWorkflow(
       positive = [id, 0]
     })
   }
+  if (routed?.preloadDiffusion) {
+    // Input order is deliberate: Comfy evaluates the model input first, which
+    // starts residency on the diffusion GPU, then evaluates H3 conditioning on
+    // the separately routed text-encoder GPU. The await node is a mandatory
+    // barrier, so sampling can never observe a partially loaded transformer.
+    prompt['87'] = { class_type: routed.preloadDiffusion.startNodeType, inputs: { model: modelLink } }
+    prompt['88'] = { class_type: routed.preloadDiffusion.awaitNodeType, inputs: { model: ['87', 0], conditioning: positive, preload: ['87', 1] } }
+    modelLink = ['88', 0]
+    positive = ['88', 1]
+  }
   prompt['11'] = { class_type: 'RandomNoise', inputs: { noise_seed: options.seed } }
   prompt['12'] = { class_type: 'BasicGuider', inputs: { model: modelLink, conditioning: positive } }
   // Turbo 8 profiles are intentional, tested recipes—not an accidental custom
@@ -234,26 +244,31 @@ export function buildMiniMaxWorkflow(
   prompt['71'] = { class_type: 'ImageFromBatch', inputs: { image: ['16', 0], batch_index: 0, length: 1 } }
   prompt['72'] = { class_type: 'PreviewImage', inputs: { images: ['71', 0] } }
   if (options.upscale?.type === 'h3') {
-    // This is a native H3 video-latent upscale: preserve the audio latent,
-    // upscale only H3's 24-channel video latent, then decode the joined result.
-    // It deliberately avoids the lossy H3 VAE decode → pixel upscale → encode loop.
-    prompt['110'] = { class_type: 'LTXVSeparateAVLatent', inputs: { av_latent: ['15', 0] } }
+    // H3 Latent Upscale Pro keeps pass one in H3's joint AV latent domain,
+    // applies the learned 3D video upscale, then performs a real low-sigma H3
+    // refinement pass. The integrated node resizes target conditioning and
+    // preserves the pass-one audio behind a zero denoise mask.
+    prompt['110'] = {
+      class_type: 'BasicScheduler',
+      inputs: { model: modelLink, scheduler, steps: options.upscale.refineSteps, denoise: options.upscale.refineDenoise },
+    }
     prompt['111'] = {
-      class_type: 'MinimaxH3LatentUpscaler3D',
+      class_type: 'MinimaxH3LatentUpscaler3DRefineHandoff',
       inputs: {
-        latent: ['110', 0], model_name: options.upscale.model,
-        mode: 'scale by multiplier', 'mode.scale': 1.5,
-        align: 32, enable_temporal_chunking: true, force_unload: true,
-        device: 'cuda', precision: 'fp16',
+        latent: ['15', 0], noise: ['11', 0], sampler: ['13', 0], sigmas: ['110', 0],
+        model: modelLink, positive, model_name: options.upscale.model,
+        mode: 'scale by multiplier', scale: options.upscale.scale,
+        width: options.width * 2, height: options.height * 2, megapixels: (options.width * options.height * 4) / 1_000_000,
+        align: 32, keep_proportion: true, lock_audio: true, cfg: 1,
+        device: 'cuda', precision: 'fp16', offload_after_upscale: true,
       },
     }
-    prompt['112'] = { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: ['111', 0], audio_latent: ['110', 1] } }
-    // Keep nodes 16/71 as the first-pass preview branch. The final video is
-    // decoded only from the learned-upscaled latent, after the preview node.
-    prompt['113'] = { class_type: 'VAEDecode', inputs: { samples: ['112', 0], vae: videoVaeLink } }
-    prompt['114'] = { class_type: 'VAEDecodeAudio', inputs: { samples: ['112', 0], vae: audioVaeLink } }
+    // Nodes 16/71 remain a first-pass preview branch. Final AV is decoded from
+    // the refined joint latent only once at target resolution.
+    prompt['113'] = { class_type: 'VAEDecode', inputs: { samples: ['111', 0], vae: videoVaeLink } }
+    prompt['114'] = { class_type: 'VAEDecodeAudio', inputs: { samples: ['111', 0], vae: audioVaeLink } }
     prompt['18'] = { class_type: 'CreateVideo', inputs: { images: ['113', 0], audio: ['114', 0], fps: 24, bit_depth: 8, color_space: 'sRGB' } }
-    prompt['19'] = { class_type: 'SaveVideo', inputs: { video: ['18', 0], filename_prefix: `${options.filenamePrefix}_H3_Latent_1_5x`, format: 'auto', codec: 'auto' } }
+    prompt['19'] = { class_type: 'SaveVideo', inputs: { video: ['18', 0], filename_prefix: `${options.filenamePrefix}_H3_Latent_Pro_2x`, format: 'auto', codec: 'auto' } }
   } else if (options.upscale?.type === 'ltx') {
     // MiniMax post-processing intentionally remains non-generative: encode the
     // completed H3 frame sequence into the LTX video latent domain, apply the

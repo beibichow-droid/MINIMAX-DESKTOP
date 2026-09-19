@@ -6,7 +6,7 @@ export const CHARACTER_LIBRARY_EVENT = 'minimax-character-library-changed'
 
 export function newCharacterProject(index = 1): CharacterProject {
   const now = Date.now()
-  return { id: createId(), name: `Character ${index}`, description: '', wardrobe: '', voiceNotes: '', visualStyle: 'cinematic photorealism', referencePrompt: '', createdAt: now, updatedAt: now, referenceMode: 'set', referenceImages: [], detailReferences: [], wardrobeIds: [], accessoryIds: [], hairStyleIds: [], identityTemplate: 'cinematic', hairPreset: '', skinTone: '' }
+  return { id: createId(), name: `Character ${index}`, description: '', bodyNotes: '', wardrobe: '', voiceNotes: '', voiceSpeakerId: '', voiceLanguage: 'English', visualStyle: 'cinematic photorealism', referencePrompt: '', createdAt: now, updatedAt: now, referenceMode: 'set', referenceImages: [], detailReferences: [], wardrobeIds: [], accessoryIds: [], hairStyleIds: [], identityTemplate: 'cinematic', identityPriority: 'balanced', hairPreset: '', skinTone: '', favorite: false }
 }
 
 function validImageReference(value: unknown): value is MediaFile {
@@ -31,6 +31,11 @@ export function loadCharacterProjects(): CharacterProject[] {
       wardrobe: '',
       referencePrompt: item.wardrobe && item.referencePrompt?.includes(item.wardrobe) ? '' : item.referencePrompt ?? '',
       referenceMode: item.referenceMode === 'single' ? 'single' : 'set',
+      identityPriority: item.identityPriority === 'face' || item.identityPriority === 'full-body' ? item.identityPriority : 'balanced',
+      bodyNotes: typeof item.bodyNotes === 'string' ? item.bodyNotes : '',
+      voiceSpeakerId: typeof item.voiceSpeakerId === 'string' ? item.voiceSpeakerId : '',
+      voiceLanguage: typeof item.voiceLanguage === 'string' && item.voiceLanguage.trim() ? item.voiceLanguage : 'English',
+      favorite: Boolean(item.favorite),
       baseImage: validImageReference(item.baseImage) ? { ...item.baseImage, kind: 'image', referenceType: normalizedReferenceType(item.baseImage.referenceType, 'master') } : undefined,
       referenceImages: uniqueImageReferences(item.referenceImages ?? []),
       detailReferences: (item.detailReferences ?? []).filter((detail) => detail && typeof detail.id === 'string').slice(0, 8).map((detail) => ({ ...detail, label: String(detail.label ?? '').slice(0, 120), notes: String(detail.notes ?? '').slice(0, 1200), images: uniqueImageReferences(detail.images ?? (detail.image ? [detail.image] : []), 2) })),

@@ -12,7 +12,7 @@ import WebSocket from 'ws'
 
 type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
 type GpuRouteDevice = 'auto' | 'cpu' | `gpu:${number}`
-type GpuRoutingSettings = { preset: 'automatic' | 'single' | 'split' | 'custom'; strategy: 'resident' | 'sequential' | 'cpu-fallback'; diffusion: GpuRouteDevice; textEncoder: GpuRouteDevice; videoVae: GpuRouteDevice; audioVae: GpuRouteDevice; previewVae: GpuRouteDevice; allowOvercommit: boolean }
+type GpuRoutingSettings = { preset: 'automatic' | 'single' | 'split' | 'custom'; strategy: 'resident' | 'sequential' | 'cpu-fallback'; diffusion: GpuRouteDevice; textEncoder: GpuRouteDevice; videoVae: GpuRouteDevice; audioVae: GpuRouteDevice; previewVae: GpuRouteDevice; allowOvercommit: boolean; preloadDiffusionDuringTextEncoding: boolean }
 
 type GenerationDefaults = {
   resolution: string
@@ -74,6 +74,7 @@ type AppSettings = {
 type LanStatus = { running: boolean; url?: string; desktopUrl?: string; port?: number; error?: string }
 type GpuTelemetryDevice = { index: number; name: string; usagePercent: number; vramPercent: number; vramUsedMb: number; vramTotalMb: number; vramFreeMb: number }
 type GpuTelemetry = { available: boolean; name?: string; usagePercent?: number; vramPercent?: number; vramUsedMb?: number; vramTotalMb?: number; devices?: GpuTelemetryDevice[] }
+type RenderBenchmark = { jobId: string; hardwareKey: string; hardwareLabel: string; provider: 'minimax'; mode: string; turbo: string; attention: string; width: number; height: number; duration: number; steps: number; engineMs: number; measuredAt: number }
 const ltxUpscaleRequiredNodes = ['VAEEncodeTiled', 'LatentUpscaleModelLoader', 'LTXVLatentUpsampler', 'VAEDecodeTiled', 'ImageFromBatch', 'RepeatImageBatch', 'ImageBatch']
 const ltxNativeRequiredNodes = ['LTXVConditioning', 'LTXVEmptyLatentAudio', 'EmptyLTXVLatentVideo', 'LTXVDualCFGGuider', 'LTXVSeparateAVLatent', 'LTXVConcatAVLatent', 'LTXVLatentUpsampler', 'LTXVAudioVAEDecode', 'ManualSigmas', 'VAEDecodeTiled', 'CLIPTextEncode', 'KSamplerSelect', 'SamplerCustomAdvanced']
 let lanToken = ''
@@ -192,7 +193,7 @@ function defaultSettings(): AppSettings {
     solAttnTau: 1,
     solCacheEnabled: true,
     h3DiffusionPrecision: 'int8',
-    gpuRouting: { preset: 'automatic', strategy: 'sequential', diffusion: 'auto', textEncoder: 'auto', videoVae: 'auto', audioVae: 'auto', previewVae: 'auto', allowOvercommit: false },
+    gpuRouting: { preset: 'automatic', strategy: 'sequential', diffusion: 'auto', textEncoder: 'auto', videoVae: 'auto', audioVae: 'auto', previewVae: 'auto', allowOvercommit: false, preloadDiffusionDuringTextEncoding: false },
     h3ParallelAttentionEnabled: false,
     experimentalLtxMsrEnabled: false,
     blurNsfwLivePreviews: false,
@@ -288,6 +289,32 @@ async function generateWithLlm(url: string, model: string, prompt: string, provi
 
 function settingsPath() {
   return join(app.getPath('userData'), 'settings.json')
+}
+
+function renderBenchmarksPath() {
+  return join(app.getPath('userData'), 'render-benchmarks.json')
+}
+
+function validRenderBenchmark(value: unknown): value is RenderBenchmark {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Record<string, unknown>
+  return item.provider === 'minimax'
+    && typeof item.jobId === 'string' && typeof item.hardwareKey === 'string' && typeof item.hardwareLabel === 'string'
+    && typeof item.mode === 'string' && typeof item.turbo === 'string' && typeof item.attention === 'string'
+    && ['width', 'height', 'duration', 'steps', 'engineMs', 'measuredAt'].every((key) => Number.isFinite(Number(item[key])) && Number(item[key]) > 0)
+}
+
+async function loadRenderBenchmarks(): Promise<RenderBenchmark[]> {
+  try {
+    const stored = JSON.parse(await readFile(renderBenchmarksPath(), 'utf8'))
+    return Array.isArray(stored) ? stored.filter(validRenderBenchmark).slice(0, 180) : []
+  } catch { return [] }
+}
+
+async function saveRenderBenchmarks(value: unknown): Promise<RenderBenchmark[]> {
+  const benchmarks = Array.isArray(value) ? value.filter(validRenderBenchmark).sort((a, b) => b.measuredAt - a.measuredAt).slice(0, 180) : []
+  await writeAtomicFile(renderBenchmarksPath(), `${JSON.stringify(benchmarks, null, 2)}\n`)
+  return benchmarks
 }
 
 function lanTokenPath() {
@@ -393,7 +420,7 @@ async function loadSettings(): Promise<AppSettings> {
     const clipMasterOutputDirectory = typeof raw.clipMasterOutputDirectory === 'string' && raw.clipMasterOutputDirectory.trim() ? raw.clipMasterOutputDirectory.trim() : join(outputDirectory, 'video')
     const rawRouting = raw.gpuRouting
     const validDevice = (value: unknown): GpuRouteDevice => typeof value === 'string' && (value === 'auto' || value === 'cpu' || /^gpu:\d+$/.test(value)) ? value as GpuRouteDevice : 'auto'
-    const gpuRouting: GpuRoutingSettings = { ...defaults.gpuRouting, ...rawRouting, preset: rawRouting?.preset === 'single' || rawRouting?.preset === 'split' || rawRouting?.preset === 'custom' ? rawRouting.preset : 'automatic', strategy: rawRouting?.strategy === 'resident' || rawRouting?.strategy === 'cpu-fallback' ? rawRouting.strategy : 'sequential', diffusion: validDevice(rawRouting?.diffusion), textEncoder: validDevice(rawRouting?.textEncoder), videoVae: validDevice(rawRouting?.videoVae), audioVae: validDevice(rawRouting?.audioVae), previewVae: validDevice(rawRouting?.previewVae), allowOvercommit: rawRouting?.allowOvercommit === true }
+    const gpuRouting: GpuRoutingSettings = { ...defaults.gpuRouting, ...rawRouting, preset: rawRouting?.preset === 'single' || rawRouting?.preset === 'split' || rawRouting?.preset === 'custom' ? rawRouting.preset : 'automatic', strategy: rawRouting?.strategy === 'resident' || rawRouting?.strategy === 'cpu-fallback' ? rawRouting.strategy : 'sequential', diffusion: validDevice(rawRouting?.diffusion), textEncoder: validDevice(rawRouting?.textEncoder), videoVae: validDevice(rawRouting?.videoVae), audioVae: validDevice(rawRouting?.audioVae), previewVae: validDevice(rawRouting?.previewVae), allowOvercommit: rawRouting?.allowOvercommit === true, preloadDiffusionDuringTextEncoding: rawRouting?.preloadDiffusionDuringTextEncoding === true }
     return { ...defaults, ...raw, outputDirectory, clipMasterOutputDirectory, uiScale, attentionBackend, solAttnTau, solCacheEnabled: raw.solCacheEnabled !== false, h3DiffusionPrecision: raw.h3DiffusionPrecision === 'nvfp4' ? 'nvfp4' : 'int8', gpuRouting, h3ParallelAttentionEnabled: raw.h3ParallelAttentionEnabled === true, queueDelaySeconds: Math.max(0, Math.min(600, Number(raw.queueDelaySeconds) || 0)), experimentalLtxMsrEnabled: raw.experimentalLtxMsrEnabled === true, blurNsfwLivePreviews: raw.blurNsfwLivePreviews === true, llmProvider: raw.llmProvider === 'lmstudio' ? 'lmstudio' : 'ollama', characterDetailReferencesEnabled: raw.characterDetailReferencesEnabled === true, renderSettingsPresets, paths: { ...defaults.paths, ...raw.paths }, generationDefaults }
   } catch {
     return defaultSettings()
@@ -948,6 +975,8 @@ app.whenReady().then(async () => {
     return legacyMigrationStatus()
   })
   ipcMain.handle('system:gpu-telemetry', () => readGpuTelemetry())
+  ipcMain.handle('render-benchmarks:get', () => loadRenderBenchmarks())
+  ipcMain.handle('render-benchmarks:save', (_event, benchmarks: unknown) => saveRenderBenchmarks(benchmarks))
   ipcMain.handle('window:set-always-on-top', (event, enabled: boolean) => {
     const target = BrowserWindow.fromWebContents(event.sender)
     if (!target) return false
