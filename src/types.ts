@@ -2,7 +2,7 @@ export type View = 'create' | 'scratchpad' | 'ltx25' | 'music' | 'zimage' | 'ref
 export type GenerationMode = 'text' | 'image' | 'frames' | 'reference'
 export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
 export type MediaKind = 'image' | 'video' | 'audio'
-export type UpscaleMode = 'off' | 'h3' | 'ltx' | 'rtx'
+export type UpscaleMode = 'off' | 'refine' | 'h3' | 'ltx' | 'rtx'
 export type Turbo8Profile = 'stable' | 'balanced' | 'motion' | 'euler-beta'
 export type AttentionBackendPreference = 'automatic' | 'sol' | 'kitchen' | 'sage' | 'native'
 export type H3DiffusionPrecision = 'int8' | 'nvfp4'
@@ -62,6 +62,8 @@ export type GenerationDefaults = {
 }
 
 export type RenderIntentValues = GenerationDefaults & {
+  h3RefineSteps?: number
+  h3RefineDenoise?: number
   userLoras: AppliedLora[]
   rtxModel: string
   livePreviewMode: 'auto' | 'standard' | 'h3-override'
@@ -364,7 +366,7 @@ export type GenerationOptions = {
   refImageSize: 'match' | 'max'
   sigmaShift?: { video: number; audio: number }
   filenamePrefix: string
-  upscale?: { type: 'h3'; model: string; scale: number; refineSteps: number; refineDenoise: number } | { type: 'ltx'; model: string; vae: string } | { type: 'rtx'; model: string }
+  upscale?: { type: 'refine'; steps: number; denoise: number } | { type: 'h3'; model: string; scale: number; refineSteps: number; refineDenoise: number } | { type: 'ltx'; model: string; vae: string } | { type: 'rtx'; model: string }
   firstFrame?: string
   lastFrame?: string
   referenceImages: string[]

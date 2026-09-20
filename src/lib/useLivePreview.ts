@@ -56,7 +56,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
   const [connected, setConnected] = useState(false)
   useEffect(() => {
     if (!url || !enabled) { setConnected(false); setPreview(null); return }
-    let stopped = false, active = '', blobUrl = '', sawH3Frames = false
+    let stopped = false, active = '', blobUrl = '', sawH3Frames = false, samplerStage = ''
     let socket: WebSocket
     let timer: ReturnType<typeof setTimeout>
     const replacePreview = (next: LivePreview) => {
@@ -88,13 +88,18 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           if (msg.type === 'execution_start') {
             active = msg.data.prompt_id ?? ''
             sawH3Frames = false
+            samplerStage = ''
             if (blobUrl) URL.revokeObjectURL(blobUrl)
             blobUrl = ''
             setPreview(null)
             onProgress(active, { progress: 1, label: 'Starting workflow' })
           }
           if (msg.type === 'execution_cached') onProgress(promptId, { label: 'Reusing cached model data' })
-          if (msg.type === 'executing' && msg.data.node) onProgress(promptId, { label: nodeStageLabel(msg.data.node) })
+          if (msg.type === 'executing' && msg.data.node) {
+            if (msg.data.node === '15') samplerStage = 'First sampling pass'
+            else if (msg.data.node === '111') samplerStage = 'Refinement pass'
+            onProgress(promptId, { label: samplerStage && (msg.data.node === '15' || msg.data.node === '111') ? samplerStage : nodeStageLabel(msg.data.node) })
+          }
           // KJNodes announces its LTX outer-sampler stream before it begins
           // sending binary PREVIEW_IMAGE frames. Surface that separately from
           // generic socket connectivity so a missing frame stream is obvious.
@@ -102,7 +107,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           if (msg.type === 'progress' && msg.data.max) {
             const currentStep = Math.max(0, msg.data.value ?? 0)
             const totalSteps = msg.data.max
-            onProgress(promptId, { progress: Math.min(95, (currentStep / totalSteps) * 95), label: `Sampling · step ${currentStep} of ${totalSteps}`, currentStep, totalSteps })
+            onProgress(promptId, { progress: Math.min(95, (currentStep / totalSteps) * 95), label: `${samplerStage || 'Sampling'} · step ${currentStep} of ${totalSteps}`, currentStep, totalSteps })
           }
           if (msg.type === 'execution_success') onProgress(promptId, { progress: 98, label: 'Finalizing saved output' })
           if (msg.type === 'minimax_h3_preview_override' && msg.data.image && promptId) {

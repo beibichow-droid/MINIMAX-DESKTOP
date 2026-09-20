@@ -35,7 +35,7 @@ const settings: AppSettings = {
   generationDefaults: {
     resolution: '1344x768', duration: 5, turbo: 'off', steps: 30,
     sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false,
-    refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off', textEncoderPreference: 'fast', turbo8Profile: 'balanced',
+    refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'refine', textEncoderPreference: 'fast', turbo8Profile: 'balanced',
   },
 }
 

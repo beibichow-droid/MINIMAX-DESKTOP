@@ -2247,6 +2247,9 @@ textarea::placeholder, input::placeholder { color: var(--line-strong); }
 .mobile-upscale > div { display: flex; flex-wrap: wrap; gap: 7px 14px; }
 .mobile-upscale label { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; color: var(--muted); font-size: 10px; }
 .mobile-upscale input { accent-color: var(--accent); }
+.mobile-upscale > .mobile-refine-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.mobile-upscale .mobile-refine-controls label { display: grid; gap: 4px; }
+.mobile-upscale .mobile-refine-controls input { width: 100%; min-width: 0; min-height: 38px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--text); font-size: 16px; }
 .mobile-upscale select { width: 100%; min-height: 38px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--text); font-size: 16px; }
 .mobile-upscale small { color: var(--muted-2); font-size: 9px; line-height: 1.4; }
 .mobile-live-preview { display: grid; gap: 9px; margin-top: 14px; padding: 10px; border-radius: 9px; background: var(--bg); }

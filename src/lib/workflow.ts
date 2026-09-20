@@ -243,7 +243,14 @@ export function buildMiniMaxWorkflow(
   // server was launched without latent preview decoding enabled.
   prompt['71'] = { class_type: 'ImageFromBatch', inputs: { image: ['16', 0], batch_index: 0, length: 1 } }
   prompt['72'] = { class_type: 'PreviewImage', inputs: { images: ['71', 0] } }
-  if (options.upscale?.type === 'h3') {
+  if (options.upscale?.type === 'refine') {
+    const { steps, denoise } = options.upscale
+    if (!Number.isInteger(steps) || steps < 1 || steps > 30 || !Number.isFinite(denoise) || denoise <= 0 || denoise > 1) throw new Error('H3 refinement requires 1–30 steps and a denoise strength above 0 and at most 1.')
+    prompt['110'] = { class_type: 'BasicScheduler', inputs: { model: modelLink, scheduler, steps, denoise } }
+    prompt['111'] = { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['11', 0], guider: ['12', 0], sampler: ['13', 0], sigmas: ['110', 0], latent_image: ['15', 0] } }
+    prompt['16'] = { class_type: 'VAEDecode', inputs: { samples: ['111', 0], vae: videoVaeLink } }
+    prompt['19'] = { class_type: 'SaveVideo', inputs: { video: ['18', 0], filename_prefix: `${options.filenamePrefix}_H3_Refine`, format: 'auto', codec: 'auto' } }
+  } else if (options.upscale?.type === 'h3') {
     // H3 Latent Upscale Pro keeps pass one in H3's joint AV latent domain,
     // applies the learned 3D video upscale, then performs a real low-sigma H3
     // refinement pass. The integrated node resizes target conditioning and

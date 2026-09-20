@@ -28,7 +28,7 @@ type GenerationDefaults = {
   shiftVideo: number
   shiftAudio: number
   loraStrength: number
-  upscaleMode: 'off' | 'h3' | 'ltx' | 'rtx'
+  upscaleMode: 'off' | 'refine' | 'h3' | 'ltx' | 'rtx'
   textEncoderPreference: 'fast' | 'quality'
   turbo8Profile: 'stable' | 'balanced' | 'motion'
 }
@@ -203,7 +203,7 @@ function defaultSettings(): AppSettings {
     generationDefaults: {
       resolution: '1344x768', duration: 5, turbo: 'off', steps: 30,
       sampler: 'res_multistep', scheduler: 'simple', experimentalSampling: false,
-      refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'off', textEncoderPreference: 'fast', turbo8Profile: 'balanced',
+      refImageSize: 'match', livePreview: true, sigmaShiftMode: 'model', shiftVideo: 12, shiftAudio: 3, loraStrength: 1, upscaleMode: 'refine', textEncoderPreference: 'fast', turbo8Profile: 'balanced',
     },
   }
 }
@@ -281,7 +281,7 @@ async function generateWithLlm(url: string, model: string, prompt: string, provi
     if (!answer) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'LM Studio returned an empty response.')
     return answer
   }
-  const data = await llmFetch(url, '/api/generate', provider, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, stream: false, keep_alive: 0, think: false, options: { temperature: 0.65, num_predict: 1200 } }) }) as { response?: string; error?: string }
+  const data = await llmFetch(url, '/api/generate', provider, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, stream: false, keep_alive: '10m', think: false, options: { temperature: 0.65, num_predict: 1200 } }) }) as { response?: string; error?: string }
   const answer = data.response ? finalOllamaAnswer(data.response) : ''
   if (!answer) throw new Error(data.error || 'Ollama returned an empty response.')
   return answer
