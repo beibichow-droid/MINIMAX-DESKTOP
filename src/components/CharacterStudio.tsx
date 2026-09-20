@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Check, ChevronDown, CircleStop, Film, ImagePlus, Images, LoaderCircle, Mic2, MoreHorizontal, Orbit, Plus, Search, Scissors, Shirt, SlidersHorizontal, Sparkles, Star, Trash2, UserRound, WandSparkles, Watch, X } from 'lucide-react'
+import { AlertCircle, Check, ChevronDown, CircleStop, Film, ImagePlus, Images, LoaderCircle, Mic2, MoreHorizontal, Orbit, Plus, Search, Scissors, Shirt, SlidersHorizontal, Sparkles, Star, UserRound, WandSparkles, Watch, X } from 'lucide-react'
 import { CHARACTER_LIBRARY_EVENT, characterReferences, loadCharacterProjects, newCharacterProject, saveCharacterProjects } from '../lib/characterLibrary'
 import { choices, type ObjectInfo } from '../lib/comfyInfo'
 import { buildZImage } from '../lib/zimage'
@@ -15,7 +15,7 @@ import { createId } from '../lib/createId'
 import { resolveLlmConnection } from '../lib/llmProvider'
 import { analyzeReferenceImage } from '../lib/referenceAnalysis'
 import type { AppSettings, CharacterProject, GenerationJob, MediaFile, ReferenceImageType } from '../types'
-import { Badge, Button, Checkbox, Field, Input, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Tabs, TabsList, TabsTrigger, Textarea, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui'
+import { Badge, Button, Checkbox, Field, Input, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Tabs, TabsList, TabsTrigger, Textarea } from './ui'
 
 const referenceTypeOptions: Array<{ value: ReferenceImageType; label: string }> = [
   { value: 'master', label: 'Master identity' },
@@ -392,8 +392,6 @@ export function CharacterStudio({ settings, info, connected, ollamaAvailable, au
     .filter((project) => characterFilter !== 'favorites' || project.favorite)
     .sort((a, b) => characterFilter === 'recent' ? b.updatedAt - a.updatedAt : 0)
   const selectedReference = active.referenceImages.find((file) => file.path === selectedReferencePath)
-  const activeWardrobes = wardrobes.filter((item) => active.wardrobeIds.includes(item.id))
-  const activeAccessories = accessories.filter((item) => active.accessoryIds.includes(item.id))
   const tabs = [
     ['identity', 'Identity', UserRound], ['hair', 'Hair', Scissors], ['wardrobe', 'Wardrobe', Shirt],
     ['accessories', 'Accessories', Watch], ['voice', 'Voice', Mic2], ['references', 'References', Images],

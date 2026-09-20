@@ -31,3 +31,4 @@ createRoot(document.getElementById('root')!).render(
 import './scene-composer.css'
 import './production-workspace.css'
 import './studio-polish.css'
+import './workspace-audit.css'

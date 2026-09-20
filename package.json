@@ -1,6 +1,6 @@
 {
   "name": "oyama-ai-video-studio",
-  "version": "1.0.0-alpha.14",
+  "version": "1.0.0-alpha.17",
   "private": true,
   "description": "Local-first AI video studio powered by ComfyUI",
   "author": {
