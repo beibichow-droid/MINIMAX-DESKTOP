@@ -1,9 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol, session } from 'electron'
 import { createReadStream, existsSync } from 'node:fs'
-import { cp, mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { writeAtomicFile } from './atomicFile.js'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
@@ -35,7 +35,7 @@ type GenerationDefaults = {
 type RenderIntentValues = GenerationDefaults & {
   userLoras: Array<{ name: string; strength: number }>
   rtxModel: string
-  livePreviewMode: 'standard' | 'h3-override'
+  livePreviewMode: 'auto' | 'standard' | 'h3-override'
   noDialogue: boolean
   naturalMovement: boolean
   clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted'
@@ -402,7 +402,7 @@ async function loadSettings(): Promise<AppSettings> {
     generationDefaults.textEncoderPreference = raw.generationDefaults?.textEncoderPreference === 'quality' ? 'quality' : 'fast'
     generationDefaults.turbo8Profile = raw.generationDefaults?.turbo8Profile === 'stable' || raw.generationDefaults?.turbo8Profile === 'motion' ? raw.generationDefaults.turbo8Profile : 'balanced'
     const uiScale = Math.max(75, Math.min(150, Number(raw.uiScale) || defaults.uiScale))
-    const renderIntentDefaults: RenderIntentValues = { ...generationDefaults, userLoras: [], rtxModel: '', livePreviewMode: 'standard', noDialogue: true, naturalMovement: true, clothingPolicy: 'wardrobe', seed: 0, seedLocked: true }
+    const renderIntentDefaults: RenderIntentValues = { ...generationDefaults, userLoras: [], rtxModel: '', livePreviewMode: 'auto', noDialogue: true, naturalMovement: true, clothingPolicy: 'wardrobe', seed: 0, seedLocked: true }
     const renderSettingsPresets = Array.isArray(raw.renderSettingsPresets) ? raw.renderSettingsPresets.filter((preset) => preset && typeof preset.name === 'string' && preset.name.trim()).slice(0, 30).map((preset) => {
       const rawValues = preset.values && typeof preset.values === 'object' ? preset.values as Record<string, unknown> : {}
       const userLoras = Array.isArray(rawValues.userLoras) ? rawValues.userLoras.reduce<Array<{ name: string; strength: number }>>((items, item) => {
@@ -411,7 +411,7 @@ async function loadSettings(): Promise<AppSettings> {
         items.push({ name: lora.name, strength: Number.isFinite(Number(lora.strength)) ? Number(lora.strength) : 1 })
         return items
       }, []).slice(0, 3) : []
-      const values: RenderIntentValues = { ...renderIntentDefaults, ...(rawValues as Partial<RenderIntentValues>), userLoras, rtxModel: typeof rawValues.rtxModel === 'string' ? rawValues.rtxModel : '', livePreviewMode: rawValues.livePreviewMode === 'h3-override' ? 'h3-override' : 'standard', noDialogue: rawValues.noDialogue !== false, naturalMovement: rawValues.naturalMovement !== false, clothingPolicy: rawValues.clothingPolicy === 'underwear' || rawValues.clothingPolicy === 'unrestricted' ? rawValues.clothingPolicy : 'wardrobe', seed: Math.max(0, Math.min(999999999999, Math.floor(Number(rawValues.seed) || 0))), seedLocked: rawValues.seedLocked !== false }
+      const values: RenderIntentValues = { ...renderIntentDefaults, ...(rawValues as Partial<RenderIntentValues>), userLoras, rtxModel: typeof rawValues.rtxModel === 'string' ? rawValues.rtxModel : '', livePreviewMode: rawValues.livePreviewMode === 'h3-override' || rawValues.livePreviewMode === 'standard' ? rawValues.livePreviewMode : 'auto', noDialogue: rawValues.noDialogue !== false, naturalMovement: rawValues.naturalMovement !== false, clothingPolicy: rawValues.clothingPolicy === 'underwear' || rawValues.clothingPolicy === 'unrestricted' ? rawValues.clothingPolicy : 'wardrobe', seed: Math.max(0, Math.min(999999999999, Math.floor(Number(rawValues.seed) || 0))), seedLocked: rawValues.seedLocked !== false }
       return { id: typeof preset.id === 'string' ? preset.id : randomUUID(), name: preset.name.trim().slice(0, 60), values, createdAt: Number(preset.createdAt) || Date.now(), updatedAt: Number(preset.updatedAt) || Date.now() }
     }) : []
     const attentionBackend = raw.attentionBackend === 'sol' || raw.attentionBackend === 'kitchen' || raw.attentionBackend === 'sage' || raw.attentionBackend === 'native' ? raw.attentionBackend : 'automatic'
@@ -952,14 +952,21 @@ app.whenReady().then(async () => {
 
     const requestedPath = requestUrl.searchParams.get('path')
     if (!requestedPath) return new Response('Missing media path', { status: 400 })
+    if (requestUrl.hostname === 'thumbnail') {
+      const root = resolve(app.getPath('userData'), 'video-thumbnails')
+      const candidate = resolve(requestedPath)
+      const child = relative(root, candidate)
+      if (!child || child.startsWith('..') || isAbsolute(child) || extname(candidate).toLowerCase() !== '.jpg' || !existsSync(candidate)) return new Response('Thumbnail is unavailable', { status: 404 })
+      return localMediaResponse(candidate, request)
+    }
     if (requestUrl.hostname === 'selected') {
       if (!existsSync(requestedPath) || !selectedMediaExtensions.has(extname(requestedPath).toLowerCase())) return new Response('Selected media is unavailable', { status: 404 })
       return localMediaResponse(requestedPath, request)
     }
     const configured = normalize((await loadSettings()).outputDirectory)
     const candidate = normalize(requestedPath)
-    const relative = candidate.toLowerCase().startsWith(`${configured.toLowerCase()}\\`) || candidate.toLowerCase() === configured.toLowerCase()
-    if (!relative || !existsSync(candidate)) return new Response('Media is outside the configured output directory', { status: 403 })
+    const insideOutput = candidate.toLowerCase().startsWith(`${configured.toLowerCase()}\\`) || candidate.toLowerCase() === configured.toLowerCase()
+    if (!insideOutput || !existsSync(candidate)) return new Response('Media is outside the configured output directory', { status: 403 })
     return localMediaResponse(candidate, request)
   })
   ipcMain.handle('settings:get', () => loadSettings())
@@ -1309,6 +1316,26 @@ app.whenReady().then(async () => {
     const extracted = await stat(output).catch(() => null)
     if (!extracted?.size) throw new Error('FFmpeg completed without producing a frame. Check that the clip contains a video stream.')
     return { path: output, name }
+  })
+  ipcMain.handle('video:thumbnail', async (_event, source: string, ffmpegPath: string) => {
+    // Keep thumbnails out of the render directory and reuse them across restarts.
+    // Only local files are accepted; remote Comfy URLs must first be saved locally.
+    if (source.startsWith('minimax-media:')) throw new Error('A saved local video is required for a persistent thumbnail.')
+    const input = await resolveVideoSource(source)
+    const sourceStat = await stat(input)
+    const root = join(app.getPath('userData'), 'video-thumbnails')
+    await mkdir(root, { recursive: true })
+    const key = createHash('sha256').update(`${input}|${sourceStat.size}|${sourceStat.mtimeMs}`).digest('hex')
+    const output = join(root, `${key}.jpg`)
+    if (!existsSync(output)) {
+      const temporary = join(root, `${key}-${randomUUID()}.jpg`)
+      try {
+        await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-ss', '0.2', '-i', input, '-map', '0:v:0', '-frames:v', '1', '-vf', 'scale=480:270:force_original_aspect_ratio=decrease:force_divisible_by=2', '-q:v', '4', '-y', temporary])
+        if (!(await stat(temporary)).size) throw new Error('FFmpeg did not create a thumbnail.')
+        await rename(temporary, output).catch(async (error) => { if (!existsSync(output)) throw error })
+      } finally { await unlink(temporary).catch(() => undefined) }
+    }
+    return `minimax-media://thumbnail?path=${encodeURIComponent(output)}`
   })
   ipcMain.handle('video:frames', async (_event, source: string, positions: number[], outputDirectory: string, ffmpegPath: string) => {
     if (!Array.isArray(positions) || positions.length === 0 || positions.length > 100 || positions.some((position) => !Number.isFinite(position) || position < 0)) {

@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('minimax', {
   mediaUrl: (filePath: string) => ipcRenderer.invoke('file:media-url', filePath),
   validateMediaFiles: (files: unknown[]) => ipcRenderer.invoke('media:validate', files),
   extractVideoFrame: (source: string, position: number | 'last', outputDirectory: string, ffmpegPath: string) => ipcRenderer.invoke('video:frame', source, position, outputDirectory, ffmpegPath),
+  getVideoThumbnail: (source: string, ffmpegPath: string) => ipcRenderer.invoke('video:thumbnail', source, ffmpegPath),
   extractVideoFrames: (source: string, positions: number[], outputDirectory: string, ffmpegPath: string) => ipcRenderer.invoke('video:frames', source, positions, outputDirectory, ffmpegPath),
   trimVideo: (source: string, start: number, end: number, outputDirectory: string, ffmpegPath: string) => ipcRenderer.invoke('video:trim', source, start, end, outputDirectory, ffmpegPath),
   getVideoMetadata: (source: string, ffmpegPath: string) => ipcRenderer.invoke('video:metadata', source, ffmpegPath),

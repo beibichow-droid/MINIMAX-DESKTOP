@@ -8,7 +8,40 @@ const present = (field?: Value) => field?.value.trim() || ''
 const same = (a: string, b: string) => a.toLowerCase().replace(/[-\s]/g, '') === b.toLowerCase().replace(/[-\s]/g, '')
 const personAttributes: Attribute[] = ['identity', 'face', 'body', 'hair', 'wardrobe', 'accessories']
 
+export const promptMarkupLegend = [
+  { tag: '##scene', description: 'Main visual action, composition, and camera direction.' },
+  { tag: '##music', description: 'Non-diegetic score; compiled into non_diegetic_music.' },
+  { tag: '##soundscape', description: 'Diegetic ambience, effects, and sounds in the world.' },
+  { tag: '##style', description: 'Comma-separated visual treatments.' },
+  { tag: '##location', description: 'Environment and fixed geography.' },
+  { tag: '##lighting', description: 'Lighting direction, color, and atmosphere.' },
+] as const
+
+export function parsePromptMarkup(input: string) {
+  const known = new Set(promptMarkupLegend.map(item => item.tag.slice(2)))
+  const fields = new Map<string, string[]>()
+  const prelude: string[] = []
+  let active: string | null = null
+  let found = false
+  for (const line of input.split(/\r?\n/)) {
+    // Accept harmless authoring variations, but always compile them through
+    // the canonical section names above. This is intentionally line-bound so
+    // hashes in ordinary prose never become control syntax.
+    const heading = line.match(/^\s*##\s*([a-z-]+)\s*(?::\s*)?(.*)$/i)
+    if (heading && known.has(heading[1].toLowerCase())) {
+      active = heading[1].toLowerCase()
+      found = true
+      fields.set(active, [...(fields.get(active) ?? []), ...(heading[2].trim() ? [heading[2].trim()] : [])])
+    } else if (active) fields.set(active, [...(fields.get(active) ?? []), line])
+    else prelude.push(line)
+  }
+  const get = (key: string) => fields.get(key)?.join('\n').trim() || ''
+  return { found, scene: found ? [prelude.join('\n').trim(), get('scene')].filter(Boolean).join('\n\n') : input, music: get('music'), soundscape: get('soundscape'), styles: get('style').split(',').map(item => item.trim()).filter(Boolean), location: get('location'), lighting: get('lighting') }
+}
+
 export function compileScene(state: ScenePromptState): CompiledScene {
+  const markup = parsePromptMarkup(state.scene)
+  if (markup.found) state = { ...state, scene: markup.scene, music: markup.music ? { value: markup.music, source: 'USER' } : state.music, soundscape: markup.soundscape ? { value: markup.soundscape, source: 'USER' } : state.soundscape, styles: markup.styles.length ? markup.styles.map(item => ({ value: item, source: 'USER' as const })) : state.styles, environment: markup.location ? { value: markup.location, source: 'USER' } : state.environment, lighting: markup.lighting ? { value: markup.lighting, source: 'USER' } : state.lighting }
   const conflicts: Conflict[] = [...state.conflicts]
   state = extractSceneDialogue(state)
   // Explicit named clothing instructions outrank reusable wardrobe references.

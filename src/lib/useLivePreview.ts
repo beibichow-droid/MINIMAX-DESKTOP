@@ -13,7 +13,7 @@ export type LivePreview = {
 }
 
 function previewBlob(base64: string, mime: string) {
-  const binary = atob(base64)
+  const binary = atob(base64.replace(/^data:[^,]*,/, '').replace(/\s/g, ''))
   const bytes = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
   return new Blob([bytes], { type: mime })
@@ -21,13 +21,18 @@ function previewBlob(base64: string, mime: string) {
 
 function binaryPreviewImage(data: ArrayBuffer) {
   const bytes = new Uint8Array(data)
+  const header = new DataView(data)
+  // H3's motion override carries a 32-byte envelope around each JPEG frame.
+  if (bytes.length > 34 && header.getUint32(4) === 1 && header.getUint32(8) === 1 && bytes[32] === 0xff && bytes[33] === 0xd8) {
+    return { offset: 32, mime: 'image/jpeg', animated: true }
+  }
   // ComfyUI's normal sampler frame starts after its 8-byte envelope. KJNodes'
   // LTX override adds frame and node metadata before the JPEG, so identify the
   // image itself instead of assuming one particular envelope length.
   for (let offset = 0; offset <= Math.min(64, bytes.length - 2); offset += 1) {
-    if (bytes[offset] === 0xff && bytes[offset + 1] === 0xd8) return { offset, mime: 'image/jpeg' }
-    if (offset <= bytes.length - 8 && bytes[offset] === 0x89 && bytes[offset + 1] === 0x50 && bytes[offset + 2] === 0x4e && bytes[offset + 3] === 0x47) return { offset, mime: 'image/png' }
-    if (offset <= bytes.length - 12 && bytes[offset] === 0x52 && bytes[offset + 1] === 0x49 && bytes[offset + 2] === 0x46 && bytes[offset + 3] === 0x46 && bytes[offset + 8] === 0x57 && bytes[offset + 9] === 0x45 && bytes[offset + 10] === 0x42 && bytes[offset + 11] === 0x50) return { offset, mime: 'image/webp' }
+    if (bytes[offset] === 0xff && bytes[offset + 1] === 0xd8) return { offset, mime: 'image/jpeg', animated: false }
+    if (offset <= bytes.length - 8 && bytes[offset] === 0x89 && bytes[offset + 1] === 0x50 && bytes[offset + 2] === 0x4e && bytes[offset + 3] === 0x47) return { offset, mime: 'image/png', animated: false }
+    if (offset <= bytes.length - 12 && bytes[offset] === 0x52 && bytes[offset + 1] === 0x49 && bytes[offset + 2] === 0x46 && bytes[offset + 3] === 0x46 && bytes[offset + 8] === 0x57 && bytes[offset + 9] === 0x45 && bytes[offset + 10] === 0x42 && bytes[offset + 11] === 0x50) return { offset, mime: 'image/webp', animated: true }
   }
   return null
 }
@@ -51,7 +56,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
   const [connected, setConnected] = useState(false)
   useEffect(() => {
     if (!url || !enabled) { setConnected(false); setPreview(null); return }
-    let stopped = false, active = '', blobUrl = ''
+    let stopped = false, active = '', blobUrl = '', sawH3Frames = false
     let socket: WebSocket
     let timer: ReturnType<typeof setTimeout>
     const replacePreview = (next: LivePreview) => {
@@ -82,6 +87,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           if (msg.data.prompt_id) active = msg.data.prompt_id
           if (msg.type === 'execution_start') {
             active = msg.data.prompt_id ?? ''
+            sawH3Frames = false
             if (blobUrl) URL.revokeObjectURL(blobUrl)
             blobUrl = ''
             setPreview(null)
@@ -99,21 +105,23 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
             onProgress(promptId, { progress: Math.min(95, (currentStep / totalSteps) * 95), label: `Sampling · step ${currentStep} of ${totalSteps}`, currentStep, totalSteps })
           }
           if (msg.type === 'execution_success') onProgress(promptId, { progress: 98, label: 'Finalizing saved output' })
-          if (msg.type === 'minimax_h3_preview_override' && msg.data.image && active) {
+          if (msg.type === 'minimax_h3_preview_override' && msg.data.image && promptId) {
             const mime = msg.data.mime ?? 'image/jpeg'
             if (!/^(?:image\/(?:jpeg|png|webp)|video\/mp4)$/.test(mime)) return
-            const nextUrl = URL.createObjectURL(previewBlob(msg.data.image, mime))
+            let nextUrl: string
+            try { nextUrl = URL.createObjectURL(previewBlob(msg.data.image, mime)) } catch { return }
+            sawH3Frames = true
             replacePreview({
-              promptId: active,
+              promptId,
               url: nextUrl,
               mime,
-              animated: mime === 'image/webp' || mime === 'video/mp4',
+              animated: true,
               fps: msg.data.fps,
               step: msg.data.step,
               totalSteps: msg.data.total,
             })
           }
-          if (msg.type === 'executed' && msg.data.output?.images?.[0]) {
+          if (msg.type === 'executed' && msg.data.output?.images?.[0] && !sawH3Frames) {
             const file = msg.data.output.images[0]
             const query = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder ?? '', type: file.type ?? 'temp' })
             const upstream = `${url.replace(/\/+$/, '')}/view?${query}`
@@ -128,7 +136,8 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           const image = binaryPreviewImage(binary)
           if (!image) return
           const nextUrl = URL.createObjectURL(new Blob([binary.slice(image.offset)], { type: image.mime }))
-          replacePreview({ promptId, url: nextUrl, mime: image.mime, animated: image.mime === 'image/webp' })
+          if (image.animated) sawH3Frames = true
+          replacePreview({ promptId, url: nextUrl, mime: image.mime, animated: image.animated })
         }
       }
     }

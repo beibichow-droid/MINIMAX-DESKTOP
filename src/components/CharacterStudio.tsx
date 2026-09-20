@@ -8,7 +8,6 @@ import { loadWardrobeProjects, wardrobeReferences, WARDROBE_LIBRARY_EVENT } from
 import { ACCESSORY_LIBRARY_EVENT, loadAccessoryProjects } from '../lib/accessoryLibrary'
 import { HAIR_LIBRARY_EVENT, loadHairStyleProjects } from '../lib/hairLibrary'
 import { ReferenceApprovalModal } from './ReferenceApprovalModal'
-import type { CopilotWorkspaceContext } from './AiChatHead'
 import { characterAppearancePresets, characterPerformancePresets, characterVisualStylePresets, characterVoicePresets, appendPreset } from '../lib/characterPresets'
 import { COPILOT_DECISION_EVENT, offerCopilotSuggestion } from '../lib/copilot'
 import { createId } from '../lib/createId'
@@ -43,13 +42,12 @@ export type CharacterSurveyRenderOptions = {
   height: number
 }
 
-export function CharacterStudio({ settings, info, connected, ollamaAvailable, automationJobs, onCopilotContext, onCreateTurntable, onNotice, onUseInScene, onOpenLibrary }: {
+export function CharacterStudio({ settings, info, connected, ollamaAvailable, automationJobs, onCreateTurntable, onNotice, onUseInScene, onOpenLibrary }: {
   settings: AppSettings
   info: ObjectInfo
   connected: boolean
   ollamaAvailable: boolean
   automationJobs?: GenerationJob[]
-  onCopilotContext(context: CopilotWorkspaceContext): void
   onCreateTurntable(project: CharacterProject, options: CharacterSurveyRenderOptions): Promise<string | null>
   onNotice(tone: 'error' | 'success' | 'neutral', text: string): void
   onUseInScene(characterId: string): void
@@ -212,10 +210,6 @@ export function CharacterStudio({ settings, info, connected, ollamaAvailable, au
   const editableZPrompt = active.referencePrompt.trim() || defaultZPrompt
   const identityGuardrails = 'Identity render contract: exactly one adult person and one coherent view. Preserve the requested identity traits without adding relatives, alternates, duplicates, inset portraits, collages, split panels, text, labels, props, or additional people. Show accurate anatomy with both hands and both feet visible.'
   const zPrompt = `${editableZPrompt} ${identityGuardrails}`
-  useEffect(() => {
-    const referenceMap = [active.baseImage && `<Picture 1> = ${active.name} master identity`, ...active.referenceImages.map((file, index) => `<Picture ${index + 2}> = ${active.name} approved identity angle ${index + 1}`)].filter(Boolean) as string[]
-    onCopilotContext({ label: `Character · ${active.name}`, prompt: zPrompt, referenceMap, imagePaths: [active.baseImage?.path, ...active.referenceImages.map((file) => file.path), activeHairStyle?.referenceImage?.path].filter(Boolean) as string[] })
-  }, [active.baseImage, active.name, active.referenceImages, activeHairStyle?.referenceImage?.path, onCopilotContext, zPrompt])
   const sheetPrompt = [
     `Experimental character reference sheet for one adult character: ${active.name}.`, active.skinTone && `Skin tone: ${active.skinTone}.`, active.description, hairDirection,
     sheetLayout === 'coverage'
@@ -413,6 +407,17 @@ export function CharacterStudio({ settings, info, connected, ollamaAvailable, au
         <section className="character-visual-canvas" aria-label={`${active.name} character canvas`}>
           <figure className="character-primary-preview">{active.baseImage?.preview ? <img src={active.baseImage.preview} alt={`${active.name} primary reference`} /> : <button type="button" onClick={() => void chooseImage('base')}><ImagePlus size={30} /><strong>Add primary image</strong><span>Choose an identity anchor</span></button>}<figcaption><Badge tone="primary">Primary</Badge><Button size="sm" variant="ghost" onClick={() => void chooseImage('base')}>{active.baseImage ? 'Replace' : 'Choose'}</Button></figcaption></figure>
           <div className="character-reference-mosaic">{active.referenceImages.slice(0,6).map((file,index) => <button type="button" className={file.path === selectedReferencePath ? 'selected' : ''} key={file.path} onClick={() => { setSelectedReferencePath(file.path); setActiveTab('references') }}>{file.preview ? <img src={file.preview} alt={`${active.name} reference ${index+1}`} /> : <Images size={22} />}<span>{file.referenceType ?? 'other'}</span></button>)}<button type="button" className="character-add-tile" onClick={() => void chooseImage('reference')}><Plus size={21} /><span>Add Images</span></button></div>
+          <div className="character-canvas-context" aria-label="Character continuity summary">
+            <div className="character-canvas-context-heading"><Images size={15}/><strong>Continuity at a glance</strong></div>
+            <dl>
+              <div><dt>Primary image</dt><dd>{active.baseImage ? 'Ready' : 'Needed'}</dd></div>
+              <div><dt>Supporting views</dt><dd>{active.referenceImages.length}</dd></div>
+              <div><dt>Hair</dt><dd>{activeHairStyle?.name || active.hairPreset || 'Not set'}</dd></div>
+              <div><dt>Wardrobe</dt><dd>{active.wardrobeIds.length ? `${active.wardrobeIds.length} attached` : 'Not set'}</dd></div>
+              <div><dt>Accessories</dt><dd>{active.accessoryIds.length ? `${active.accessoryIds.length} attached` : 'None'}</dd></div>
+            </dl>
+            <p>Choose a tab above the inspector to edit these details. Select a supporting image to review its reference role.</p>
+          </div>
         </section>
         <Tabs value={activeTab} onValueChange={value => setActiveTab(value as typeof activeTab)} className="character-workspace-tabs"><TabsList>{tabs.map(([id,label,Icon]) => <TabsTrigger value={id} key={id}><Icon size={14}/>{label}</TabsTrigger>)}</TabsList></Tabs>
         <aside className="character-context-inspector" aria-label={`${tabs.find(([id]) => id === activeTab)?.[1]} inspector`}><header><strong>{tabs.find(([id]) => id === activeTab)?.[1]}</strong><span><SlidersHorizontal size={13}/>Inspector</span></header><ScrollArea className="character-inspector-scroll"><div className="character-inspector-body">

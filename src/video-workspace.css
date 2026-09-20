@@ -82,7 +82,46 @@
 .video-prompt-panel header button, .video-preview-stage header > button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 28px; padding: 0 10px; border: 1px solid #33414d; border-radius: 5px; background: #19232b; color: #cbd5df; font-size: 11px; }
 .video-prompt-panel header button:hover, .video-preview-stage header > button:hover { background: #273744; }
 .video-prompt-panel textarea { display: block; width: 100%; height: 78px; min-height: 0; margin-top: 8px; padding: 10px 12px; resize: none; border: 1px solid #3a4854; border-radius: 6px; outline: 0; background: #121a20; color: #f2f6fa; font: 13px/1.5 inherit; }
-.video-prompt-panel footer { display: flex; justify-content: flex-end; padding-top: 5px; color: #94a3b2; font-size: 10px; }
+.h3-prompt-editor { position: relative; }
+.h3-prompt-editor textarea:focus { border-color: #4c91bd; box-shadow: 0 0 0 2px rgb(56 170 245 / 12%); }
+.h3-tag-autocomplete { position: absolute; z-index: 12; top: calc(100% + 4px); left: 8px; width: min(520px, calc(100% - 16px)); overflow: hidden; border: 1px solid #4b6576; border-radius: 7px; background: #142029; box-shadow: 0 15px 35px #000b; }
+.h3-tag-autocomplete-title, .h3-tag-autocomplete footer { display: flex; align-items: center; gap: 7px; min-height: 29px; padding: 0 10px; color: #9eb1bf; font-size: 10px; }
+.h3-tag-autocomplete-title { border-bottom: 1px solid #344550; }
+.h3-tag-autocomplete-title span { flex: 1; }
+.h3-tag-autocomplete kbd { padding: 1px 5px; border: 1px solid #42535f; border-radius: 3px; background: #0e171d; font: 9px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.h3-tag-autocomplete > button { display: grid; grid-template-columns: 95px minmax(0, 1fr) auto; align-items: center; gap: 10px; width: 100%; min-height: 35px; padding: 5px 10px; border: 0; border-bottom: 1px solid #293943; background: transparent; color: #cbd7df; text-align: left; }
+.h3-tag-autocomplete > button.active { background: #243c4c; color: #fff; }
+.h3-tag-autocomplete code, .h3-tag-context-menu code, .video-prompt-panel footer code { color: #83ceff; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.h3-tag-autocomplete > button span { overflow: hidden; color: #a8bac6; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.h3-tag-autocomplete > button em { display: inline-flex; align-items: center; gap: 3px; color: #78d8a4; font-size: 9px; font-style: normal; }
+.h3-tag-autocomplete footer { justify-content: space-between; }
+.h3-tag-context-menu { position: fixed; z-index: 140; width: 280px; overflow: hidden; padding: 5px; border: 1px solid #4b6576; border-radius: 8px; background: #142029; box-shadow: 0 18px 45px #000c; }
+.h3-tag-context-menu header { justify-content: flex-start; gap: 7px; min-height: 29px; padding: 0 7px; color: #a9bbc8; font-size: 10px; }
+.h3-tag-context-menu > button { display: grid; grid-template-columns: 80px minmax(0, 1fr) 14px; align-items: center; gap: 8px; width: 100%; min-height: 34px; padding: 4px 7px; border: 0; border-radius: 4px; background: transparent; color: #d7e2e9; text-align: left; }
+.h3-tag-context-menu > button:hover, .h3-tag-context-menu > button:focus-visible { outline: 0; background: #284456; }
+.h3-tag-context-menu > button span { overflow: hidden; color: #9fb1bd; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.status-bar-sampler .sampler-countdown.delayed { color: #ffc46b; }
+.video-prompt-panel footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 5px; color: #94a3b2; font-size: 10px; }
+.video-syntax-help-button { width: 28px; padding: 0 !important; }
+.video-syntax-backdrop { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center; padding: 20px; background: #05090ccd; backdrop-filter: blur(6px); }
+.video-syntax-dialog { display: grid; width: min(720px, 100%); max-height: min(760px, calc(100dvh - 40px)); overflow: hidden; border: 1px solid #465d6d; border-radius: 11px; background: #17232b; color: #edf5fa; box-shadow: 0 28px 80px #000b; }
+.video-syntax-dialog > header, .video-syntax-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; }
+.video-syntax-dialog > header { border-bottom: 1px solid #34434e; }
+.video-syntax-dialog > header > span { display: grid; gap: 4px; }
+.video-syntax-dialog > header strong { font-size: 15px; }
+.video-syntax-dialog > header small, .video-syntax-dialog > footer span { color: #a9bbc8; font-size: 11px; line-height: 1.45; }
+.video-syntax-dialog > header button { width: 30px; height: 30px; padding: 0; }
+.video-syntax-list { display: grid; gap: 1px; overflow: auto; padding: 10px 16px; background: #10191f; }
+.video-syntax-list > div { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 43px; padding: 6px 8px; border-bottom: 1px solid #2d3b45; }
+.video-syntax-list code, .video-syntax-dialog footer code { color: #8fd4ff; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.video-syntax-list span { color: #c1d0da; font-size: 11px; line-height: 1.4; }
+.video-syntax-list button { min-height: 28px; }
+.video-syntax-example { display: grid; gap: 8px; margin: 10px 16px 2px; padding: 12px; border: 1px solid #344b5b; border-radius: 7px; background: #111b22; }
+.video-syntax-example strong { font-size: 11px; }
+.video-syntax-example pre { max-height: 170px; overflow: auto; margin: 0; color: #bdd1df; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.video-syntax-dialog > footer { border-top: 1px solid #34434e; }
+.video-syntax-dialog > footer span { max-width: 55ch; }
+@media (max-width: 620px) { .video-syntax-list > div { grid-template-columns: 1fr auto; }.video-syntax-list span { grid-column: 1 / -1; grid-row: 2; }.video-prompt-panel footer > span:first-child { display: none; } }
 .video-prompt-suggestion { position: absolute; z-index: 4; inset: 35px 10px auto; padding: 10px; border: 1px solid #4a7ca2; border-radius: 7px; background: #1b2a36; box-shadow: 0 12px 25px #0009; }
 .video-prompt-suggestion p { max-height: 100px; overflow: auto; }
 .video-prompt-suggestion button { margin-right: 6px; padding: 5px 9px; border: 1px solid #466078; border-radius: 4px; background: #273c4d; color: #dcefff; }
@@ -115,8 +154,8 @@
 .video-preview-stage > header > div button.active { border-bottom-color: #38aaf5; background: #203343; color: #c9eaff; }
 .video-preview-stage header > button { width: 30px; padding: 0; margin-right: 10px; }
 .video-preview-canvas { position: relative; display: grid; place-items: center; flex: 1; min-height: 0; margin: 5px; overflow: hidden; border: 1px solid #26343e; border-radius: 6px; background: radial-gradient(circle at 50% 42%,#18232b,#0b1116 70%); }
-.video-preview-canvas > img, .video-preview-canvas > figure, .video-preview-canvas > figure img, .video-preview-canvas > figure video { width: 100%; height: 100%; max-height: 100%; object-fit: contain; }
-.video-preview-canvas > figure { position: relative; margin: 0; }
+.video-preview-canvas > img, .video-preview-canvas > figure img, .video-preview-canvas > figure video { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; }
+.video-preview-canvas > figure { position: relative; display: grid; place-items: center; width: auto; height: 100%; max-width: 100%; max-height: 100%; margin: 0; overflow: hidden; background: #0b1116; }
 .video-live-preview-badge { position: absolute; top: 12px; left: 12px; display: grid; grid-template-columns: 8px auto; align-items: center; gap: 1px 7px; max-width: min(340px,calc(100% - 24px)); padding: 7px 10px; border: 1px solid rgb(76 169 255 / 35%); border-radius: 7px; background: rgb(8 15 20 / 82%); color: #e5f4ff; font-size: 10px; font-weight: 700; line-height: 1.25; backdrop-filter: blur(9px); box-shadow: 0 5px 18px #0006; }
 .video-live-preview-badge i { grid-row: 1 / span 2; width: 7px; height: 7px; border-radius: 50%; background: #43d991; box-shadow: 0 0 0 4px rgb(67 217 145 / 12%); }
 .video-live-preview-badge small { grid-column: 2; color: #9fb4c3; font-size: 9px; font-weight: 500; }

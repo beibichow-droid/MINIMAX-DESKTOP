@@ -4,7 +4,16 @@ const vm = require('node:vm')
 const ts = require('typescript')
 const exportsObject = {}
 vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/lib/movieTimeline.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: exportsObject })
-const { preserveLockedClips } = exportsObject
+const { adjacentEditFrame, preserveLockedClips, previewSourceFrame } = exportsObject
+const editClips = [{ startFrame: 24, frameCount: 48 }, { startFrame: 96, frameCount: 24 }]
+assert.equal(adjacentEditFrame(50, -1, 144, editClips), 24, 'Previous edit finds the nearest earlier boundary')
+assert.equal(adjacentEditFrame(50, 1, 144, editClips), 72, 'Next edit finds the nearest later boundary')
+assert.equal(adjacentEditFrame(0, -1, 144, editClips), 0, 'Previous edit clamps at sequence start')
+assert.equal(adjacentEditFrame(144, 1, 144, editClips), 144, 'Next edit clamps at sequence end')
+assert.equal(previewSourceFrame(48, 24, 100, 90), 48, 'Preview clamps before a trimmed clip')
+assert.equal(previewSourceFrame(48, 24, 100, 110), 58, 'Preview follows the timeline within a trimmed clip')
+assert.equal(previewSourceFrame(48, 24, 100, 999), 71, 'Preview clamps to the final included frame')
+assert.equal(previewSourceFrame(48, 0, 100, 999), 48, 'Preview remains valid for malformed zero-frame media')
 const locked = { id: 'locked', trackId: 'v1', startFrame: 24 }
 const editable = { id: 'editable', trackId: 'v2', startFrame: 48 }
 const before = { tracks: [{ id: 'v1', locked: true }, { id: 'v2' }], clips: [locked, editable] }

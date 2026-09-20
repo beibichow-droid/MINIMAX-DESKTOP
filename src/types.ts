@@ -1,4 +1,4 @@
-export type View = 'create' | 'ltx25' | 'music' | 'zimage' | 'referenceprep' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'queue' | 'library' | 'clipmaster' | 'movie' | 'settings'
+export type View = 'create' | 'scratchpad' | 'ltx25' | 'music' | 'zimage' | 'referenceprep' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'queue' | 'library' | 'clipmaster' | 'movie' | 'settings'
 export type GenerationMode = 'text' | 'image' | 'frames' | 'reference'
 export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
 export type MediaKind = 'image' | 'video' | 'audio'
@@ -64,7 +64,7 @@ export type GenerationDefaults = {
 export type RenderIntentValues = GenerationDefaults & {
   userLoras: AppliedLora[]
   rtxModel: string
-  livePreviewMode: 'standard' | 'h3-override'
+  livePreviewMode: 'auto' | 'standard' | 'h3-override'
   noDialogue: boolean
   naturalMovement: boolean
   clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted'
@@ -477,6 +477,7 @@ export type GenerationJob = {
   execution?: JobExecutionInfo
   outputUrl?: string
   localOutputPath?: string
+  thumbnailUrl?: string
   seed?: number
   referenceAssets?: string[]
   sourceMode?: 'ref2va-still'
@@ -538,6 +539,7 @@ export type DesktopApi = {
   mediaUrl(filePath: string): Promise<string>
   validateMediaFiles(files: Array<Pick<MediaFile, 'path' | 'kind'>>): Promise<Array<{ path: string; valid: boolean; reason?: string }>>
   extractVideoFrame(source: string, position: number | 'last', outputDirectory: string, ffmpegPath: string): Promise<{ path: string; name: string }>
+  getVideoThumbnail(source: string, ffmpegPath: string): Promise<string>
   extractVideoFrames(source: string, positions: number[], outputDirectory: string, ffmpegPath: string): Promise<Array<{ path: string; name: string }>>
   trimVideo(source: string, start: number, end: number, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; name: string }>
   getVideoMetadata(source: string, ffmpegPath: string): Promise<{ duration: number; fps: number; frameCount: number; width: number; height: number }>

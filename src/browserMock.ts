@@ -122,6 +122,7 @@ export function installBrowserMock() {
     mediaUrl: async (path) => path,
     validateMediaFiles: async (files) => files.map((file) => ({ path: file.path, valid: true })),
     extractVideoFrame: async () => { throw new Error('Open the desktop app to extract video frames.') },
+    getVideoThumbnail: async () => { throw new Error('Open the desktop app to create persistent video thumbnails.') },
     extractVideoFrames: async () => { throw new Error('Open the desktop app to extract video frames.') },
     trimVideo: async () => { throw new Error('Open the desktop app to trim reference videos.') },
     getVideoMetadata: async () => { throw new Error('Open the desktop app to inspect video metadata.') },

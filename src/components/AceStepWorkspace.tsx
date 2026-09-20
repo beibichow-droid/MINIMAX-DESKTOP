@@ -60,6 +60,11 @@ export function AceStepWorkspace({ settings, models, connected, pipelineReady, m
 
   useEffect(() => { localStorage.setItem('acestep.workspace', JSON.stringify(state)) }, [state])
   useEffect(() => {
+    const loadPrompt = (event: Event) => set('tags', (event as CustomEvent<string>).detail)
+    window.addEventListener('oyama:load-music-prompt', loadPrompt)
+    return () => window.removeEventListener('oyama:load-music-prompt', loadPrompt)
+  }, [])
+  useEffect(() => {
     if (state.model === 'sft' && !models.sft && models.base) set('model', 'base')
     if (state.model === 'base' && !models.base && models.sft) set('model', 'sft')
   }, [models.base, models.sft, state.model])
