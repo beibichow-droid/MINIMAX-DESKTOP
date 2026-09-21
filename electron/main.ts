@@ -821,15 +821,15 @@ async function findRifeExecutable(root = rifeDirectory()): Promise<string | null
   return null
 }
 
-async function resolveVideoSource(source: string) {
+async function resolveUploadSource(source: string) {
   if (!source.startsWith('minimax-media:')) {
-    if (!existsSync(source) || !mediaExtensions.has(extname(source).toLowerCase())) throw new Error('The selected video file is unavailable.')
+    if (!existsSync(source) || !selectedMediaExtensions.has(extname(source).toLowerCase())) throw new Error('The selected media file is unavailable.')
     return source
   }
   const parsed = new URL(source)
   if (parsed.hostname === 'local' || parsed.hostname === 'selected') {
     const path = parsed.searchParams.get('path') ?? ''
-    if (!existsSync(path) || !mediaExtensions.has(extname(path).toLowerCase())) throw new Error('The selected video file is unavailable.')
+    if (!existsSync(path) || !selectedMediaExtensions.has(extname(path).toLowerCase())) throw new Error('The selected media file is unavailable.')
     return path
   }
   if (parsed.hostname === 'comfy') {
@@ -840,11 +840,19 @@ async function resolveVideoSource(source: string) {
     if (target.origin !== configured.origin || target.pathname !== '/view') throw new Error('The video is outside the configured ComfyUI server.')
     const response = await fetch(target)
     if (!response.ok) throw new Error(`Could not retrieve the ComfyUI video (${response.status}).`)
-    const temporary = join(app.getPath('temp'), `minimax-clip-${randomUUID()}.mp4`)
+    const extension = extname(target.searchParams.get('filename') ?? '').toLowerCase()
+    if (!selectedMediaExtensions.has(extension)) throw new Error('The ComfyUI media type is unsupported.')
+    const temporary = join(app.getPath('temp'), `minimax-upload-${randomUUID()}${extension}`)
     await writeFile(temporary, Buffer.from(await response.arrayBuffer()))
     return temporary
   }
-  throw new Error('Unsupported video source.')
+  throw new Error('Unsupported media source.')
+}
+
+async function resolveVideoSource(source: string) {
+  const resolved = await resolveUploadSource(source)
+  if (!mediaExtensions.has(extname(resolved).toLowerCase())) throw new Error('The selected video file is unavailable.')
+  return resolved
 }
 
 let movieEditorWindow: BrowserWindow | null = null
@@ -1039,6 +1047,11 @@ app.whenReady().then(async () => {
     const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [filters[type]] })
     return result.canceled ? null : { path: result.filePaths[0], name: basename(result.filePaths[0]) }
   })
+  ipcMain.handle('dialog:videos', async () => {
+    const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'], filters: [{ name: 'Videos', extensions: ['mp4', 'mov', 'mkv', 'webm'] }] })
+    if (result.canceled) return []
+    return result.filePaths.map((path) => ({ path, name: basename(path) }))
+  })
   ipcMain.handle('models:scan', async (_event, settings: AppSettings) => {
     const groups = await Promise.all(modelKinds.map((kind) => scanDirectory(settings.paths[kind], kind)))
     return groups.flat().sort((a, b) => a.name.localeCompare(b.name))
@@ -1148,9 +1161,13 @@ app.whenReady().then(async () => {
     return resolveComfyOutput(outputDirectory, file)
   })
   ipcMain.handle('comfy:upload', async (_event, url: string, filePath: string, subfolder = 'minimax-desktop') => {
-    const bytes = await readFile(filePath)
+    // Completed jobs may persist a minimax-media URL instead of a filesystem
+    // path. Resolve it through the same guarded media loader used by frame
+    // extraction so continuation can reuse a video that already previews.
+    const source = await resolveUploadSource(filePath)
+    const bytes = await readFile(source)
     const form = new FormData()
-    form.append('image', new Blob([bytes]), basename(filePath))
+    form.append('image', new Blob([bytes]), basename(source))
     form.append('type', 'input')
     form.append('subfolder', subfolder)
     form.append('overwrite', 'true')

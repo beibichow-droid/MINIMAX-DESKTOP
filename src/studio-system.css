@@ -62,6 +62,10 @@
 .studio-topbar .video-project-name { flex: 0 1 auto; }
 .studio-topbar .video-launcher { top: 54px; }
 .studio-topbar .video-launcher button[aria-current='page'] { background: #285173; color: #fff; }
+@media (max-width: 1400px) {
+  .studio-topbar .video-project-name { display: none; }
+  .studio-topbar nav button { min-width: 70px; padding-inline: 10px; }
+}
 .studio-shell-active > .main-area {
   grid-row: 2;
   grid-column: 1;

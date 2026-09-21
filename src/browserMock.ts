@@ -111,6 +111,7 @@ export function installBrowserMock() {
     setUiScale: async (scale) => Math.round(Math.max(.75, Math.min(1.5, scale)) * 100),
     chooseDirectory: async () => null,
     chooseMedia: async () => null,
+    chooseVideos: async () => [],
     scanModels: async () => examples.map(([kind, name, bytes]) => ({ kind, name, bytes, path: `${current.paths[kind]}\\${name}` })),
     getComfyStatus: async () => ({ connected: false, latencyMs: 2, error: 'Preview mode' }),
     submitPrompt: async () => { throw new Error('Desktop bridge is unavailable in browser preview.') },

@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('minimax', {
   setUiScale: (scale: number) => ipcRenderer.invoke('window:set-ui-scale', scale),
   chooseDirectory: (initialPath?: string) => ipcRenderer.invoke('dialog:directory', initialPath),
   chooseMedia: (type: 'image' | 'video' | 'audio') => ipcRenderer.invoke('dialog:media', type),
+  chooseVideos: () => ipcRenderer.invoke('dialog:videos'),
   scanModels: (settings: unknown) => ipcRenderer.invoke('models:scan', settings),
   getComfyStatus: (url: string) => ipcRenderer.invoke('comfy:status', url),
   submitPrompt: (url: string, prompt: unknown, clientId?: string) => ipcRenderer.invoke('comfy:submit', url, prompt, clientId),

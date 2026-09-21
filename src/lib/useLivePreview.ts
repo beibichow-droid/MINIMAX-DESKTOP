@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createId } from './createId'
 
-export type LiveProgress = { progress?: number; label: string; currentStep?: number; totalSteps?: number }
+export type LiveProgress = { progress?: number; label: string; currentStep?: number; totalSteps?: number; samplerPass?: 'first' | 'refine' }
 export type LivePreview = {
   promptId: string
   url: string
@@ -57,6 +57,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
   useEffect(() => {
     if (!url || !enabled) { setConnected(false); setPreview(null); return }
     let stopped = false, active = '', blobUrl = '', sawH3Frames = false, samplerStage = ''
+    let samplerPass: LiveProgress['samplerPass']
     let socket: WebSocket
     let timer: ReturnType<typeof setTimeout>
     const replacePreview = (next: LivePreview) => {
@@ -89,6 +90,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
             active = msg.data.prompt_id ?? ''
             sawH3Frames = false
             samplerStage = ''
+            samplerPass = undefined
             if (blobUrl) URL.revokeObjectURL(blobUrl)
             blobUrl = ''
             setPreview(null)
@@ -96,9 +98,9 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           }
           if (msg.type === 'execution_cached') onProgress(promptId, { label: 'Reusing cached model data' })
           if (msg.type === 'executing' && msg.data.node) {
-            if (msg.data.node === '15') samplerStage = 'First sampling pass'
-            else if (msg.data.node === '111') samplerStage = 'Refinement pass'
-            onProgress(promptId, { label: samplerStage && (msg.data.node === '15' || msg.data.node === '111') ? samplerStage : nodeStageLabel(msg.data.node) })
+            if (msg.data.node === '15') { samplerStage = 'First sampling pass'; samplerPass = 'first' }
+            else if (msg.data.node === '111') { samplerStage = 'Refinement pass'; samplerPass = 'refine' }
+            onProgress(promptId, { label: samplerStage && (msg.data.node === '15' || msg.data.node === '111') ? samplerStage : nodeStageLabel(msg.data.node), ...(msg.data.node === '15' || msg.data.node === '111' ? { samplerPass } : {}) })
           }
           // KJNodes announces its LTX outer-sampler stream before it begins
           // sending binary PREVIEW_IMAGE frames. Surface that separately from
@@ -107,7 +109,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           if (msg.type === 'progress' && msg.data.max) {
             const currentStep = Math.max(0, msg.data.value ?? 0)
             const totalSteps = msg.data.max
-            onProgress(promptId, { progress: Math.min(95, (currentStep / totalSteps) * 95), label: `${samplerStage || 'Sampling'} · step ${currentStep} of ${totalSteps}`, currentStep, totalSteps })
+            onProgress(promptId, { progress: Math.min(95, (currentStep / totalSteps) * 95), label: `${samplerStage || 'Sampling'} · step ${currentStep} of ${totalSteps}`, currentStep, totalSteps, samplerPass })
           }
           if (msg.type === 'execution_success') onProgress(promptId, { progress: 98, label: 'Finalizing saved output' })
           if (msg.type === 'minimax_h3_preview_override' && msg.data.image && promptId) {

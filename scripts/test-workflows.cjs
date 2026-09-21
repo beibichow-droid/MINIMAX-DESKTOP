@@ -1,5 +1,13 @@
 const assert = require('node:assert/strict')
 const { load } = require('./test-ts-loader.cjs')
+const { samplerProgressSummary } = load('src/lib/renderProgress.ts')
+const firstPass = { status: 'running', steps: 30, refinementSteps: 3, currentStep: 20, totalSteps: 30, samplerPass: 'first', estimatedSamplerStepMs: 1000, lastSamplerStepAt: 5000 }
+assert.equal(samplerProgressSummary(firstPass, 5500).remainingMs, 13000, 'ETA includes same-resolution refinement before it starts')
+assert.equal(samplerProgressSummary({ ...firstPass, refinementStepCostMultiplier: 4 }, 5500).remainingMs, 22000, 'Upscale refinement estimates its larger latent grid')
+const refinePass = { ...firstPass, currentStep: 1, totalSteps: 3, samplerPass: 'refine', estimatedSamplerStepMs: 4000, lastSamplerStepAt: 6000 }
+assert.equal(samplerProgressSummary(refinePass, 6500).remainingMs, 8000, 'ETA follows measured refinement pace once that pass begins')
+assert.equal(samplerProgressSummary(refinePass, 6500).currentStep, 31, 'Progress counts both sampling passes')
+assert.equal(samplerProgressSummary({ ...firstPass, refinementSteps: undefined }, 5500).remainingMs, 10000, 'Single-pass ETA remains unchanged')
 const { frameCount, buildMiniMaxReferenceStillWorkflow, buildMiniMaxWorkflow, continuationSourceCandidates, extractOutputUrl, OFFICIAL_H3_SAMPLER, OFFICIAL_H3_SCHEDULER } = load('src/lib/workflow.ts')
 const { h3SamplingSteps } = load('src/lib/workflow.ts')
 assert.equal(h3SamplingSteps('8', 30), 8, 'Native step count must display the Turbo fallback')
@@ -366,8 +374,8 @@ const rtx = buildMiniMaxWorkflow({ mode: 'text', width: 608, height: 352, prompt
 }
 const url = extractOutputUrl({ job: { outputs: { 19: { images: [{ filename: 'original.mp4' }] }, 70: { images: [{ filename: 'upscaled.mp4' }] } } } }, 'job', 'http://localhost:8188')
 assert.ok(decodeURIComponent(url).includes('upscaled.mp4'))
-assert.deepEqual(JSON.parse(JSON.stringify(continuationSourceCandidates({ localOutputPath: 'C:/missing/old.mp4', outputUrl: 'minimax-media://comfy?url=http%3A%2F%2Flocalhost%3A8188%2Fview%3Ffilename%3Dvideo.mp4' }, 'C:/ComfyUI/output/video.mp4'))), ['C:/missing/old.mp4', 'C:/ComfyUI/output/video.mp4', 'minimax-media://comfy?url=http%3A%2F%2Flocalhost%3A8188%2Fview%3Ffilename%3Dvideo.mp4'])
-assert.deepEqual(JSON.parse(JSON.stringify(continuationSourceCandidates({ localOutputPath: 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4', outputUrl: 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4' }))), ['minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4', 'C:/ComfyUI/output/video.mp4'])
+assert.deepEqual(JSON.parse(JSON.stringify(continuationSourceCandidates({ localOutputPath: 'C:/missing/old.mp4', outputUrl: 'minimax-media://comfy?url=http%3A%2F%2Flocalhost%3A8188%2Fview%3Ffilename%3Dvideo.mp4' }, 'C:/ComfyUI/output/video.mp4'))), ['C:/ComfyUI/output/video.mp4', 'C:/missing/old.mp4', 'minimax-media://comfy?url=http%3A%2F%2Flocalhost%3A8188%2Fview%3Ffilename%3Dvideo.mp4'])
+assert.deepEqual(JSON.parse(JSON.stringify(continuationSourceCandidates({ localOutputPath: 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4', outputUrl: 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4' }))), ['C:/ComfyUI/output/video.mp4', 'minimax-media://local?path=C%3A%2FComfyUI%2Foutput%2Fvideo.mp4'])
 const coreRoutingInfo = {
   SelectModelDevice: { input: { required: { model: ['MODEL'], device: [['default', 'cpu', 'gpu:0', 'gpu:1']] } } },
   SelectCLIPDevice: { input: { required: { clip: ['CLIP'], device: [['default', 'cpu', 'gpu:0', 'gpu:1']] } } },

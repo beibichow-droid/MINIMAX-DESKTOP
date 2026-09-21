@@ -128,6 +128,12 @@ assert.equal((output.prompt.match(/What is it/g) || []).length, 1)
 assert.equal(extractSceneDialogue(state).dialogue[0].text, 'What is it?')
 state.noDialogue = true
 assert.ok(errors(state).some(item => item.code === 'speech-disabled'))
+state = kitchen(); state.noDialogue = true; state.scene = 'Kierra waits silently by the counter.'
+output = compileScene(state)
+assert.match(output.prompt, /Audio rule: no speech, spoken words, dialogue, narration, voice-over, singing, vocalization or lip-sync/)
+assert.match(output.prompt, /overall_soundscape: Natural environmental ambience and physical sounds follow the visible action\. No dialogue, spoken words, human voices, narration, singing, vocalizations, lip-sync, crowd chatter, television or radio voices\./)
+state.scene = 'Kierra sings softly while she waits.'
+assert.ok(errors(state).some(item => item.code === 'speech-disabled'))
 state = kitchen(); state.shots = [{ id: 's1', start: 0, end: 4, description: '', camera: {}, characterIds: [] }, { id: 's2', start: 4, end: 8, description: 'She turns.', camera: {}, characterIds: [] }]
 state.dialogue = [{ id: 'd1', shotId: 's1', at: 1, speakerIds: ['kierra'], language: 'English', text: 'I remember', delivery: 'quietly', continues: 'to' }, { id: 'd2', shotId: 's2', at: 4, speakerIds: ['kierra'], language: 'English', text: 'that room.', delivery: '', continues: 'from', voiceover: true }]
 output = compileScene(state)
@@ -153,6 +159,11 @@ output = compileScene(state)
 assert.match(output.prompt, /<Audio 1> is the voice source for <Subject 1> \(S1\)/)
 assert.match(output.prompt, /\[reference generation \+ audio reference\]/)
 assert.doesNotMatch(output.prompt.split('retention_analysis:')[1].split('detailed_description:')[0], /\(S1\)/)
+state.scene = 'Kierra waits silently by the counter.'
+state.noDialogue = true
+assert.ok(errors(state).some(item => item.code === 'speech-disabled'))
+state.noDialogue = false
+state.soundscape = value('Quiet room tone.')
 state.references[3].audio = { layer: 'soundtrack', relation: 'fully_copy', description: 'Entire original track' }
 assert.ok(errors(state).some(item => item.code === 'full-audio-conflict'))
 state = kitchen(); state.references.push({ id: 'video', file: { kind: 'video', path: 'v.mp4', name: 'Video' }, name: 'Movement', preserve: [], locks: [], observed: {}, source: 'USER', videoRole: 'motion', embeddedAudio: { layer: 'ambience', relation: 'reference', description: 'Rain texture' } }, { id: 'audio', file: { kind: 'audio', path: 'a.wav', name: 'Audio' }, name: 'Score', preserve: [], locks: [], observed: {}, source: 'USER', audio: { layer: 'music', relation: 'reference', description: 'Slow piano' } })

@@ -1,4 +1,4 @@
-export type View = 'create' | 'scratchpad' | 'ltx25' | 'music' | 'zimage' | 'referenceprep' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'queue' | 'library' | 'clipmaster' | 'movie' | 'settings'
+export type View = 'create' | 'continue' | 'scratchpad' | 'ltx25' | 'music' | 'zimage' | 'referenceprep' | 'characters' | 'hair' | 'wardrobes' | 'accessories' | 'locations' | 'queue' | 'library' | 'clipmaster' | 'movie' | 'settings'
 export type GenerationMode = 'text' | 'image' | 'frames' | 'reference'
 export type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
 export type MediaKind = 'image' | 'video' | 'audio'
@@ -341,6 +341,9 @@ export type AceStepGenerationOptions = {
 }
 
 export type GenerationOptions = {
+  latentCapture?: { filenamePrefix: string }
+  motionContext?: { latentPath: string; contextFrames: number; blendFrames: number; carryAudio: boolean; suppressAudio?: boolean }
+  continuationAssembly?: { sourceVideo: UploadedFile; trimFrames: number; blendFrames: number; useMotionTrim?: boolean }
   /** Explicit user override of scene validation; transport validation still runs. */
   ignoreSceneConflicts?: boolean
   sceneState?: import('./lib/scenePromptState').ScenePromptState
@@ -457,8 +460,33 @@ export type JobExecutionInfo = {
   gpuRouting?: string
 }
 
+export type H3RenderSettings = {
+  resolution: string
+  turbo: 'off' | '4' | '8' | 'fast'
+  turbo8Profile: Turbo8Profile
+  steps: number
+  sampler: string
+  scheduler: string
+  experimentalSampling: boolean
+  textEncoderPreference: 'fast' | 'quality'
+  refImageSize: 'match' | 'max'
+  sigmaShiftMode: 'model' | 'custom'
+  shiftVideo: number
+  shiftAudio: number
+  loraStrength: number
+  userLoras: AppliedLora[]
+  noDialogue: boolean
+  naturalMovement: boolean
+  clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted'
+  seed: number
+}
+
 export type GenerationJob = {
   id: string
+  outputName?: string
+  continuation?: { scriptId: string; beatId: string; sourceJobId?: string; beatSignature: string; requestedDuration?: number; deliveredDuration?: number }
+  latentFile?: string
+  latentPath?: string
   promptId?: string
   mode: GenerationMode
   prompt: string
@@ -468,6 +496,9 @@ export type GenerationJob = {
   progressLabel?: string
   currentStep?: number
   totalSteps?: number
+  samplerPass?: 'first' | 'refine'
+  refinementSteps?: number
+  refinementStepCostMultiplier?: number
   lastSamplerStepAt?: number
   estimatedSamplerStepMs?: number
   /** Timestamp when ComfyUI first confirmed that it began executing this prompt. */
@@ -482,6 +513,10 @@ export type GenerationJob = {
   thumbnailUrl?: string
   seed?: number
   referenceAssets?: string[]
+  referenceFiles?: MediaFile[]
+  continuityState?: import('./lib/scenePromptState').ScenePromptState
+  /** Content-generation controls inherited by continuation beats. */
+  renderSettings?: H3RenderSettings
   sourceMode?: 'ref2va-still'
   modelName?: string
   sampler?: string
@@ -530,6 +565,7 @@ export type DesktopApi = {
   setUiScale(scale: number): Promise<number>
   chooseDirectory(initialPath?: string): Promise<string | null>
   chooseMedia(type: MediaKind): Promise<{ path: string; name: string } | null>
+  chooseVideos(): Promise<Array<{ path: string; name: string }>>
   scanModels(settings: AppSettings): Promise<ModelFile[]>
   getComfyStatus(url: string): Promise<ComfyStatus>
   submitPrompt(url: string, prompt: unknown, clientId?: string): Promise<{ prompt_id: string; number?: number; node_errors?: unknown }>

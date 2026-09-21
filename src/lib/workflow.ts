@@ -65,6 +65,7 @@ export function buildMiniMaxWorkflow(
     images: UploadedFile[]
     videos: UploadedFile[]
     audios: UploadedFile[]
+    source?: UploadedFile
   },
 ): ComfyPrompt {
   if (options.turbo === 'fast' && options.mode !== 'text') throw new Error('FastVideo FastH3 supports text-to-audio-video only. Use the base MiniMax H3 model for image, first/last-frame, or reference generation.')
@@ -208,6 +209,19 @@ export function buildMiniMaxWorkflow(
     modelLink = ['88', 0]
     positive = ['88', 1]
   }
+  if (options.motionContext) {
+    if (options.motionContext.suppressAudio) {
+      // The wrapper treats a saved joint AV latent as both video and audio
+      // context. Use the lower-level node so No dialogue can retain the exact
+      // video latent tail without feeding the prior voice/audio latent back.
+      prompt['160'] = { class_type: 'MiniMaxH3LoadLatent', inputs: { latent_path: options.motionContext.latentPath, clip_index: 0, vae: videoVaeLink } }
+      prompt['161'] = { class_type: 'MiniMaxH3MotionContext', inputs: { conditioning: positive, latent: ['10', 1], vae: videoVaeLink, context_frames: ['160', 1], context_length: options.motionContext.contextFrames, encode_mode: 'video', anchor_mode: 'head', crop: 'disabled', audio_context_length: 0, audio_mode: 'timeline', video_context_latent: ['160', 0], target_start: 0 } }
+    } else {
+      prompt['160'] = { class_type: 'MiniMaxH3LoadLatent', inputs: { latent_path: options.motionContext.latentPath, clip_index: 0 } }
+      prompt['161'] = { class_type: 'MiniMaxH3VideoExtender', inputs: { conditioning: positive, latent: ['10', 1], vae: videoVaeLink, mode: 'always_extend', context_length: options.motionContext.contextFrames, encode_mode: 'video', anchor_mode: 'head', crop: 'disabled', audio_context_length: options.motionContext.contextFrames, audio_mode: options.motionContext.carryAudio ? 'timeline' : 'ref', prev_latent: ['160', 0], audio_vae: audioVaeLink } }
+    }
+    positive = ['161', 0]
+  }
   prompt['11'] = { class_type: 'RandomNoise', inputs: { noise_seed: options.seed } }
   prompt['12'] = { class_type: 'BasicGuider', inputs: { model: modelLink, conditioning: positive } }
   // Turbo 8 profiles are intentional, tested recipes—not an accidental custom
@@ -309,6 +323,19 @@ export function buildMiniMaxWorkflow(
     prompt['83'] = { class_type: 'CreateVideo', inputs: { images: ['82', 0], audio: ['17', 0], fps: 24, bit_depth: 8, color_space: 'sRGB' } }
     prompt['84'] = { class_type: 'SaveVideo', inputs: { video: ['83', 0], filename_prefix: `${options.filenamePrefix}_RTX_AI_2x`, format: 'auto', codec: 'auto' } }
   }
+  if (options.continuationAssembly) {
+    if (!uploads.source) throw new Error('Continuation assembly requires the completed source video upload.')
+    const previousFrames = addLoader(prompt, '170', 'video', uploadedName(uploads.source))
+    const trimFrames: number | Link = options.continuationAssembly.useMotionTrim && options.motionContext
+      ? ['161', 1]
+      : options.continuationAssembly.trimFrames
+    prompt['171'] = { class_type: 'MiniMaxH3LoopTrim', inputs: { images: ['16', 0], audio: ['17', 0], trim_frames: trimFrames, fps: 24, match_tail: true } }
+    prompt['172'] = { class_type: 'MiniMaxH3VideoMerge', inputs: { images_a: previousFrames, audio_a: ['1701', 1], images_b: ['171', 0], audio_b: ['171', 1], seam_smooth: 1, color_match: 'seam_fade', blend_frames: options.continuationAssembly.blendFrames, fps: 24 } }
+    prompt['18'] = { class_type: 'CreateVideo', inputs: { images: ['172', 0], audio: ['172', 1], fps: 24, bit_depth: 8, color_space: 'sRGB' } }
+  }
+  if (options.latentCapture) {
+    prompt['190'] = { class_type: 'MiniMaxH3SaveLatent', inputs: { latent: options.upscale?.type === 'refine' || options.upscale?.type === 'h3' ? ['111', 0] : ['15', 0], filename_prefix: options.latentCapture.filenamePrefix, clip_index: 1 } }
+  }
   return prompt
 }
 
@@ -397,5 +424,7 @@ export function continuationSourceCandidates(job: { localOutputPath?: string; ou
       return parsed.protocol === 'minimax-media:' && (parsed.hostname === 'local' || parsed.hostname === 'selected') ? parsed.searchParams.get('path') || undefined : undefined
     } catch { return undefined }
   })()
-  return [...new Set([job.localOutputPath, localFromUrl, resolvedOutput || undefined, job.outputUrl].filter((source): source is string => Boolean(source)))]
+  // Prefer a path resolved from the current output directory. Persisted jobs
+  // can retain an old localOutputPath after the output directory is corrected.
+  return [...new Set([resolvedOutput || undefined, localFromUrl, job.localOutputPath, job.outputUrl].filter((source): source is string => Boolean(source)))]
 }

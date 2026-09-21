@@ -1,29 +1,25 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Braces, Check, Clock3, Search, WandSparkles, X } from 'lucide-react'
-import { compileScratchpad } from '../lib/scratchpadCompiler'
+import { Check, Clock3, Search, WandSparkles, X } from 'lucide-react'
 import { promptCommandScore, promptPresetCategories, promptPresets } from '../lib/promptPresets'
 import type { PromptPreset, PromptPresetCategory } from '../types'
 import { H3PromptEditor, type H3PromptEditorHandle, type ProductionCommandTrigger } from './H3PromptEditor'
 
 type VideoPromptModalProps = {
   value: string
-  duration: number
   promptingTool: 'enhance' | 'timeline' | 'audio' | null
   onChange(value: string): void
   onPromptTool(tool: 'enhance' | 'timeline' | 'audio'): void
   onClose(): void
 }
 
-export function VideoPromptModal({ value, duration, promptingTool, onChange, onPromptTool, onClose }: VideoPromptModalProps) {
+export function VideoPromptModal({ value, promptingTool, onChange, onPromptTool, onClose }: VideoPromptModalProps) {
   const editorRef = useRef<H3PromptEditorHandle>(null)
   const dialogRef = useRef<HTMLElement>(null)
   const [commandTrigger, setCommandTrigger] = useState<ProductionCommandTrigger | null>(null)
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState<'all' | PromptPresetCategory>('all')
   const [active, setActive] = useState(0)
-  const [compiledOpen, setCompiledOpen] = useState(false)
-  const compiled = useMemo(() => compileScratchpad(value, 'h3', duration), [duration, value])
   const results = useMemo(() => promptPresets
     .filter(item => category === 'all' || item.category === category)
     .map(item => ({ item, score: promptCommandScore(item, query) }))
@@ -75,7 +71,7 @@ export function VideoPromptModal({ value, duration, promptingTool, onChange, onP
   return createPortal(<div className="video-prompt-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
     <section ref={dialogRef} className="video-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="video-prompt-modal-title" onKeyDown={trapFocus}>
       <header className="video-prompt-modal-header">
-        <span><strong id="video-prompt-modal-title">Prompt workspace</strong><small>Write at full size, insert production language, and inspect the exact H3 payload.</small></span>
+        <span><strong id="video-prompt-modal-title">Prompt workspace</strong><small>Write at full size and insert production language. The exact render prompt is in Scene details → Compiled.</small></span>
         <div>
           <button type="button" onClick={() => onPromptTool('timeline')} disabled={Boolean(promptingTool)}><Clock3 size={15} />{promptingTool === 'timeline' ? 'Building…' : 'Timeline'}</button>
           <button type="button" onClick={() => onPromptTool('enhance')} disabled={Boolean(promptingTool)}><WandSparkles size={15} />{promptingTool === 'enhance' ? 'Improving…' : 'Improve'}</button>
@@ -86,10 +82,6 @@ export function VideoPromptModal({ value, duration, promptingTool, onChange, onP
         <main className="video-prompt-modal-editor">
           <div className="video-prompt-modal-hints"><span><code>##</code> structured H3 tags</span><span><code>//</code> production commands</span><span>{value.length.toLocaleString()} characters</span></div>
           <H3PromptEditor ref={editorRef} idPrefix="video-prompt-modal" value={value} onChange={onChange} ariaLabel="Large video prompt editor" placeholder="Describe the scene. Type ## for H3 sections or // for production commands…" onProductionCommandChange={handleCommandTrigger} onProductionCommandKeyDown={handleEditorKeyDown} />
-          <section className={`video-prompt-compiled ${compiledOpen ? 'open' : ''}`}>
-            <button type="button" onClick={() => setCompiledOpen(open => !open)} aria-expanded={compiledOpen}><Braces size={14} /><span><strong>Compiled H3 payload</strong><small>{compiledOpen ? 'Hide exact render input' : 'Preview exact render input'}</small></span></button>
-            {compiledOpen && <pre>{compiled}</pre>}
-          </section>
         </main>
         <aside className="video-prompt-command-sidebar" aria-label="Production command browser">
           <header><span><strong><code>//</code> Production commands</strong><small>{commandTrigger ? 'Keep typing to filter; Enter inserts.' : 'Browse or type // in the editor.'}</small></span><em>{results.length}</em></header>

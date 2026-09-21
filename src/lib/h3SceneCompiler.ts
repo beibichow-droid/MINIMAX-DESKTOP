@@ -118,7 +118,8 @@ export function compileScene(state: ScenePromptState): CompiledScene {
     if (mode === 'Ref2VA' && ref.file.kind === 'image' && !ref.preserve.length && !ref.locks.length && !ref.anchor) error('role-required', `Choose what ${ref.name} contributes, or remove it.`, ref.id)
   }
   if (state.continuity.exactFrame && !openings.length) error('continuation-anchor', 'Frame-0 continuation is required, but no picture is assigned as the native Frame 0 anchor.')
-  if (state.noDialogue && (state.dialogue.length || /\b(?:says|whispers|shouts|speaks)\b|<d>/i.test(state.scene))) error('speech-disabled', 'Dialogue is present while No dialogue is enabled.')
+  const vocalDirection = /\b(?:says|whispers|shouts|speaks|asks|replies|sings|narrates)\b|<d>/i
+  if (state.noDialogue && (state.dialogue.length || vocalDirection.test(`${state.scene}\n${state.soundscape.value}`) || refs.some(ref => ref.audio?.layer === 'voice'))) error('speech-disabled', 'Dialogue, vocal direction, or a voice reference is present while No dialogue is enabled.')
   if (/<(?:Subject|Picture|Video|Audio)\s+\d+>|(?:subject_definitions|integrated_multimodal_description|retention_analysis):/i.test(state.scene)) warning('legacy-format', 'This scene contains compiled H3 syntax. Use Manual Override to preserve an existing H3 prompt, or replace it with a natural scene description.')
 
   const speakers: Record<string, string> = {}
@@ -272,9 +273,13 @@ export function compileScene(state: ScenePromptState): CompiledScene {
   }).join('\n')
   const audioLayer = (layer: string) => refs.filter(ref => ref.audio && (ref.audio.layer === layer || ref.audio.layer === 'soundtrack')).map(ref => `${labels.get(ref.id)}: ${ref.audio!.relation} - ${clean(ref.audio!.description)}.`).join(' ')
   const fullAudio = refs.some(ref => ref.audio?.relation === 'fully_copy')
-  const sound = [present(state.soundscape) || (fullAudio ? '' : 'Natural environmental ambience and physical sounds follow the visible action.'), audioLayer('ambience')].filter(Boolean).join(' ')
+  const sound = [
+    present(state.soundscape) || (fullAudio ? '' : 'Natural environmental ambience and physical sounds follow the visible action.'),
+    state.noDialogue && 'No dialogue, spoken words, human voices, narration, singing, vocalizations, lip-sync, crowd chatter, television or radio voices.',
+    audioLayer('ambience'),
+  ].filter(Boolean).join(' ')
   const music = [present(state.music), audioLayer('music')].filter(Boolean).join(' ') || 'N/A'
-  const continuity = [state.continuity.scene && 'Maintain established scene identity and environment; each shot has its own composition.', state.continuity.camera && 'Preserve screen direction and the established side of the action axis.', present(state.continuity.notes), state.naturalMovement && 'Living subjects breathe and blink subtly without adding new gestures.', state.noDialogue && 'No speech, singing, narration or lip-sync.'].filter(Boolean).join(' ')
+  const continuity = [state.continuity.scene && 'Maintain established scene identity and environment; each shot has its own composition.', state.continuity.camera && 'Preserve screen direction and the established side of the action axis.', present(state.continuity.notes), state.naturalMovement && 'Living subjects breathe and blink subtly without adding new gestures.', state.noDialogue && 'Audio rule: no speech, spoken words, dialogue, narration, voice-over, singing, vocalization or lip-sync. Keep mouths silent and closed except for natural breathing; use ambience and synchronized physical sounds only.'].filter(Boolean).join(' ')
   const task = refs.some(ref => ref.videoRole === 'editing') ? 'video editing' : refs.some(ref => ref.videoRole === 'continuation') ? 'video continuation' : 'reference generation'
   const audioTask = refs.some(ref => ref.audio?.relation === 'fully_copy' || ref.audio?.relation === 'partially_copy') ? ' + audio reuse' : refs.some(ref => ref.audio) ? ' + audio reference' : ''
   const alignment = mode === 'I2VA' ? 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.' : mode === 'FL2VA' ? `How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot ${shots.length}) aligns with the ${state.duration.toFixed(2)}-second mark of the target video.` : mode === 'L2VA' ? `How the reference pictures align with the target video — <Picture 1> (from [Shot ${shots.length}]) aligns with the ${state.duration.toFixed(2)}-second mark of the target video.` : ''
