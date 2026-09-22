@@ -91,6 +91,7 @@ import { appendLtxVisionGrounding, buildLtxImageHandoffPrompt } from './lib/ltxI
 import './video-workspace.css'
 import './studio-system.css'
 import './scratchpad.css'
+import './original-theme.css'
 import { buildCharacterIdentitySurveyPrompt } from './lib/characterSurvey'
 import { ACE_STEP_REQUIRED_NODES, buildAceStepWorkflow, inferAceStepSelections } from './lib/aceStepWorkflow'
 import { MUSIC3_REQUIRED_NODES, buildMusic3Workflow, inferMusic3Selection, type Music3GenerationOptions } from './lib/music3Workflow'

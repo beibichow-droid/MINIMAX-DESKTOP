@@ -10,6 +10,7 @@ import './styles/tokens.css'
 import './guided-studio.css'
 import './workspace-theme.css'
 import './movie-workspace.css'
+import './original-theme.css'
 
 installBrowserMock()
 
