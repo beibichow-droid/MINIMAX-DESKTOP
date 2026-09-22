@@ -1,6 +1,6 @@
 {
   "name": "oyama-ai-video-studio",
-  "version": "1.0.0-alpha.38",
+  "version": "1.0.0-alpha.50",
   "private": true,
   "description": "Local-first AI video studio powered by ComfyUI",
   "author": {
@@ -10,7 +10,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"pnpm dev:web\" \"pnpm dev:electron\"",
-    "dev:web": "vite --host 127.0.0.1",
+    "dev:web": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "dev:electron": "pnpm build:electron && wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 node scripts/launch-electron.cjs",
     "build": "pnpm typecheck && pnpm build:web && pnpm build:electron",
     "build:web": "vite build",

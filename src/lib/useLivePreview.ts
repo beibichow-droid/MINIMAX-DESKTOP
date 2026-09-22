@@ -38,6 +38,17 @@ function binaryPreviewImage(data: ArrayBuffer) {
 }
 
 function nodeStageLabel(node: string) {
+  const h3Stages: Record<string, string> = {
+    '161': 'Preparing motion context',
+    '170': 'Loading source video for continuation',
+    '1701': 'Loading source audio for continuation',
+    '171': 'Trimming continuity overlap',
+    '172': 'Merging source and new beat',
+    '173': 'Encoding new beat',
+    '174': 'Saving new beat',
+    '190': 'Saving reusable motion context',
+  }
+  if (h3Stages[node]) return h3Stages[node]
   if (/^UNETLoader$/i.test(node)) return 'Loading diffusion model'
   if (/^(CLIPLoader|DualCLIPLoader)$/i.test(node)) return 'Loading text encoder'
   if (/ModelAttentionBackend/i.test(node)) return 'Applying attention backend'
@@ -56,7 +67,7 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
   const [connected, setConnected] = useState(false)
   useEffect(() => {
     if (!url || !enabled) { setConnected(false); setPreview(null); return }
-    let stopped = false, active = '', blobUrl = '', sawH3Frames = false, samplerStage = ''
+    let stopped = false, active = '', blobUrl = '', sawH3Frames = false, samplerStage = '', lastPreviewAt = 0
     let samplerPass: LiveProgress['samplerPass']
     let socket: WebSocket
     let timer: ReturnType<typeof setTimeout>
@@ -113,6 +124,9 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
           }
           if (msg.type === 'execution_success') onProgress(promptId, { progress: 98, label: 'Finalizing saved output' })
           if (msg.type === 'minimax_h3_preview_override' && msg.data.image && promptId) {
+            const now = Date.now()
+            if (now - lastPreviewAt < 300) return
+            lastPreviewAt = now
             const mime = msg.data.mime ?? 'image/jpeg'
             if (!/^(?:image\/(?:jpeg|png|webp)|video\/mp4)$/.test(mime)) return
             let nextUrl: string
@@ -135,6 +149,9 @@ export function useLivePreview(url: string | undefined, enabled: boolean, onProg
             replacePreview({ promptId: msg.data.prompt_id ?? active, url: `minimax-media://comfy?url=${encodeURIComponent(upstream)}`, mime: 'image/jpeg', animated: false })
           }
         } else {
+          const now = Date.now()
+          if (now - lastPreviewAt < 300) return
+          lastPreviewAt = now
           const promptId = active
           const binary = event.data instanceof ArrayBuffer ? event.data : event.data instanceof Blob ? await event.data.arrayBuffer() : null
           if (!binary || binary.byteLength <= 8 || !promptId) return

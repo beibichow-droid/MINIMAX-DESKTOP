@@ -63,6 +63,9 @@ contextBridge.exposeInMainWorld('minimax', {
   syncMobileCharacters: (characters: unknown[]) => ipcRenderer.invoke('lan:sync-characters', characters),
   rotateLanToken: () => ipcRenderer.invoke('lan:rotate-token'),
   setWindowAlwaysOnTop: (enabled: boolean) => ipcRenderer.invoke('window:set-always-on-top', enabled),
+  openDevTools: () => ipcRenderer.invoke('window:open-dev-tools'),
   openStudio: () => ipcRenderer.invoke('window:open-studio'),
   openMovieEditor: () => ipcRenderer.invoke('window:open-movie-editor'),
+  exportVideo: (source: string, suggestedName: string) => ipcRenderer.invoke('video:export', source, suggestedName),
+  prepareContinuationSource: (sources: string[], throughTime: number | null, outputDirectory: string, ffmpegPath: string) => ipcRenderer.invoke('video:continuation-source', sources, throughTime, outputDirectory, ffmpegPath),
 })

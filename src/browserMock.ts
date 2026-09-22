@@ -109,6 +109,7 @@ export function installBrowserMock() {
     },
     exportWorkflowJson: async (suggestedName) => `C:\\Users\\James\\Documents\\${suggestedName}`,
     setUiScale: async (scale) => Math.round(Math.max(.75, Math.min(1.5, scale)) * 100),
+    openDevTools: async () => { throw new Error('Developer tools are available in the Electron desktop app.') },
     chooseDirectory: async () => null,
     chooseMedia: async () => null,
     chooseVideos: async () => [],
@@ -209,6 +210,8 @@ export function installBrowserMock() {
     setWindowAlwaysOnTop: async (enabled) => enabled,
     openStudio: async () => { if (window.opener && !window.opener.closed) window.opener.focus(); else window.open(location.pathname, 'oyama-studio') },
     openMovieEditor: async () => { window.open(`${location.pathname}?movieEditor=1`, 'oyama-ai-movie', 'popup=yes,width=1440,height=920,resizable=yes') },
+    exportVideo: async () => { throw new Error('Video export requires the desktop app.') },
+    prepareContinuationSource: async (sources) => sources[0],
   }
   window.minimax = api
 }

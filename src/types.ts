@@ -103,7 +103,7 @@ export type AppSettings = {
   generationDefaults: GenerationDefaults
 }
 
-export type ClipItem = { id: string; name: string; source: string; createdAt: number; start?: number; end?: number; duration?: number; mediaKind?: MediaKind }
+export type ClipItem = { id: string; name: string; source: string; createdAt: number; start?: number; end?: number; duration?: number; mediaKind?: MediaKind; thumbnailUrl?: string }
 export type ClipProject = { id: string; name: string; createdAt: number; updatedAt: number; media: ClipItem[]; clips: ClipItem[] }
 
 /** Frame-based timing keeps edits stable across save/load and avoids accumulated float drift. */
@@ -380,6 +380,7 @@ export type GenerationOptions = {
 export type ComfyStatus = {
   connected: boolean
   latencyMs: number
+  detectedOutputDirectory?: string
   stats?: {
     system?: {
       os?: string
@@ -482,6 +483,8 @@ export type H3RenderSettings = {
 }
 
 export type GenerationJob = {
+  segmentOutputUrl?: string
+  segmentOutputPath?: string
   id: string
   outputName?: string
   continuation?: { scriptId: string; beatId: string; sourceJobId?: string; beatSignature: string; requestedDuration?: number; deliveredDuration?: number }
@@ -563,6 +566,7 @@ export type DesktopApi = {
   factoryResetSettings(confirmation: string): Promise<void>
   exportWorkflowJson(suggestedName: string, workflow: unknown): Promise<string | null>
   setUiScale(scale: number): Promise<number>
+  openDevTools(): Promise<void>
   chooseDirectory(initialPath?: string): Promise<string | null>
   chooseMedia(type: MediaKind): Promise<{ path: string; name: string } | null>
   chooseVideos(): Promise<Array<{ path: string; name: string }>>
@@ -580,6 +584,8 @@ export type DesktopApi = {
   getVideoThumbnail(source: string, ffmpegPath: string): Promise<string>
   extractVideoFrames(source: string, positions: number[], outputDirectory: string, ffmpegPath: string): Promise<Array<{ path: string; name: string }>>
   trimVideo(source: string, start: number, end: number, outputDirectory: string, ffmpegPath: string): Promise<{ path: string; name: string }>
+  exportVideo(source: string, suggestedName: string): Promise<string | null>
+  prepareContinuationSource(sources: string[], throughTime: number | null, outputDirectory: string, ffmpegPath: string): Promise<string>
   getVideoMetadata(source: string, ffmpegPath: string): Promise<{ duration: number; fps: number; frameCount: number; width: number; height: number }>
   extractClipMasterFrames(source: string, frames: Array<{ index: number; role: 'start' | 'end' | 'frame' }>, outputDirectory: string, ffmpegPath: string, sourceName: string): Promise<{ folder: string; files: Array<{ path: string; name: string; index: number; role: 'start' | 'end' | 'frame' }> }>
   chooseClipMasterExportPath(outputDirectory: string, sourceName: string): Promise<string | null>

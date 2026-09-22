@@ -11,15 +11,17 @@ import { SceneContextPanels, SceneSelectionInspector } from './components/SceneC
 import { H3PromptEditor } from './components/H3PromptEditor'
 import { VideoPromptModal } from './components/VideoPromptModal'
 import { VideoCompare } from './components/VideoCompare'
+import { VideoExportButtons } from './components/VideoExportButtons'
 import { ContinueWorkspace, type ContinueBeat, type ContinueMethod, type ContinueScript } from './components/ContinueWorkspace'
-import { continuationBeatSignature, continuationOutputName, continuationPreviousAction, continuationTiming } from './lib/continuation'
+import { continuationReferenceReplaced, continuationSourceState, continuationBeatSignature, continuationOutputName, continuationPreviousAction, continuationTiming, nextContinuationOpenRequest, type ContinuationOpenRequest } from './lib/continuation'
 import { buildCharacterDialogueRequest } from './lib/dialogPolicy'
 import { compileScene, promptMarkupLegend } from './lib/h3SceneCompiler'
 import { bindSceneReferences, createSceneState, defaultPreservedAttributes, resizeScene, setFrameZeroGuide, value, type ScenePromptState, type SceneReference } from './lib/scenePromptState'
 import { MOVIE_HANDOFF_KEY, parseMovieHandoff, type MovieFrameTarget } from './lib/movieHandoff'
 import { MovieEditor } from './components/MovieEditor'
+import { MovieMediaThumbnail } from './components/MovieMediaThumbnail'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import QRCode from 'qrcode'
 import { createId } from './lib/createId'
 import {
@@ -462,6 +464,18 @@ function withoutPreview(file: MediaFile | null) {
   return stored
 }
 
+function compactSceneState(state: ScenePromptState): ScenePromptState {
+  return { ...state, references: state.references.map(ref => ({ ...ref, file: withoutPreview(ref.file)! })) }
+}
+
+function compactJob(job: GenerationJob): GenerationJob {
+  return {
+    ...job,
+    referenceFiles: job.referenceFiles?.map(file => withoutPreview(file)!),
+    continuityState: job.continuityState && compactSceneState(job.continuityState),
+  }
+}
+
 const modeInfo: Array<{ id: GenerationMode; label: string; note: string; icon: typeof Film }> = [
   { id: 'text', label: 'Text video', note: 'Create from a scene prompt', icon: WandSparkles },
   { id: 'image', label: 'Image video', note: 'Animate one opening frame', icon: ImageIcon },
@@ -581,7 +595,15 @@ function playableOutputUrl(value?: string) {
 const initialJobs = (): GenerationJob[] => {
   try {
     const stored = JSON.parse(localStorage.getItem('minimax.jobs') ?? '[]') as GenerationJob[]
-    return stored.map((job) => ({ ...job, outputUrl: playableOutputUrl(job.outputUrl) }))
+    return stored.map((job) => ({
+      ...job,
+      outputUrl: playableOutputUrl(job.outputUrl),
+      ...(!job.promptId && ['queued', 'running'].includes(job.status) ? {
+        status: 'failed' as const,
+        error: 'The app lost this render before it received a prompt ID. Check ComfyUI queue or history before retrying to avoid a duplicate; your source and script are safe.',
+        progressLabel: 'Submission interrupted',
+      } : {}),
+    }))
   } catch {
     return []
   }
@@ -650,8 +672,15 @@ function syncReferencePrompt(value: string, previous: MovieReferenceBinding[], n
   }
   for (const line of previousInstructions) result = result.replace(line, '')
   result = result.replace(/References:\s*(?=\n|$)/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
-  const nextInstructions = composeReferenceInstructions(next).join(' ')
-  return [result, nextInstructions ? `References: ${nextInstructions}` : ''].filter(Boolean).join('\n\n')
+  // The compiler derives reference direction from the active bindings. Keep
+  // generated assignment prose out of the editable scene so it cannot linger.
+  void next
+  return result
+}
+
+function removeLegacyReferencePrompt(state: ScenePromptState): ScenePromptState {
+  const scene = syncReferencePrompt(state.scene, [], [])
+  return scene === state.scene ? state : { ...state, scene }
 }
 
 function queuePromptState(queue: unknown, promptId: string): 'queued' | 'running' | null {
@@ -720,7 +749,8 @@ function App() {
   const [bootError, setBootError] = useState('')
   const [bootAttempt, setBootAttempt] = useState(0)
   const { persist, failedKeys, retry: retryLocalSave } = useLocalPersistence()
-  const [continuationSourceId, setContinuationSourceId] = useState<string | null>(null)
+  const [continuationPreparing, setContinuationPreparing] = useState(false)
+  const [continuationOpenRequest, setContinuationOpenRequest] = useState<ContinuationOpenRequest>({ id: 0, sourceId: null })
   const mainAreaRef = useRef<HTMLElement>(null)
   useEffect(() => { mainAreaRef.current?.scrollTo({ top: 0, left: 0 }) }, [view])
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 680)
@@ -730,10 +760,13 @@ function App() {
   const [models, setModels] = useState<ModelFile[]>([])
   const [scanning, setScanning] = useState(false)
   const [status, setStatus] = useState<ComfyStatus>({ connected: false, latencyMs: 0 })
+  // The active ComfyUI process is authoritative while connected. This keeps a
+  // stale saved preference from making a successful render appear to vanish.
+  const activeOutputDirectory = status.detectedOutputDirectory?.trim() || settings?.outputDirectory || ''
   const [checking, setChecking] = useState(false)
   const [gpu, setGpu] = useState<GpuTelemetry | null>(null)
   const [renderBenchmarks, setRenderBenchmarks] = useState<RenderBenchmark[]>([])
-  const [sceneState, setSceneState] = useState<ScenePromptState>(() => persisted.sceneState?.version === 1 ? persisted.sceneState : { ...importSceneDraft(persisted.prompt, persisted.duration, persisted.mode), noDialogue: persisted.noDialogue, naturalMovement: persisted.naturalMovement })
+  const [sceneState, setSceneState] = useState<ScenePromptState>(() => removeLegacyReferencePrompt(persisted.sceneState?.version === 1 ? persisted.sceneState : { ...importSceneDraft(persisted.prompt, persisted.duration, persisted.mode), noDialogue: persisted.noDialogue, naturalMovement: persisted.naturalMovement }))
   const mode = sceneState.mode, prompt = sceneState.scene, duration = sceneState.duration
   const setMode = (mode: GenerationMode) => setSceneState(current => ({ ...current, mode }))
   const setPrompt = (next: string | ((current: string) => string)) => setSceneState(current => ({ ...current, scene: typeof next === 'function' ? next(current.scene) : next }))
@@ -888,8 +921,12 @@ function App() {
   const onLiveProgress = useCallback((id: string, update: LiveProgress) => {
     if (!id) return
     const receivedAt = Date.now()
-    setJobs((current) => current.map((j) => {
+    setJobs((current) => {
+      let changed = false
+      const nextJobs = current.map((j) => {
       if (j.promptId !== id || !['running', 'queued'].includes(j.status)) return j
+      if (j.status === 'running' && j.progressLabel === update.label && (update.currentStep === undefined || update.currentStep === j.currentStep) && (update.totalSteps === undefined || update.totalSteps === j.totalSteps) && (update.progress === undefined || update.progress <= j.progress) && (update.samplerPass === undefined || update.samplerPass === j.samplerPass)) return j
+      changed = true
       const samplerPass = update.samplerPass ?? j.samplerPass
       const passChanged = Boolean(update.samplerPass && update.samplerPass !== j.samplerPass)
       const currentStep = passChanged ? update.currentStep ?? 0 : update.currentStep ?? j.currentStep
@@ -924,7 +961,9 @@ function App() {
       return stageChanged && (!update.currentStep || samplerMilestone)
         ? appendComfyActivity(next, { at: receivedAt, level: 'info', message: update.label })
         : next
-    }))
+      })
+      return changed ? nextJobs : current
+    })
   }, [])
   // Keep the lightweight ComfyUI event socket active even when image previews
   // are hidden so queue, node, and sampler-step progress remain real-time.
@@ -962,9 +1001,8 @@ function App() {
   const pendingH3ProJob = jobs.find((job) => job.h3ProReviewPending && job.status === 'completed' && Boolean(job.outputUrl))
   useEffect(() => {
     if (!pendingJobs.length) return
-    // A quarter-second clock keeps the sampler countdown useful without
-    // imposing a noticeable render-time cost on the interface.
-    const timer = window.setInterval(() => setRuntimeNow(Date.now()), 250)
+    // Elapsed time needs seconds, not four full workspace renders per second.
+    const timer = window.setInterval(() => setRuntimeNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [pendingJobs.length])
   const activeRenderRuntime = activeRenderJob
@@ -1157,16 +1195,47 @@ function App() {
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [lanOpen])
 
+  const jobsToPersist = useRef(jobs)
+  const jobsPersistTimer = useRef<number | null>(null)
+  const persistedJobCheckpoint = useRef(jobs.slice(0, 100).map(job => `${job.id}:${job.promptId ?? ''}:${job.status}`).join('|'))
+  jobsToPersist.current = jobs
   useEffect(() => {
-    persist('minimax.jobs', jobs.slice(0, 100))
+    const checkpoint = jobs.slice(0, 100).map(job => `${job.id}:${job.promptId ?? ''}:${job.status}`).join('|')
+    if (checkpoint !== persistedJobCheckpoint.current) {
+      persistedJobCheckpoint.current = checkpoint
+      if (jobsPersistTimer.current !== null) window.clearTimeout(jobsPersistTimer.current)
+      jobsPersistTimer.current = null
+      persist('minimax.jobs', jobs.slice(0, 100).map(compactJob))
+      return
+    }
+    // Sampler progress can arrive many times per second. Persist the latest
+    // snapshot on a fixed cadence, even during a long continuous render.
+    if (jobsPersistTimer.current !== null) return
+    jobsPersistTimer.current = window.setTimeout(() => {
+      jobsPersistTimer.current = null
+      persist('minimax.jobs', jobsToPersist.current.slice(0, 100).map(compactJob))
+    }, 1200)
   }, [jobs, persist])
+  useEffect(() => {
+    const flush = (force = false) => {
+      if (!force && document.visibilityState !== 'hidden') return
+      if (jobsPersistTimer.current !== null) window.clearTimeout(jobsPersistTimer.current)
+      jobsPersistTimer.current = null
+      persist('minimax.jobs', jobsToPersist.current.slice(0, 100).map(compactJob))
+    }
+    const onVisibilityChange = () => flush()
+    const onPageHide = () => flush(true)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('pagehide', onPageHide)
+    return () => { document.removeEventListener('visibilitychange', onVisibilityChange); window.removeEventListener('pagehide', onPageHide); if (jobsPersistTimer.current !== null) window.clearTimeout(jobsPersistTimer.current) }
+  }, [persist])
 
   useEffect(() => {
     if (!settings?.ffmpegPath) return
-    const pending = jobs.find(job => job.status === 'completed' && job.mediaType !== 'image' && job.mediaType !== 'audio' && job.localOutputPath && !job.thumbnailUrl && !thumbnailAttempts.current.has(job.id))
-    if (!pending?.localOutputPath) return
+    const pending = jobs.find(job => job.status === 'completed' && job.mediaType !== 'image' && job.mediaType !== 'audio' && (job.localOutputPath || job.outputUrl) && (!job.thumbnailUrl || !job.thumbnailUrl.includes('&v=2')) && !thumbnailAttempts.current.has(job.id))
+    if (!pending) return
     thumbnailAttempts.current.add(pending.id)
-    void window.minimax.getVideoThumbnail(pending.localOutputPath, settings.ffmpegPath)
+    void window.minimax.getVideoThumbnail(pending.localOutputPath || pending.outputUrl!, settings.ffmpegPath)
       .then(thumbnailUrl => { setJobs(current => current.map(job => job.id === pending.id ? { ...job, thumbnailUrl } : job)) })
       .catch(() => setThumbnailScanNonce(value => value + 1))
   }, [jobs, settings?.ffmpegPath, thumbnailScanNonce])
@@ -1230,7 +1299,7 @@ function App() {
 
   useEffect(() => {
     const workspace: PersistedWorkspace = {
-      sceneState: { ...sceneState, references: sceneState.references.map(ref => ({ ...ref, file: withoutPreview(ref.file)! })) },
+      sceneState: compactSceneState(sceneState),
       mode, prompt, duration, resolution, turbo, steps, sampler, scheduler, experimentalSampling, refImageSize, noDialogue, naturalMovement, clothingPolicy,
       sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras, seed, ref2vaSeed, seedLocked, advanced, liveEnabled, livePreviewMode, previewModeVersion: 1,
       upscaleMode, h3ProReview, h3ProRefineSteps, h3RefineSteps, h3RefineDenoise, turbo8Profile, rtxModel, firstFrame: withoutPreview(firstFrame), lastFrame: withoutPreview(lastFrame),
@@ -1273,27 +1342,33 @@ function App() {
 
   useEffect(() => {
     if (!settings || !pendingKey || !status.connected) return
+    const historyInFlight = new Set<string>()
+    let queueInFlight = false
+    let disposed = false
     const timer = window.setInterval(() => {
       for (const job of jobsRef.current.filter((j) => j.status === 'queued' || j.status === 'running')) {
         const promptId = job.promptId
-        if (!promptId) continue
+        if (!promptId || historyInFlight.has(promptId)) continue
+        historyInFlight.add(promptId)
         void window.minimax.getHistory(settings.comfyUrl, promptId).then(async (history) => {
+          if (disposed) return
           const entry = history[promptId] as { status?: { status_str?: string; completed?: boolean; messages?: unknown[] } } | undefined
           const mediaType = job.mediaType ?? 'video'
           const outputUrl = playableOutputUrl(extractOutputUrl(history, promptId, settings.comfyUrl, mediaType))
           const terminalState = comfyTerminalState(entry)
           if (terminalState === 'failed') {
             const historyEvents = comfyHistoryActivity(entry?.status?.messages).map((event) => ({ ...event, at: Date.now() }))
+            const failureDetail = [...historyEvents].reverse().find(event => event.level === 'error')?.message
             setJobs((current) => current.map((item) => {
               if (item.id !== job.id) return item
-              const failed = { ...item, status: 'failed' as const, error: 'ComfyUI reported an execution error. The original may still be saved if upscaling failed.' }
+              const failed = { ...item, status: 'failed' as const, error: failureDetail ? `ComfyUI execution failed: ${failureDetail}` : 'ComfyUI reported an execution error. Open render activity for details; the original may still be saved if upscaling failed.' }
               return historyEvents.reduce((next, event) => appendComfyActivity(next, event), appendComfyActivity(failed, { at: Date.now(), level: 'error', message: 'ComfyUI reported an execution error.' }))
             }))
           } else if (mediaType === 'image' && outputUrl && terminalState === 'completed') {
             const outputFile = extractOutputFile(history, promptId, 'image')
             if (!outputFile) return
             try {
-              const saved = await window.minimax.saveStillImage(settings.comfyUrl, outputFile, settings.outputDirectory)
+              const saved = await window.minimax.saveStillImage(settings.comfyUrl, outputFile, activeOutputDirectory)
               const localUrl = await window.minimax.mediaUrl(saved.path)
               setJobs((current) => current.map((item) => item.id === job.id ? appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: saved.path, progressLabel: 'Reference still ready' }, { at: Date.now(), level: 'success', message: 'Output saved locally and ready to use.' }) : item))
             } catch (error) {
@@ -1303,12 +1378,15 @@ function App() {
             const outputFile = extractOutputFile(history, promptId, mediaType)
             // Resolve the exact output reported by ComfyUI. Never credit a
             // concurrent render merely because it is the newest disk file.
-            const localOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
+            const localOutput = outputFile ? await window.minimax.resolveOutput(activeOutputDirectory, outputFile) : null
             // Movie continuity needs a local file, not ComfyUI's /view URL.
             // Store a playable local URL on the planner while retaining the
             // exact filesystem path on the job for frame extraction.
             const localUrl = localOutput ? await window.minimax.mediaUrl(localOutput) : outputUrl
-            const latentPath = job.latentFile ? await window.minimax.resolveOutput(settings.outputDirectory, { filename: job.latentFile.split('/').at(-1)!, subfolder: 'h3_context', type: 'output' }).catch(() => null) : null
+            const segmentFile = job.continuation ? extractOutputFile(history, promptId, 'video', '174') : undefined
+            const segmentOutputPath = segmentFile ? await window.minimax.resolveOutput(activeOutputDirectory, segmentFile).catch(() => null) : null
+            const segmentOutputUrl = segmentOutputPath ? await window.minimax.mediaUrl(segmentOutputPath) : segmentFile ? extractOutputUrl({ [promptId]: { outputs: { '19': { videos: [segmentFile] } } } }, promptId, settings.comfyUrl) : undefined
+            const latentPath = job.latentFile ? await window.minimax.resolveOutput(activeOutputDirectory, { filename: job.latentFile.split('/').at(-1)!, subfolder: 'h3_context', type: 'output' }).catch(() => null) : null
             const completedMetadata = localOutput && job.continuation
               ? await window.minimax.getVideoMetadata(localOutput, settings.ffmpegPath).catch(() => null)
               : null
@@ -1321,10 +1399,10 @@ function App() {
               if (localOutput) extractionError = await extractAutomatedReferenceSet('location', job.locationProjectId, localOutput, job.duration, settings)
             }
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
-            setJobs((current) => current.map((item) => item.id === job.id ? appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput ?? undefined, latentPath: latentPath ?? undefined, duration: completedMetadata?.duration ?? item.duration, width: completedMetadata?.width ?? item.width, height: completedMetadata?.height ?? item.height }, { at: Date.now(), level: 'success', message: item.latentFile ? 'Video and synchronized H3 AV latent saved for continuation.' : 'Output saved locally and ready to use.' }) : item))
+            setJobs((current) => current.map((item) => item.id === job.id ? appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput ?? undefined, latentPath: latentPath ?? undefined, segmentOutputPath: segmentOutputPath ?? undefined, segmentOutputUrl, duration: completedMetadata?.duration ?? item.duration, width: completedMetadata?.width ?? item.width, height: completedMetadata?.height ?? item.height }, { at: Date.now(), level: 'success', message: item.latentFile ? 'Video and synchronized H3 AV latent saved for continuation.' : 'Output saved locally and ready to use.' }) : item))
           } else if (terminalState === 'completed') {
             const outputFile = extractOutputFile(history, promptId, mediaType)
-            const localOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
+            const localOutput = outputFile ? await window.minimax.resolveOutput(activeOutputDirectory, outputFile) : null
             const localUrl = localOutput ? await window.minimax.mediaUrl(localOutput) : null
             if (localOutput) recordCharacterTurntable(job.characterProjectId, localOutput)
             if (localOutput) recordLocationWalkthrough(job.locationProjectId, localOutput)
@@ -1332,24 +1410,41 @@ function App() {
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
             setJobs((current) => current.map((item) => item.id === job.id ? localOutput && localUrl ? appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput }, { at: Date.now(), level: 'success', message: 'Output saved locally and ready to use.' }) : appendComfyActivity({ ...item, status: 'failed', progress: 100, renderDurationMs: Date.now() - item.createdAt, error: 'ComfyUI completed this prompt, but no matching output was found. Check the output folder and ComfyUI history.' }, { at: Date.now(), level: 'error', message: 'ComfyUI completed, but no matching output could be resolved.' }) : item))
           }
-        }).catch(() => undefined)
+        }).catch(() => undefined).finally(() => historyInFlight.delete(promptId))
       }
+      if (queueInFlight) return
+      queueInFlight = true
       const checkedAt = Date.now()
-      void window.minimax.getQueue(settings.comfyUrl).then((queue) => setJobs((current) => current.map((job) => {
+      void window.minimax.getQueue(settings.comfyUrl).then((queue) => { if (disposed) return; setJobs((current) => {
+        let changed = false
+        const next = current.map((job) => {
         if (!job.promptId || !['queued', 'running'].includes(job.status)) return job
         const queueState = queuePromptState(queue, job.promptId)
-        if (queueState === 'running') return job.status === 'running' && !job.queueMissingAt && !job.queuePosition ? job : appendComfyActivity({ ...job, status: 'running', startedAt: job.startedAt ?? checkedAt, queueMissingAt: undefined, queuePosition: undefined, progressLabel: 'ComfyUI started rendering' }, { at: checkedAt, level: 'info', message: 'ComfyUI accepted the workflow and began executing it.' })
+        if (queueState === 'running') {
+          if (job.status === 'running' && !job.queueMissingAt && !job.queuePosition) return job
+          changed = true
+          return appendComfyActivity({ ...job, status: 'running', startedAt: job.startedAt ?? checkedAt, queueMissingAt: undefined, queuePosition: undefined, progressLabel: 'ComfyUI started rendering' }, { at: checkedAt, level: 'info', message: 'ComfyUI accepted the workflow and began executing it.' })
+        }
         if (queueState === 'queued') {
           const queuePosition = queuePromptPosition(queue, job.promptId)
-          return job.status === 'queued' && !job.queueMissingAt && job.queuePosition === queuePosition ? job : appendComfyActivity({ ...job, status: 'queued', queueMissingAt: undefined, queuePosition, progress: Math.min(job.progress, 8), progressLabel: 'Waiting in the ComfyUI queue' }, { at: checkedAt, level: 'info', message: `Waiting in the ComfyUI queue${queuePosition ? ` · position ${queuePosition}` : ''}.` })
+          if (job.status === 'queued' && !job.queueMissingAt && job.queuePosition === queuePosition) return job
+          changed = true
+          return appendComfyActivity({ ...job, status: 'queued', queueMissingAt: undefined, queuePosition, progress: Math.min(job.progress, 8), progressLabel: 'Waiting in the ComfyUI queue' }, { at: checkedAt, level: 'info', message: `Waiting in the ComfyUI queue${queuePosition ? ` · position ${queuePosition}` : ''}.` })
         }
         const missingSince = job.queueMissingAt ?? checkedAt
-        if (checkedAt - missingSince < 7_000) return appendComfyActivity({ ...job, queueMissingAt: missingSince, progressLabel: 'Resolving ComfyUI completion…' }, { at: checkedAt, level: 'warning', message: 'Prompt is no longer in the queue; resolving ComfyUI history before marking it failed.' })
+        if (checkedAt - missingSince < 30_000) {
+          if (job.queueMissingAt) return job
+          changed = true
+          return appendComfyActivity({ ...job, queueMissingAt: missingSince, progressLabel: 'ComfyUI finished; waiting for saved output…' }, { at: checkedAt, level: 'warning', message: 'Prompt left the queue; waiting for ComfyUI history and output persistence.' })
+        }
+        changed = true
         return appendComfyActivity({ ...job, status: 'failed', queueMissingAt: undefined, error: 'ComfyUI no longer reports this prompt in its queue or history. It may have been interrupted, cleared, or rejected before execution.' }, { at: checkedAt, level: 'error', message: 'Prompt disappeared from the ComfyUI queue and history.' })
-      }))).catch(() => undefined)
+        })
+        return changed ? next : current
+      }) }).catch(() => undefined).finally(() => { queueInFlight = false })
     }, 1000)
-    return () => window.clearInterval(timer)
-  }, [pendingKey, settings, status.connected])
+    return () => { disposed = true; window.clearInterval(timer) }
+  }, [activeOutputDirectory, pendingKey, settings, status.connected])
 
   const chooseMedia = async (kind: MediaKind, setter: (file: MediaFile) => void) => {
     const picked = await window.minimax.chooseMedia(kind)
@@ -1362,13 +1457,13 @@ function App() {
   const extractCompletedVideoFinalFrame = async (job: GenerationJob) => {
     if (!settings) throw new Error('Open Settings and configure the output folder first.')
     const outputFile = job.outputUrl ? outputFileFromUrl(job.outputUrl) : undefined
-    const resolvedOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
+    const resolvedOutput = outputFile ? await window.minimax.resolveOutput(activeOutputDirectory, outputFile) : null
     const candidates = continuationSourceCandidates(job, resolvedOutput)
     if (!candidates.length) throw new Error('This completed job has no saved video location. Open the video in Library and verify that its output still exists.')
     let lastError = ''
     for (const source of candidates) {
       try {
-        return await window.minimax.extractVideoFrame(source, 'last', settings.outputDirectory, settings.ffmpegPath)
+        return await window.minimax.extractVideoFrame(source, 'last', activeOutputDirectory, settings.ffmpegPath)
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error)
       }
@@ -1377,8 +1472,7 @@ function App() {
   }
 
   const startVideoContinuation = async (job: GenerationJob) => {
-    setContinuationSourceId(job.id)
-    setView('continue')
+    setContinuationOpenRequest(current => nextContinuationOpenRequest(current, job.id))
   }
 
   const addVideoLastFrameAsReference = async (job: GenerationJob, opening: { mode: 'match' | 'reframe' | 'arc'; cameraAngle?: string }) => {
@@ -1462,6 +1556,8 @@ function App() {
     // have been inserted by an earlier version before the render-time composer
     // attaches the current assignment instructions.
     setPrompt((current) => syncReferencePrompt(current, [...previous, ...next], []))
+    setPromptSuggestion('')
+    setPromptSuggestionId('')
     return images
   }
 
@@ -1501,6 +1597,9 @@ function App() {
         return [...images, ...standalone].slice(0, 9)
       })
       managedLibraryReferencePaths.current = nextPaths
+      setPrompt(current => syncReferencePrompt(current, next, []))
+      setPromptSuggestion('')
+      setPromptSuggestionId('')
       setSceneState(current => ({ ...current }))
     })
     return () => { disposed = true }
@@ -1570,7 +1669,7 @@ function App() {
   const createVideoReferenceClip = async (start: number, end: number) => {
     if (!settings || !videoClipDraft) return
     const source = videoClipDraft.source
-    const result = await window.minimax.trimVideo(source.path, start, end, settings.outputDirectory, settings.ffmpegPath)
+    const result = await window.minimax.trimVideo(source.path, start, end, activeOutputDirectory, settings.ffmpegPath)
     const clipped: MediaFile = { ...result, kind: 'video', clip: { sourcePath: source.path, sourceName: source.name, start, end } }
     setReferenceVideos((current) => videoClipDraft.replaceIndex === undefined
       ? current.length < 3 ? [...current, clipped] : current
@@ -1733,7 +1832,7 @@ function App() {
 
   const captureWorkspaceProject = (scope: WorkspaceProjectScope): Record<string, unknown> => {
     if (scope === 'create') return {
-      sceneState: { ...sceneState, references: sceneState.references.map(ref => ({ ...ref, file: withoutPreview(ref.file)! })) },
+      sceneState: compactSceneState(sceneState),
       mode, prompt, duration, resolution, turbo, steps, sampler, scheduler, experimentalSampling, refImageSize, noDialogue, naturalMovement, clothingPolicy, sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras,
       seed, ref2vaSeed, seedLocked, advanced, liveEnabled, livePreviewMode, previewModeVersion: 1, upscaleMode, h3ProReview, h3ProRefineSteps, h3RefineSteps, h3RefineDenoise, textEncoderPreference, turbo8Profile, rtxModel, firstFrame: withoutPreview(firstFrame), lastFrame: withoutPreview(lastFrame),
       referenceImages: referenceImages.map((file) => withoutPreview(file)), referenceVideos: referenceVideos.map((file) => withoutPreview(file)), referenceAudios: referenceAudios.map((file) => withoutPreview(file)), selectedReferenceCharacterIds, selectedReferenceLocationIds,
@@ -1773,7 +1872,7 @@ function App() {
       setActiveWorkspaceProjectId(project.id)
       const saved = { ...workspaceDefaults, ...project.snapshot } as PersistedWorkspace
       if (project.snapshot.previewModeVersion !== 1 && saved.livePreviewMode === 'standard') saved.livePreviewMode = 'auto'
-      setSceneState(saved.sceneState?.version === 1 ? saved.sceneState : { ...importSceneDraft(saved.prompt, saved.duration, saved.mode), noDialogue: saved.noDialogue, naturalMovement: saved.naturalMovement }); setResolution(saved.resolution); setTurbo(saved.turbo); setSteps(saved.steps); setSampler(saved.sampler); setScheduler(saved.scheduler); setExperimentalSampling(saved.experimentalSampling); setRefImageSize(saved.refImageSize); setNoDialogue(saved.noDialogue); setNaturalMovement(saved.naturalMovement); setClothingPolicy(saved.clothingPolicy); setSigmaShiftMode(saved.sigmaShiftMode); setShiftVideo(saved.shiftVideo); setShiftAudio(saved.shiftAudio); setLoraStrength(saved.loraStrength); setUserLoras(Array.isArray(saved.userLoras) ? saved.userLoras : workspaceDefaults.userLoras); setSeed(saved.seed); setRef2vaSeed(saved.ref2vaSeed ?? saved.seed); setSeedLocked(saved.seedLocked); setAdvanced(saved.advanced); setLiveEnabled(saved.liveEnabled); setLivePreviewMode(saved.livePreviewMode); setUpscaleMode(saved.upscaleMode); setH3ProReview(saved.h3ProReview); setH3ProRefineSteps(Math.max(1, Math.min(30, Math.round(Number(saved.h3ProRefineSteps) || workspaceDefaults.h3ProRefineSteps)))); setH3RefineSteps(Math.max(1, Math.min(30, Math.round(Number(saved.h3RefineSteps) || workspaceDefaults.h3RefineSteps)))); setH3RefineDenoise(Number.isFinite(Number(saved.h3RefineDenoise)) ? Math.max(0.01, Math.min(1, Number(saved.h3RefineDenoise))) : workspaceDefaults.h3RefineDenoise); setTextEncoderPreference(saved.textEncoderPreference); setTurbo8Profile(saved.turbo8Profile); setRtxModel(saved.rtxModel); setFirstFrame(saved.firstFrame); setLastFrame(saved.lastFrame); setReferenceImages(saved.referenceImages); setReferenceVideos(saved.referenceVideos); setReferenceAudios(saved.referenceAudios); setSelectedReferenceCharacterIds(saved.selectedReferenceCharacterIds); setSelectedReferenceLocationIds(saved.selectedReferenceLocationIds); setActiveJobId(null); setView('create'); setCreateResetKey((value) => value + 1)
+      setSceneState(removeLegacyReferencePrompt(saved.sceneState?.version === 1 ? saved.sceneState : { ...importSceneDraft(saved.prompt, saved.duration, saved.mode), noDialogue: saved.noDialogue, naturalMovement: saved.naturalMovement })); setResolution(saved.resolution); setTurbo(saved.turbo); setSteps(saved.steps); setSampler(saved.sampler); setScheduler(saved.scheduler); setExperimentalSampling(saved.experimentalSampling); setRefImageSize(saved.refImageSize); setNoDialogue(saved.noDialogue); setNaturalMovement(saved.naturalMovement); setClothingPolicy(saved.clothingPolicy); setSigmaShiftMode(saved.sigmaShiftMode); setShiftVideo(saved.shiftVideo); setShiftAudio(saved.shiftAudio); setLoraStrength(saved.loraStrength); setUserLoras(Array.isArray(saved.userLoras) ? saved.userLoras : workspaceDefaults.userLoras); setSeed(saved.seed); setRef2vaSeed(saved.ref2vaSeed ?? saved.seed); setSeedLocked(saved.seedLocked); setAdvanced(saved.advanced); setLiveEnabled(saved.liveEnabled); setLivePreviewMode(saved.livePreviewMode); setUpscaleMode(saved.upscaleMode); setH3ProReview(saved.h3ProReview); setH3ProRefineSteps(Math.max(1, Math.min(30, Math.round(Number(saved.h3ProRefineSteps) || workspaceDefaults.h3ProRefineSteps)))); setH3RefineSteps(Math.max(1, Math.min(30, Math.round(Number(saved.h3RefineSteps) || workspaceDefaults.h3RefineSteps)))); setH3RefineDenoise(Number.isFinite(Number(saved.h3RefineDenoise)) ? Math.max(0.01, Math.min(1, Number(saved.h3RefineDenoise))) : workspaceDefaults.h3RefineDenoise); setTextEncoderPreference(saved.textEncoderPreference); setTurbo8Profile(saved.turbo8Profile); setRtxModel(saved.rtxModel); setFirstFrame(saved.firstFrame); setLastFrame(saved.lastFrame); setReferenceImages(saved.referenceImages); setReferenceVideos(saved.referenceVideos); setReferenceAudios(saved.referenceAudios); setSelectedReferenceCharacterIds(saved.selectedReferenceCharacterIds); setSelectedReferenceLocationIds(saved.selectedReferenceLocationIds); setActiveJobId(null); setView('create'); setCreateResetKey((value) => value + 1)
     } else {
       const storageKey = workspaceStorageKey(project.scope)
       if (!writeLocalJson(storageKey, project.snapshot)) {
@@ -2246,68 +2345,58 @@ function App() {
   }
 
   const generate = async (target: 'video' | 'image' = 'video', renderAnyway = false, control?: { forceH3Pro?: boolean; parentJobId?: string; continuation?: ContinuationGenerationControl }) => {
-    if (!settings) return
+    const stop = (message: string): undefined => {
+      setNotice({ tone: 'error', text: message })
+      if (control?.continuation) throw new Error(message)
+      return undefined
+    }
+    if (!settings) return stop('Open Settings and configure the output folder first.')
     if (target === 'image' && mode !== 'reference') {
-      setNotice({ tone: 'error', text: 'Generate Image is available for the Ref2VA Reference workspace.' })
-      return
+      return stop('Generate Image is available for the Ref2VA Reference workspace.')
     }
     if (target === 'video' && upscaleMode === 'ltx' && (!upscaleModel || !upscaleVae)) {
-      setNotice({ tone: 'error', text: 'LTX 2.5 spatial upscaler and video VAE must be available in ComfyUI.' })
-      return
+      return stop('LTX 2.5 spatial upscaler and video VAE must be available in ComfyUI.')
     }
     if (target === 'video' && upscaleMode === 'ltx' && missingLtxUpscaleNodes.length) {
-      setNotice({ tone: 'error', text: `Update ComfyUI before using LTX 2× upscale. Missing nodes: ${missingLtxUpscaleNodes.join(', ')}.` })
-      return
+      return stop(`Update ComfyUI before using LTX 2× upscale. Missing nodes: ${missingLtxUpscaleNodes.join(', ')}.`)
     }
     if (target === 'video' && upscaleMode === 'h3' && !h3LearnedUpscaleReady) {
       const missing = [...missingH3LearnedUpscaleNodes, ...(!h3LearnedUpscaleModel ? ['an H3 3D learned-upscale checkpoint'] : [])]
-      setNotice({ tone: 'error', text: `H3 Latent Upscale Pro is not ready. Install the missing requirement${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}.` })
-      return
+      return stop(`H3 Latent Upscale Pro is not ready. Install the missing requirement${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}.`)
     }
     if (target === 'video' && upscaleMode === 'rtx' && !rtxModel) {
-      setNotice({ tone: 'error', text: 'Choose an AI upscale model installed in ComfyUI first.' })
-      return
+      return stop('Choose an AI upscale model installed in ComfyUI first.')
     }
-    if (target === 'video' && upscaleMode === 'rtx' && !window.confirm('RTX/CUDA upscale processes every frame independently and can amplify MiniMax noise or temporal shimmer. Continue with this experimental post-process?')) return
+    if (target === 'video' && upscaleMode === 'rtx' && !window.confirm('RTX/CUDA upscale processes every frame independently and can amplify MiniMax noise or temporal shimmer. Continue with this experimental post-process?')) return stop('RTX upscale was cancelled.')
     if (!status.connected) {
-      setNotice({ tone: 'error', text: 'Start ComfyUI and verify the server connection in Settings.' })
-      return
+      return stop('Start ComfyUI and verify the server connection in Settings.')
     }
     if (turbo === 'fast' && mode !== 'text') {
-      setNotice({ tone: 'error', text: 'FastVideo FastH3 is text-to-audio-video only. Choose Text mode, or use the base H3 model for image and reference workflows.' })
-      return
+      return stop('FastVideo FastH3 is text-to-audio-video only. Choose Text mode, or use the base H3 model for image and reference workflows.')
     }
     if (!modelReady) {
-      setNotice({ tone: 'error', text: 'One or more required MiniMax H3 model components are missing.' })
-      return
+      return stop('One or more required MiniMax H3 model components are missing. Open Settings, rescan models, and review the MiniMax H3 requirements.')
     }
     if (h3GpuRouting?.vramWarnings.length && !settings.gpuRouting.allowOvercommit) {
-      setNotice({ tone: 'error', text: `${h3GpuRouting.vramWarnings.join(' ')} Review GPU Routing in Settings, choose Sequential Offload or CPU Fallback, or explicitly allow the VRAM warning.` })
-      return
+      return stop(`${h3GpuRouting.vramWarnings.join(' ')} Review GPU Routing in Settings, choose Sequential Offload or CPU Fallback, or explicitly allow the VRAM warning.`)
     }
     if (target === 'video' && liveEnabled && livePreviewMode === 'h3-override' && !h3PreviewOverrideNode) {
-      setNotice({ tone: 'error', text: 'MiniMax H3 animated preview is selected, but its Preview Override node was not detected. Install or enable the custom node, restart ComfyUI, then click the Local engine status to refresh.' })
-      return
+      return stop('MiniMax H3 animated preview is selected, but its Preview Override node was not detected. Install or enable the custom node, restart ComfyUI, then click the Local engine status to refresh.')
     }
     if (target === 'video' && liveEnabled && livePreviewMode === 'h3-override' && !selection.previewVae) {
-      setNotice({ tone: 'error', text: 'MiniMax H3 animated preview requires taeh3_decoder.safetensors in ComfyUI/models/vae_approx. Refresh the Local engine after adding it.' })
-      return
+      return stop('MiniMax H3 animated preview requires taeh3_decoder.safetensors in ComfyUI/models/vae_approx. Refresh the Local engine after adding it.')
     }
     if (mode === 'image' && !firstFrame) {
-      setNotice({ tone: 'error', text: 'Choose a first frame for this mode.' })
-      return
+      return stop('Choose a first frame for this mode.')
     }
     if (mode === 'frames' && !lastFrame) {
-      setNotice({ tone: 'error', text: 'Choose a last frame for first-and-last-frame generation.' })
-      return
+      return stop('Choose a last frame for first-and-last-frame generation.')
     }
     if (mode === 'reference' && referenceImages.length + referenceVideos.length + referenceAudios.length === 0 && !selectedReferenceCharacterIds.length && !selectedReferenceLocationIds.length) {
-      setNotice({ tone: 'error', text: 'Add at least one reference image, video, or audio file.' })
-      return
+      return stop('Add at least one reference image, video, or audio file.')
     }
     if (mode === 'reference' && (referenceImages.length > 9 || referenceVideos.length > 3 || referenceAudios.length > 3)) {
-      setNotice({ tone: 'error', text: 'Reference limits are 9 pictures, 3 videos, and 3 audio files. Remove extras before rendering.' })
-      return
+      return stop('Reference limits are 9 pictures, 3 videos, and 3 audio files. Remove extras before rendering.')
     }
     const workspaceBindings = workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)
     const renderBindings = resolveRenderReferenceBindings(referenceImages, workspaceBindings, clothingPolicy)
@@ -2315,10 +2404,9 @@ function App() {
     const boundScene = bindSceneReferences(sceneState, renderBindings, referenceVideos, referenceAudios, firstFrame, lastFrame)
     const sceneCompilation = compileScene(boundScene)
     const promptAudit = { errors: sceneCompilation.conflicts.filter(item => item.severity === 'error').map(item => item.message) }
-    if (mode === 'reference' && boundScene.references.some(ref => ref.anchor) && !info.MiniMaxH3AddGuide) { setNotice({ tone: 'error', text: 'Frame anchors require ComfyUI’s native MiniMaxH3AddGuide node. Update ComfyUI, turn Frame 0 guide off, or use Keyframes mode.' }); return }
+    if (mode === 'reference' && boundScene.references.some(ref => ref.anchor) && !info.MiniMaxH3AddGuide) return stop('Frame anchors require ComfyUI’s native MiniMaxH3AddGuide node. Update ComfyUI, turn Frame 0 guide off, or use Keyframes mode.')
     if (promptAudit.errors.length && !renderAnyway) {
-      setNotice({ tone: 'error', text: `Prompt needs attention: ${promptAudit.errors[0]}` })
-      return
+      return stop(`Prompt needs attention: ${promptAudit.errors[0]}`)
     }
     const requiredReferenceFiles = [
       ...(mode === 'reference' ? [...renderReferenceImages, ...referenceVideos, ...referenceAudios] : []),
@@ -2331,12 +2419,10 @@ function App() {
         const invalid = validation.filter((file) => !file.valid)
         if (invalid.length) {
           const labels = invalid.slice(0, 3).map((file) => file.path.split(/[\\/]/).at(-1) || 'reference').join(', ')
-          setNotice({ tone: 'error', text: `Cannot start this render: ${labels}${invalid.length > 3 ? ` and ${invalid.length - 3} more` : ''} ${invalid.length === 1 ? 'is' : 'are'} unavailable or unsupported. Re-select the affected reference file${invalid.length === 1 ? '' : 's'}.` })
-          return
+          return stop(`Cannot start this render: ${labels}${invalid.length > 3 ? ` and ${invalid.length - 3} more` : ''} ${invalid.length === 1 ? 'is' : 'are'} unavailable or unsupported. Re-select the affected reference file${invalid.length === 1 ? '' : 's'}.`)
         }
       } catch (error) {
-        setNotice({ tone: 'error', text: `Could not verify the selected reference files: ${error instanceof Error ? error.message : String(error)}` })
-        return
+        return stop(`Could not verify the selected reference files: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
 
@@ -2437,15 +2523,21 @@ function App() {
       const upload = async (file: MediaFile, fitToOutput = false) => file.kind === 'image' && (fitToOutput || Boolean(file.crop))
         ? window.minimax.uploadImageData(settings.comfyUrl, await prepareImage(file, width, height))
         : window.minimax.uploadInput(settings.comfyUrl, file.path)
-      const [first, last, images, videos, audios, sourceVideo] = await Promise.all([
+      const updatePreparation = (progressLabel: string) => setJobs(current => current.map(item => item.id === localId ? { ...item, progressLabel } : item))
+      if (control?.continuation?.assembly) updatePreparation('Uploading continuation source video')
+      const sourceVideo = control?.continuation?.assembly
+        ? await window.minimax.uploadInput(settings.comfyUrl, control.continuation.assembly.sourcePath)
+        : undefined
+      if (control?.continuation) updatePreparation('Uploading beat references')
+      const [first, last, images, videos, audios] = await Promise.all([
         firstFrame && (mode === 'image' || mode === 'frames') ? upload(firstFrame, true) : undefined,
         lastFrame && mode === 'frames' ? upload(lastFrame, true) : undefined,
         Promise.all(mode === 'reference' ? renderReferenceImages.map((file) => upload(file, true)) : []),
         Promise.all(mode === 'reference' ? referenceVideos.map((file) => upload(file)) : []),
         Promise.all(mode === 'reference' ? referenceAudios.map((file) => upload(file)) : []),
-        control?.continuation?.assembly ? window.minimax.uploadInput(settings.comfyUrl, control.continuation.assembly.sourcePath) : undefined,
       ])
       if (cancellationRequests.current.has(localId)) throw new Error('Generation cancelled before submission.')
+      if (control?.continuation) updatePreparation('Building continuation workflow')
       const generationOptions = {
         latentCapture: latentFile ? { filenamePrefix: `h3_context/${localId}` } : undefined,
         motionContext: control?.continuation?.motion ? { latentPath: control.continuation.motion.latentPath, contextFrames: control.continuation.motion.contextFrames, blendFrames: control.continuation.motion.blendFrames, carryAudio: control.continuation.motion.carryAudio, suppressAudio: control.continuation.motion.suppressAudio } : undefined,
@@ -2485,6 +2577,7 @@ function App() {
         ? buildMiniMaxReferenceStillWorkflow(generationOptions, selection, { images, videos, audios })
         : buildMiniMaxWorkflow(generationOptions, selection, { first, last, images, videos, audios, source: sourceVideo })
       if (h3GpuRouting) console.info(`[GPU Routing] ${h3GpuRouting.logLine} | Strategy: ${h3GpuRouting.workflow.strategy}`)
+      if (control?.continuation) updatePreparation('Submitting continuation to ComfyUI')
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
@@ -2521,24 +2614,30 @@ function App() {
 
   const continuationAssemblyReady = ['MiniMaxH3LoopTrim', 'MiniMaxH3VideoMerge'].every(node => Boolean(info[node]))
   const continuationNodesReady = continuationAssemblyReady && ['MiniMaxH3SaveLatent', 'MiniMaxH3LoadLatent', 'MiniMaxH3VideoExtender', 'MiniMaxH3MotionContext'].every(node => Boolean(info[node]))
-  const generateContinuationBeat = async (script: ContinueScript, beat: ContinueBeat, source: GenerationJob | MediaFile, method: ContinueMethod) => {
+  const missingContinuationNodes = ['MiniMaxH3LoopTrim', 'MiniMaxH3VideoMerge', 'MiniMaxH3SaveLatent', 'MiniMaxH3LoadLatent', 'MiniMaxH3VideoExtender', 'MiniMaxH3MotionContext'].filter(node => !info[node])
+  const generateContinuationBeat = async (script: ContinueScript, beat: ContinueBeat, source: GenerationJob | MediaFile, method: ContinueMethod, onProgress: (stage: string) => void) => {
     if (!settings) throw new Error('Open Settings and configure the output folder first.')
+    onProgress('Locating the source video')
     const sourceJob = 'status' in source ? source : undefined
     const outputFile = sourceJob?.outputUrl ? outputFileFromUrl(sourceJob.outputUrl) : undefined
-    const resolvedOutput = outputFile ? await window.minimax.resolveOutput(settings.outputDirectory, outputFile) : null
+    const resolvedOutput = outputFile ? await window.minimax.resolveOutput(activeOutputDirectory, outputFile) : null
     const sourceCandidates = sourceJob ? continuationSourceCandidates(sourceJob, resolvedOutput) : [(source as MediaFile).path]
-    const sourcePath = sourceCandidates[0]
+    let sourcePath = sourceCandidates[0]
     if (!sourcePath) throw new Error('The source clip is unavailable. Select it again or verify that its output still exists.')
     if (!continuationAssemblyReady) throw new Error('Combined continuation output requires the MiniMax H3 Extender Trim and Merge nodes. Install or enable them, restart ComfyUI, then test the connection again.')
-    const externalMetadata = !sourceJob ? await window.minimax.getVideoMetadata(sourcePath, settings.ffmpegPath).catch(() => null) : null
+    // Normalize source cadence before a 24 fps merge; a chosen frame also ends the retained source.
+    onProgress('Preparing the source for the 24 fps combined video')
+    sourcePath = await window.minimax.prepareContinuationSource(sourceCandidates, method === 'frame' ? beat.frameTime : null, activeOutputDirectory, settings.ffmpegPath)
+    onProgress('Reading source timing and checking the seam')
+    const externalMetadata = await window.minimax.getVideoMetadata(sourcePath, settings.ffmpegPath)
+    if (script.continuity.blendFrames > externalMetadata.frameCount) throw new Error('The source is shorter than the seam blend. Reduce seam blend frames or choose a later source frame.')
     if (sourceJob && resolvedOutput && sourceJob.localOutputPath !== resolvedOutput) {
       setJobs(current => current.map(job => job.id === sourceJob.id ? { ...job, localOutputPath: resolvedOutput } : job))
     }
     if (method === 'motion' && (!continuationNodesReady || !sourceJob?.latentFile)) throw new Error('This source has no compatible saved H3 AV latent. Select Last Frame or Choose Frame.')
-    const previousState = sourceJob?.continuityState
-      ?? (sourceJob ? createSceneState(sourceJob.prompt, sourceJob.duration, sourceJob.mode) : script.mode === 'reference' ? sceneState : createSceneState('', beat.duration, 'text'))
+    const previousState = sourceJob ? continuationSourceState(sourceJob) : script.mode === 'reference' ? sceneState : createSceneState('', beat.duration, 'text')
     const inheritedNoDialogue = sourceJob?.renderSettings?.noDialogue ?? sourceJob?.noDialogue ?? previousState.noDialogue
-    const effectiveNoDialogue = beat.dialogueMode === 'none' || (beat.dialogueMode !== 'allow' && inheritedNoDialogue)
+    const effectiveNoDialogue = script.continuity.dialogueMode === 'none' || (script.continuity.dialogueMode !== 'allow' && inheritedNoDialogue)
     // A continuation job's stored prompt is compiled output and may already
     // contain prior continuity instructions. Reusing it recursively causes the
     // prompt to grow on every beat. The authored beat is the canonical action.
@@ -2548,19 +2647,19 @@ function App() {
     const continuityLines = beat.continuityBreak ? [] : [
       previousState.environment.value && `Location: ${previousState.environment.value}`,
       previousState.lighting.value && `Lighting: ${previousState.lighting.value}`,
-      previousState.camera.angle?.value && `Camera angle: ${previousState.camera.angle.value}`,
-      previousState.camera.movement?.value && `Camera movement: ${previousState.camera.movement.value}`,
+      !beat.cameraOverride.trim() && previousState.camera.angle?.value && `Camera angle: ${previousState.camera.angle.value}`,
+      !beat.cameraOverride.trim() && previousState.camera.movement?.value && `Camera movement: ${previousState.camera.movement.value}`,
       previousAction && `Previous action: ${previousAction}`,
     ].filter(Boolean)
     const nextMode: GenerationMode = script.mode === 'reference' ? 'reference' : method === 'motion' ? 'text' : 'image'
     const authored = [continuityLines.length ? `Preserve the established scene and motion. ${continuityLines.join('. ')}.` : '', `What happens next: ${beat.prompt.trim()}`, beat.cameraOverride.trim() ? `Camera change: ${beat.cameraOverride.trim()}` : ''].filter(Boolean).join('\n')
-    const timing = continuationTiming(beat.duration, method === 'motion' ? beat.contextFrames : 0, beat.blendFrames)
+    const timing = continuationTiming(beat.duration, method === 'motion' ? script.continuity.contextFrames : 0, script.continuity.blendFrames)
     if (timing.renderFrames > 362) throw new Error(`This beat needs ${timing.renderFrames} raw H3 frames after continuity overlap, above H3’s 362-frame limit. Shorten the beat or reduce latent context frames.`)
     const renderDuration = timing.renderDuration
     const nextState = createSceneState(authored, renderDuration, nextMode)
     nextState.environment = beat.continuityBreak ? value('') : previousState.environment
     nextState.lighting = beat.continuityBreak ? value('') : previousState.lighting
-    nextState.camera = beat.cameraOverride.trim() ? { ...previousState.camera, movement: value(beat.cameraOverride.trim()) } : previousState.camera
+    nextState.camera = beat.cameraOverride.trim() ? { ...(beat.continuityBreak ? nextState.camera : previousState.camera), movement: value(beat.cameraOverride.trim()) } : beat.continuityBreak ? nextState.camera : previousState.camera
     nextState.characters = beat.continuityBreak ? [] : previousState.characters
     nextState.noDialogue = effectiveNoDialogue
     if (effectiveNoDialogue) nextState.dialogue = []
@@ -2568,11 +2667,12 @@ function App() {
     nextState.continuity = { scene: !beat.continuityBreak, camera: !beat.continuityBreak, exactFrame: method !== 'motion', notes: value('') }
     let frame: MediaFile | null = null
     if (method !== 'motion') {
+      onProgress('Extracting the frame for visual continuity')
       let extracted: Awaited<ReturnType<typeof window.minimax.extractVideoFrame>> | null = null
       let extractionError = ''
-      for (const candidate of sourceCandidates) {
+      for (const candidate of [sourcePath]) {
         try {
-          extracted = await window.minimax.extractVideoFrame(candidate, method === 'last' ? 'last' : beat.frameTime, settings.outputDirectory, settings.ffmpegPath)
+          extracted = await window.minimax.extractVideoFrame(candidate, 'last', activeOutputDirectory, settings.ffmpegPath)
           break
         } catch (error) {
           extractionError = error instanceof Error ? error.message : String(error)
@@ -2584,8 +2684,8 @@ function App() {
     const inheritedStateFiles = previousState.references.map(ref => ref.file)
     const inherited = (inheritedStateFiles.length ? inheritedStateFiles : sourceJob?.referenceFiles ?? [...referenceImages, ...referenceVideos, ...referenceAudios]).filter(file => !file.openingFrameTreatment)
     const replacements = Object.entries(beat.replacements).filter((entry): entry is [string, MediaFile] => Boolean(entry[1]))
-    const replacedRoles = new Set(replacements.map(([role]) => role === 'character' ? 'subject' : role))
-    const allReferences = (beat.continuityBreak ? [] : inherited).filter(file => !replacedRoles.has(file.referenceRole ?? '')).concat(replacements.map(([, file]) => file))
+    const isReplaced = (file: MediaFile) => continuationReferenceReplaced(beat, file, previousState.references)
+    const allReferences = (beat.continuityBreak ? [] : inherited).filter(file => !isReplaced(file)).concat(replacements.map(([, file]) => file))
     const inheritedPaths = new Set(allReferences.map(file => file.path))
     // Keep the compiler-side owner and Preserve assignments that belonged to
     // the source render. Rebuilding from bare MediaFile values loses ownerId,
@@ -2611,7 +2711,7 @@ function App() {
       }
     })
     nextState.references = [
-      ...(beat.continuityBreak ? [] : previousState.references.filter(ref => !ref.anchor && inheritedPaths.has(ref.file.path) && !replacedRoles.has(ref.file.referenceRole ?? ''))),
+      ...(beat.continuityBreak ? [] : previousState.references.filter(ref => !ref.anchor && inheritedPaths.has(ref.file.path) && !isReplaced(ref.file))),
       ...replacementReferences,
     ]
     const imageReferences = allReferences.filter(file => file.kind === 'image').slice(0, frame && nextMode === 'reference' ? 8 : 9)
@@ -2631,6 +2731,8 @@ function App() {
       refImageSize, sigmaShiftMode, shiftVideo, shiftAudio, loraStrength, userLoras, clothingPolicy,
       upscaleMode,
     }
+    flushSync(() => {
+    setContinuationPreparing(true)
     setSceneState(nextState)
     // Continue is its own workspace, so Create may still hold the mode used
     // before the script opened. Apply this beat's mode before generateRef
@@ -2679,21 +2781,22 @@ function App() {
     // post-process before the merge would produce mismatched frame sizes or a
     // disconnected upscaled segment instead of the completed sequence.
     setUpscaleMode('off')
+    })
     try {
-      await new Promise<void>(resolve => window.setTimeout(resolve, 0))
+      onProgress('Uploading references and submitting the beat to ComfyUI')
       const outputName = continuationOutputName(script, beat)
       const queuedId = await generateRef.current?.('video', false, { continuation: {
         scriptId: script.id,
         beatId: beat.id,
-        beatSignature: continuationBeatSignature(beat, script.videoName, `${script.mode}:${method}`),
+        beatSignature: continuationBeatSignature(beat, script.videoName, `${script.mode}:${method}`, script.continuity),
         outputName,
         sourceJobId: sourceJob?.id ?? ('status' in source ? undefined : source.path),
         requestedDuration: beat.duration,
         deliveredDuration: timing.deliveredDuration,
-        assembly: { sourcePath, trimFrames: timing.trimFrames, blendFrames: beat.blendFrames, useMotionTrim: method === 'motion' },
-        motion: method === 'motion' && sourceJob?.latentFile ? { latentPath: sourceJob.latentPath ?? sourceJob.latentFile, contextFrames: beat.contextFrames, blendFrames: beat.blendFrames, carryAudio: beat.carryAudio, suppressAudio: effectiveNoDialogue } : undefined,
+        assembly: { sourcePath, trimFrames: timing.trimFrames, blendFrames: script.continuity.blendFrames, useMotionTrim: method === 'motion' },
+        motion: method === 'motion' && sourceJob?.latentFile ? { latentPath: sourceJob.latentPath ?? sourceJob.latentFile, contextFrames: script.continuity.contextFrames, blendFrames: script.continuity.blendFrames, carryAudio: script.continuity.carryAudio, suppressAudio: effectiveNoDialogue } : undefined,
       } })
-      if (!queuedId) throw new Error('The continuation could not be queued. Check the workspace notice for the model, reference, or ComfyUI requirement.')
+      if (!queuedId) throw new Error('ComfyUI did not return a queued beat. Check the local engine connection and retry.')
       setJobs(current => current.map(job => job.id === queuedId ? { ...job, continuityState: compactContinuityState } : job))
     } finally {
       setMode(createWorkspaceSnapshot.mode)
@@ -2729,6 +2832,7 @@ function App() {
       setUserLoras(createWorkspaceSnapshot.userLoras)
       setClothingPolicy(createWorkspaceSnapshot.clothingPolicy)
       setUpscaleMode(createWorkspaceSnapshot.upscaleMode)
+      setContinuationPreparing(false)
     }
   }
 
@@ -3125,7 +3229,7 @@ function App() {
       <main className="main-area" ref={mainAreaRef} aria-label={workspaceLabel(view, musicEngine)}>
         {!legacyMigrationDismissed && legacyMigration && (legacyMigration.available || legacyMigration.migrated) && <section className="legacy-migration-banner" aria-label="Previous Studio data migration"><div><strong>{legacyMigration.needsBrowserStorageRepair ? 'Restore your previous Studio projects and characters' : legacyMigration.migrated ? 'Previous Studio data is ready in Oyama' : 'Bring your previous Studio data into Oyama'}</strong><span>{legacyMigration.needsBrowserStorageRepair ? 'Settings were imported, but local characters, projects, and workspace state need one repair import. Open Settings to restore them.' : legacyMigration.migrated ? 'Your prior local profile was copied safely. You can rerun the import from Settings if you need to recover files added later.' : 'Import settings, saved intents, local projects, LAN pairing, and downloaded tools without replacing Oyama files.'}</span></div><div className="legacy-migration-banner-actions"><button type="button" className="secondary-button" onClick={() => setView('settings')}>Open Settings</button><button type="button" className="icon-button" onClick={dismissLegacyMigrationBanner} aria-label="Dismiss previous Studio migration notice" title="Dismiss"><X size={16} /></button></div></section>}
         {notice && <Notice tone={notice.tone} text={notice.text} onClose={() => setNotice(null)} />}
-        <div className="video-workspace-host" hidden={view !== 'create'}>
+        <fieldset className="video-workspace-host" disabled={continuationPreparing} hidden={view !== 'create'} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>{continuationPreparing && <p role="status">Preparing continuation. Video controls will return when the beat is queued.</p>}
           <VideoWorkspaceShell onOpenNavigator={() => setNavigatorOpen(true)} key={`create-${createResetKey}`} sceneState={sceneState} setSceneState={setSceneState} onAnalyzeReference={path => analyzeSceneReference(settings, path)}
             projectName={workspaceProjects.find(project => project.id === activeWorkspaceProjectId && project.scope === workspaceProjectScope(view, musicEngine))?.name ?? 'Current workspace'} onOpenProjects={() => setProjectManagerOpen(true)} onNavigate={(nextView, engine) => { if (engine) setMusicEngine(engine); setView(nextView) }} onReset={resetCurrentWorkspace} historyJobs={jobs.filter(job => job.provider === 'minimax').slice(0, 12)} onSelectJob={selectActiveJob} onGenerate={() => void generateRef.current?.('video', renderAnyway)} onGenerateStill={() => void generateRef.current?.('image')} onCancel={() => { if (activeRenderJob) void cancelJob(activeRenderJob) }} activeRenderJob={activeRenderJob} cancelling={Boolean(activeRenderJob && cancellingIds.has(activeRenderJob.id))} onOpenSettings={() => setView('settings')} onOpenCompare={() => setCompareOpen(true)} compareOpen={compareOpen}
             info={info}
@@ -3212,9 +3316,28 @@ function App() {
             referenceVideos={referenceVideos}
             referenceAudios={referenceAudios}
             removeReference={(kind, index) => {
-              if (kind === 'image') { setSelectedReferenceCharacterIds([]); setSelectedReferenceLocationIds([]); setReferenceImages((items) => items.filter((_, itemIndex) => itemIndex !== index)) }
+              if (kind === 'image') {
+                const file = referenceImages[index]
+                if (!file) return
+                const previous = workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)
+                const binding = previous.find(item => item.file.path === file.path)
+                if (binding?.characterId || binding?.locationId) {
+                  const characterIds = binding.characterId ? selectedReferenceCharacterIds.filter(id => id !== binding.characterId) : selectedReferenceCharacterIds
+                  const locationIds = binding.locationId ? selectedReferenceLocationIds.filter(id => id !== binding.locationId) : selectedReferenceLocationIds
+                  setSelectedReferenceCharacterIds(characterIds)
+                  setSelectedReferenceLocationIds(locationIds)
+                  void applyWorkspaceBindings(previous, workspaceBindingsFor(characterIds, locationIds))
+                } else {
+                  setReferenceImages(items => items.filter((_, itemIndex) => itemIndex !== index))
+                  setPrompt(current => syncReferencePrompt(current, previous, []))
+                  setPromptSuggestion('')
+                  setPromptSuggestionId('')
+                }
+              }
               if (kind === 'video') setReferenceVideos((items) => items.filter((_, itemIndex) => itemIndex !== index))
               if (kind === 'audio') setReferenceAudios((items) => items.filter((_, itemIndex) => itemIndex !== index))
+              setPromptSuggestion('')
+              setPromptSuggestionId('')
             }}
             chooseReference={chooseMany}
             editVideoReference={(index) => void editVideoReference(index)}
@@ -3227,7 +3350,7 @@ function App() {
             connected={status.connected}
              onSendStillToI2v={(job, provider) => void sendStillToI2v(job, provider)}
             latestJob={activeJobId ? jobs.find((job) => job.id === activeJobId) : undefined}
-            onContinue={startVideoContinuation}
+            onOpenContinuation={() => setContinuationOpenRequest(current => nextContinuationOpenRequest(current))} onContinue={startVideoContinuation}
             onContinueReference={startRef2vaContinuation}
             onContinueH3Pro={continueH3Pro}
             ollamaAvailable={ollamaModels.length > 0}
@@ -3241,7 +3364,7 @@ function App() {
             onUseSuggestion={() => { setPrompt(promptSuggestion); setPromptSuggestion(''); setPromptSuggestionId('') }}
             onDismissSuggestion={() => { setPromptSuggestion(''); setPromptSuggestionId('') }}
           />
-        </div>
+        </fieldset>
         {view === 'scratchpad' && <ScratchpadWorkspace provider={llmConnection.provider} url={llmConnection.url} model={llmConnection.model} models={ollamaModels} available={ollamaModels.length > 0} checking={localLlmChecking} connectionError={localLlmStatus?.error} onRefresh={() => void refreshOllama(settings, true)} onModelChange={changeCopilotModel} onSend={sendScratchpadPrompt} onNotice={(tone, text) => setNotice({ tone, text })} />}
         {view === 'ltx25' && <Ltx25Workspace key={`ltx-${ltxResetKey}`}
           settings={settings}
@@ -3292,7 +3415,7 @@ function App() {
           onCancel={(job) => void cancelJob(job)}
           onSelectAceStep={() => setMusicEngine('acestep')}
         />}
-        <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={settings.outputDirectory} attentionBackend={resolvedH3AttentionBackend} gpuRouting={h3GpuRouting?.workflow} onUse={(file, frameResolution) => {
+        <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={activeOutputDirectory} attentionBackend={resolvedH3AttentionBackend} gpuRouting={h3GpuRouting?.workflow} onUse={(file, frameResolution) => {
           setFirstFrame(file); setResolution(frameResolution); setMode('image'); setActiveJobId(null); setView('create'); setNotice({ tone: 'success', text: 'Z-Image frame loaded into the MiniMax I2V workspace.' })
         }} onUseLtx={(file) => void sendGeneratedStillToLtx(file)} /></div>
         {view === 'referenceprep' && <ReferencePrepStudio settings={settings} info={info} connected={status.connected} onUseCutout={(file) => {
@@ -3316,7 +3439,7 @@ function App() {
           return generateLtx({ mode: 'image', prompt: `${walkthroughDirection} Location description: ${locationProfile} Camera language: ${cameraLanguage} Image clarity: ${clarityDirection} No cuts, no teleporting, no layout changes, no duplicated objects, no people as focal subjects, no dialogue, no text, no logos.`, width: 1344, height: 768, duration: Math.max(5, Math.min(20, options?.duration ?? 10)), preset: 'quality', seed: Math.floor(Math.random() * 1_000_000_000), filenamePrefix: 'MiniMax_location_walkthrough' }, firstFrame, { locationProjectId: project.id })
         }} />}
         {view === 'queue' && <JobsView title="Queue" note="Running and recent local generations" jobs={jobs} empty="No generations have been queued." cancellingIds={cancellingIds} onCancel={cancelJob} onRemove={removeJobFromHistory} />}
-        {view === 'continue' && <ContinueWorkspace jobs={jobs} motionReady={continuationNodesReady} assemblyReady={continuationAssemblyReady} initialSourceId={continuationSourceId} livePreview={live.preview} cancellingIds={cancellingIds} onChooseVideo={async () => { const picked = await window.minimax.chooseMedia('video'); return picked ? { ...picked, kind: 'video', preview: await window.minimax.mediaUrl(picked.path) } : null }} onChooseImage={async () => { const picked = await window.minimax.chooseMedia('image'); return picked ? { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) } : null }} onGenerate={generateContinuationBeat} onCancel={cancelJob} onResetSource={() => setContinuationSourceId(null)} />}
+        <div hidden={view !== 'continue'}><ContinueWorkspace openRequest={continuationOpenRequest} jobs={jobs} connected={status.connected} liveConnected={live.connected} motionReady={continuationNodesReady} assemblyReady={continuationAssemblyReady} missingNodes={missingContinuationNodes} livePreview={live.preview} cancellingIds={cancellingIds} onChooseVideo={async () => { const picked = await window.minimax.chooseMedia('video'); return picked ? { ...picked, kind: 'video', preview: await window.minimax.mediaUrl(picked.path) } : null }} onChooseImage={async () => { const picked = await window.minimax.chooseMedia('image'); return picked ? { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) } : null }} onGenerate={generateContinuationBeat} onCancel={cancelJob} onResetSource={() => setContinuationOpenRequest(current => ({ ...current, sourceId: null }))} /></div>
         {(view === 'movie' || (view === 'clipmaster' && clipMasterFromMovie)) && <div className="movie-integrated" hidden={view !== 'movie'}><div className="movie-workspace-heading"><div><h1>Oyama AI Movie</h1><p>Assemble renders, refine clips, and send frames to H3 or LTX.</p></div><button className="secondary-button" onClick={() => void window.minimax.openMovieEditor()}><ExternalLink size={15} />Open separate window</button></div><MovieEditor settings={settings} jobs={jobs} onCreate={(kind) => setView(kind === 'music' ? 'music' : 'ltx25')} onNotice={(tone, text) => setNotice({ tone, text })} onOpenClipMaster={clip => { setClipMasterClip(clip); setClipMasterFromMovie(true); setView('clipmaster') }} onUseFrame={receiveMovieFrame} /></div>}
         {view === 'library'  && <LibraryView jobs={jobs.filter((job) => job.status === 'completed')} settings={settings} onEdit={() => setView('movie')} onCreate={() => setView('create')} onUseLtx={loadStartFrameInLtx} onUseLastFrameReference={addVideoLastFrameAsReference} onNotice={(tone, text) => setNotice({ tone, text })} />}
         {view === 'clipmaster' && <ClipMasterBeta onUseFrame={receiveMovieFrame} clip={clipMasterClip ?? undefined} jobs={jobs} settings={settings} onClose={() => { setClipMasterClip(null); setView(clipMasterFromMovie ? 'movie' : 'library') }} onNotice={(tone, text) => setNotice({ tone, text })} onExportClip={clipMasterFromMovie ? clip => window.dispatchEvent(new CustomEvent('oyama-movie-add-media', { detail: clip })) : undefined} />}
@@ -3463,7 +3586,7 @@ type CreateViewProps = {
   onGenerateDialogue(draft: CharacterDialogueDraft): Promise<string>
   onUseSuggestion(): void; onDismissSuggestion(): void
   renderAnyway: boolean
-  onSendStillToI2v(job: GenerationJob, provider: 'minimax' | 'ltx25'): void; onContinue(job: GenerationJob): Promise<void>; onContinueReference(job: GenerationJob): Promise<void>; onContinueH3Pro(job: GenerationJob): Promise<void>; latestJob?: GenerationJob
+  onOpenContinuation(): void; onSendStillToI2v(job: GenerationJob, provider: 'minimax' | 'ltx25'): void; onContinue(job: GenerationJob): Promise<void>; onContinueReference(job: GenerationJob): Promise<void>; onContinueH3Pro(job: GenerationJob): Promise<void>; latestJob?: GenerationJob
 }
 
 type VideoShellProps = CreateViewProps & {
@@ -3561,8 +3684,8 @@ function PreviewStage({ job, historyJobs, onSelectJob, livePreview, liveEnabled,
   const live = job && ['queued', 'running'].includes(job.status) && liveEnabled && livePreview?.promptId === job.promptId ? livePreview : null
   const previewAspect = job?.width && job?.height ? `${job.width} / ${job.height}` : '16 / 9'
   return <section className="video-preview-stage"><header><div role="tablist" aria-label="Preview view"><button type="button" role="tab" aria-selected={tab === 'preview'} className={tab === 'preview' ? 'active' : ''} onClick={() => setTab('preview')}>Preview</button><button type="button" role="tab" aria-selected={tab === 'history'} className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>History</button></div><button type="button" title="Detach preview" aria-label="Detach preview" onClick={onDetach}><PanelTopOpen size={16} /></button></header>
-    <div className="video-preview-canvas">{tab === 'history' ? <div className="video-preview-history">{historyJobs.length ? historyJobs.map(item => <button type="button" key={item.id} onClick={() => { onSelectJob(item.id); setTab('preview') }}><span className="video-history-thumb">{item.outputUrl && item.mediaType === 'image' ? <img src={item.outputUrl} alt="" /> : item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" /> : <Film size={19} />}</span><span><strong>{shortPrompt(item.prompt) || 'Untitled render'}</strong><small>{item.status} · {item.width} × {item.height} · {item.duration}s</small></span></button>) : <div className="video-preview-empty"><History size={30} /><strong>No renders yet</strong></div>}</div> : job?.outputUrl ? job.mediaType === 'image' ? <img src={job.outputUrl} alt="Generated output" /> : <VideoPlayer src={job.outputUrl} /> : live ? <figure className={blurSensitive && job && hasSensitivePreviewWording(job.prompt) ? 'sensitive-preview' : ''} style={{ aspectRatio: previewAspect }}>{live.mime === 'video/mp4' ? <video src={live.url} autoPlay loop muted playsInline /> : <img src={live.url} alt="Live generation preview" />}<figcaption className="video-live-preview-badge"><i />Live sampler preview<small>Low resolution · final quality appears when rendering completes</small></figcaption></figure> : job && ['queued', 'running'].includes(job.status) ? <div className="video-preview-empty" role="status"><LoaderCircle size={28} className="spin" /><strong>{job.progressLabel || 'Rendering locally'}</strong><span>{Math.round(job.progress)}% · {job.width} × {job.height}</span><div className="progress"><i style={{ width: `${job.progress}%` }} /></div></div> : job?.status === 'failed' ? <div className="video-preview-empty video-preview-failed" role="alert"><AlertCircle size={30} /><strong>Render did not complete</strong><span>{job.error || 'ComfyUI stopped before an output was returned.'}</span><small>{blocker ? `Before retrying: ${blocker}` : 'Review the activity, adjust settings if needed, then Generate again.'}</small><button type="button" onClick={onViewQueue}><Activity size={15} />View render activity</button></div> : <div className="video-preview-empty" role="status"><Film size={32} /><strong>Preview</strong><span>Your generated video will appear here.</span></div>}</div>
-    {job?.outputUrl && <footer><span>{job.width} × {job.height} · {job.duration}s</span>{job.mediaType === 'image' ? <button type="button" onClick={() => onSendStillToI2v(job, 'minimax')}>Send to I2V</button> : job.provider === 'minimax' ? <div><button type="button" onClick={() => void onContinue(job)}>Continue in I2V</button><button type="button" onClick={() => void onContinueReference(job)}>Continue in Reference</button></div> : null}</footer>}</section>
+    <div className="video-preview-canvas">{tab === 'history' ? <div className="video-preview-history">{historyJobs.length ? historyJobs.map(item => <button type="button" key={item.id} onClick={() => { onSelectJob(item.id); setTab('preview') }}><span className="video-history-thumb">{item.outputUrl && item.mediaType === 'image' ? <img src={item.outputUrl} alt="" /> : item.outputUrl && item.mediaType !== 'audio' ? <MovieMediaThumbnail source={item.outputUrl} posterUrl={item.thumbnailUrl} /> : <Film size={19} />}</span><span><strong>{shortPrompt(item.prompt) || 'Untitled render'}</strong><small>{item.status} · {item.width} × {item.height} · {item.duration}s</small></span></button>) : <div className="video-preview-empty"><History size={30} /><strong>No renders yet</strong></div>}</div> : job?.outputUrl ? job.mediaType === 'image' ? <img src={job.outputUrl} alt="Generated output" /> : <VideoPlayer src={job.outputUrl} /> : live ? <figure className={blurSensitive && job && hasSensitivePreviewWording(job.prompt) ? 'sensitive-preview' : ''} style={{ aspectRatio: previewAspect }}>{live.mime === 'video/mp4' ? <video src={live.url} autoPlay loop muted playsInline /> : <img src={live.url} alt="Live generation preview" />}<figcaption className="video-live-preview-badge"><i />Live sampler preview<small>Low resolution · final quality appears when rendering completes</small></figcaption></figure> : job && ['queued', 'running'].includes(job.status) ? <div className="video-preview-empty" role="status"><LoaderCircle size={28} className="spin" /><strong>{job.progressLabel || 'Rendering locally'}</strong><span>{Math.round(job.progress)}% · {job.width} × {job.height}</span><div className="progress"><i style={{ width: `${job.progress}%` }} /></div></div> : job?.status === 'failed' ? <div className="video-preview-empty video-preview-failed" role="alert"><AlertCircle size={30} /><strong>Render did not complete</strong><span>{job.error || 'ComfyUI stopped before an output was returned.'}</span><small>{blocker ? `Before retrying: ${blocker}` : 'Review the activity, adjust settings if needed, then Generate again.'}</small><button type="button" onClick={onViewQueue}><Activity size={15} />View render activity</button></div> : <div className="video-preview-empty" role="status"><Film size={32} /><strong>Preview</strong><span>Your generated video will appear here.</span></div>}</div>
+    {job?.outputUrl && <footer><span>{job.width} × {job.height} · {job.duration}s</span>{job.mediaType === 'image' ? <button type="button" onClick={() => onSendStillToI2v(job, 'minimax')}>Send to I2V</button> : job.provider === 'minimax' ? <div><button type="button" onClick={() => void onContinue(job)}>Continue in new window</button><button type="button" onClick={() => void onContinueReference(job)}>Continue in Reference</button></div> : null}<VideoExportButtons job={job} /></footer>}</section>
 }
 
 function GenerateBar({ props, blocker }: { props: VideoShellProps; blocker: string }) {
@@ -3673,7 +3796,7 @@ function VideoWorkspaceShell(props: VideoShellProps) {
   return <div className="video-workspace-shell">
     <ModeBar mode={props.mode} setMode={value => { setSelection({ kind: 'scene' }); setRailAsset(null); if (value !== 'text' && props.turbo === 'fast') choosePreset('off'); props.setMode(value) }} projectName={props.projectName} onOpenProjects={props.onOpenProjects} connected={props.connected} modelReady={props.modelReady} onOpenSettings={props.onOpenSettings} onOpenCompare={props.onOpenCompare} compareOpen={props.compareOpen} onOpenNavigator={props.onOpenNavigator} />
     <div className="video-workspace-main"><AssetRail props={props} onSelect={file => { setRailAsset(file); const ref = boundScene.references.find(item => item.file.path === file.path); setSelection(ref ? { kind: 'reference', id: ref.id } : { kind: 'scene' }) }} />
-      <main className="video-creative-area"><PromptPanel prompt={props.prompt} setPrompt={props.setPrompt} onPromptTool={props.onPromptTool} promptingTool={props.promptingTool} promptSuggestion={props.promptSuggestion} onUseSuggestion={props.onUseSuggestion} onDismissSuggestion={props.onDismissSuggestion} /><ModeInputStrip props={props} boundScene={boundScene} selection={selection} onSelect={value => { setRailAsset(null); setSelection(value) }} /><PreviewStage job={props.latestJob} historyJobs={props.historyJobs} onSelectJob={props.onSelectJob} livePreview={props.livePreview} liveEnabled={props.liveEnabled} blurSensitive={props.blurNsfwPreview} blocker={blocker} onViewQueue={() => props.onNavigate('queue')} onDetach={detach} onContinue={props.onContinue} onContinueReference={props.onContinueReference} onSendStillToI2v={props.onSendStillToI2v} /></main>
+      <main className="video-creative-area"><details className="video-continuation-opt-in"><summary>Optional · Continue a video</summary><p>Plan additional beats with motion context, frame continuity, and combined exports.</p><button className="secondary-button" onClick={props.onOpenContinuation}>Open continuation window</button>{props.latestJob?.status === 'completed' && props.latestJob.mediaType !== 'image' && <button className="secondary-button" onClick={() => void props.onContinue(props.latestJob!)}>Continue in new window</button>}</details><PromptPanel prompt={props.prompt} setPrompt={props.setPrompt} onPromptTool={props.onPromptTool} promptingTool={props.promptingTool} promptSuggestion={props.promptSuggestion} onUseSuggestion={props.onUseSuggestion} onDismissSuggestion={props.onDismissSuggestion} /><ModeInputStrip props={props} boundScene={boundScene} selection={selection} onSelect={value => { setRailAsset(null); setSelection(value) }} /><PreviewStage job={props.latestJob} historyJobs={props.historyJobs} onSelectJob={props.onSelectJob} livePreview={props.livePreview} liveEnabled={props.liveEnabled} blurSensitive={props.blurNsfwPreview} blocker={blocker} onViewQueue={() => props.onNavigate('queue')} onDetach={detach} onContinue={props.onContinue} onContinueReference={props.onContinueReference} onSendStillToI2v={props.onSendStillToI2v} /></main>
       <Inspector props={props} boundScene={boundScene} selection={selection} selectedFile={selectedFile} selectedReference={selectedReference} onClearSelection={() => { setRailAsset(null); setSelection({ kind: 'scene' }) }} onUpdateScene={updateScene} onUpdateFile={updateFile} onPreset={choosePreset} onSceneEditor={() => setSceneEditorOpen(true)} />
     </div><GenerateBar props={props} blocker={blocker} />
     {previewPopoutRoot && createPortal(<DetachedPreviewMonitor job={props.latestJob} livePreview={props.livePreview} liveEnabled={props.liveEnabled} blurSensitive={props.blurNsfwPreview} />, previewPopoutRoot)}
@@ -4206,7 +4329,7 @@ function ComfyActivityConsole({ job }: { job: GenerationJob }) {
   const activity = job.comfyActivity ?? []
   const running = job.status === 'queued' || job.status === 'running'
   const fallback = running
-    ? [{ at: job.createdAt, level: 'info' as const, message: 'Workflow submitted locally; waiting for ComfyUI state updates.' }]
+    ? [{ at: job.createdAt, level: 'info' as const, message: job.promptId ? `ComfyUI accepted prompt ${job.promptId}; waiting for execution updates.` : 'Preparing locally. This workflow has not been submitted to ComfyUI yet.' }]
     : []
   const entries = activity.length ? activity : fallback
   if (!entries.length) return null
@@ -4270,7 +4393,7 @@ function LibraryView({ jobs, settings, onEdit, onCreate, onUseLtx, onUseLastFram
       const title = libraryPromptTitle(job.prompt)
       return <article className="library-card" key={job.id}>
         <button type="button" className="library-card-media" onClick={() => setLightbox(job)} aria-label={`Preview ${title}`}>
-          {image ? <img src={job.outputUrl} alt="" /> : job.thumbnailUrl ? <img src={job.thumbnailUrl} alt="" /> : <span className="library-media-fallback"><Film size={30} /><small>Preview video</small></span>}
+          {image ? <img src={job.outputUrl} alt="" /> : <MovieMediaThumbnail source={job.outputUrl!} posterUrl={job.thumbnailUrl} />}
           <span className="library-media-play"><Play size={16} fill="currentColor" /></span>
           {!image && <span className="library-media-duration">{job.duration}s</span>}
         </button>
@@ -4293,7 +4416,19 @@ function LibraryView({ jobs, settings, onEdit, onCreate, onUseLtx, onUseLastFram
 }
 
 function JobsView({ title, note, jobs, empty, cancellingIds, onCancel, onRemove }: { title: string; note: string; jobs: GenerationJob[]; empty: string; cancellingIds: Set<string>; onCancel(job: GenerationJob): Promise<void>; onRemove(job: GenerationJob): void }) {
-  return <div className="standard-page"><div className="page-heading"><div><p className="eyebrow">LOCAL WORKSPACE</p><h1>{title}</h1><p>{note}</p></div></div>{jobs.length === 0 ? <div className="empty-page"><History size={28} /><strong>{empty}</strong><span>New work is saved automatically on this device.</span></div> : <div className="job-list">{jobs.map((job) => { const audio = job.mediaType === 'audio'; const image = job.mediaType === 'image'; return <article className={`job-row ${['running', 'queued'].includes(job.status) ? 'constructing' : ''}`} key={job.id}><div className={`job-thumbnail ${audio ? 'audio' : ''}`}>{job.outputUrl ? audio ? <Music2 /> : image ? <img src={job.outputUrl} alt="Generated reference still" /> : <span aria-label="Video output">{job.thumbnailUrl ? <img src={job.thumbnailUrl} alt="" /> : <Film />}</span> : job.status === 'running' ? <LoaderCircle className="spin" /> : audio ? <Music2 /> : image ? <ImageIcon /> : <Film />}</div><div className="job-copy"><div><StatusBadge status={job.status} /><span>{new Date(job.createdAt).toLocaleString()}</span></div><strong>{shortPrompt(job.prompt)}</strong><small>{audio ? `${job.provider === 'music3' ? 'Music 3' : 'ACE-Step'} · ${job.duration}s · audio` : `${job.width} × ${job.height} · ${image ? 'Ref2VA still' : `${job.duration}s · ${job.mode}`}`}</small><JobExecutionChips job={job} />{job.outputUrl && audio && <audio className="job-audio" src={job.outputUrl} controls preload="metadata" />}{['running', 'queued'].includes(job.status) && <><small className="job-progress-label">{job.progressLabel ?? (job.status === 'queued' ? 'Waiting in queue' : audio ? 'Generating music locally' : image ? 'Generating one reference still' : 'Rendering locally')}{job.queuePosition ? ` · position ${job.queuePosition}` : ''}{job.currentStep !== undefined && job.totalSteps ? ` · ${job.currentStep}/${job.totalSteps}` : ''}</small><div className="progress compact"><i style={{ width: `${job.progress}%` }} /></div></>}{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.outputUrl && <a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a>}{['running', 'queued'].includes(job.status) && <button className="danger-button" disabled={cancellingIds.has(job.id)} onClick={() => void onCancel(job)}>{cancellingIds.has(job.id) ? <LoaderCircle size={15} className="spin" /> : <CircleStop size={15} />}{cancellingIds.has(job.id) ? 'Stopping…' : 'Stop'}</button>}{!['running', 'queued'].includes(job.status) && <button className="secondary-button" title="Remove from Queue history; rendered files stay on disk" onClick={() => onRemove(job)}><Trash2 size={15} />Remove</button>}</div></article> })}</div>}</div>
+  return <div className="standard-page">
+    <div className="page-heading"><div><p className="eyebrow">LOCAL WORKSPACE</p><h1>{title}</h1><p>{note}</p></div></div>
+    {jobs.length === 0 ? <div className="empty-page"><History size={28} /><strong>{empty}</strong><span>New work is saved automatically on this device.</span></div> : <div className="job-list">{jobs.map((job) => {
+      const audio = job.mediaType === 'audio'
+      const image = job.mediaType === 'image'
+      const active = job.status === 'running' || job.status === 'queued'
+      return <article className={`job-row ${active ? 'constructing' : ''}`} key={job.id}>
+        <div className={`job-thumbnail ${audio ? 'audio' : ''}`}>{job.outputUrl ? audio ? <Music2 /> : image ? <img src={job.outputUrl} alt="Generated reference still" /> : <span aria-label="Video output"><MovieMediaThumbnail source={job.outputUrl} posterUrl={job.thumbnailUrl} /></span> : job.status === 'running' ? <LoaderCircle className="spin" /> : audio ? <Music2 /> : image ? <ImageIcon /> : <Film />}</div>
+        <div className="job-copy"><div><StatusBadge status={job.status} /><span>{new Date(job.createdAt).toLocaleString()}</span></div><strong>{shortPrompt(job.prompt)}</strong><small>{audio ? `${job.provider === 'music3' ? 'Music 3' : 'ACE-Step'} · ${job.duration}s · audio` : `${job.width} × ${job.height} · ${image ? 'Ref2VA still' : `${job.duration}s · ${job.mode}`}`}</small><JobExecutionChips job={job} />{job.outputUrl && audio && <audio className="job-audio" src={job.outputUrl} controls preload="metadata" />}{active && <><small className="job-progress-label">{job.progressLabel ?? (job.status === 'queued' ? 'Waiting in queue' : audio ? 'Generating music locally' : image ? 'Generating one reference still' : 'Rendering locally')}{job.queuePosition ? ` · position ${job.queuePosition}` : ''}{job.currentStep !== undefined && job.totalSteps ? ` · ${job.currentStep}/${job.totalSteps}` : ''}</small><div className="progress compact"><i style={{ width: `${job.progress}%` }} /></div></>}{job.error && <p className="job-error">{job.error}</p>}<ComfyActivityConsole job={job} /></div>
+        <div className="job-actions">{job.outputUrl && <a className="secondary-button" href={job.outputUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />Open</a>}{active && <button className="danger-button" disabled={cancellingIds.has(job.id)} onClick={() => void onCancel(job)}>{cancellingIds.has(job.id) ? <LoaderCircle size={15} className="spin" /> : <CircleStop size={15} />}{cancellingIds.has(job.id) ? 'Stopping…' : 'Stop'}</button>}{!active && <button className="secondary-button" title="Remove from Queue history; rendered files stay on disk" onClick={() => onRemove(job)}><Trash2 size={15} />Remove</button>}</div>
+      </article>
+    })}</div>}
+  </div>
 }
 
 function SettingsView({ settings, setSettings, info, models, jobs, gpu, h3Report, scanning, status, checking, diagnosticRunning, benchmarkRunning, benchmarkConfig, setBenchmarkConfig, benchmarkResults, ollamaModels, localLlmStatus, localLlmChecking, legacyMigration, legacyMigrationRunning, onRefreshOllama, onScan, onCheck, onSave, onApplyDefaults, onRunDiagnostics, onRunBenchmark, onRunLegacyMigration, onFactoryReset }: { settings: AppSettings; setSettings(value: AppSettings): void; info: ObjectInfo; models: ModelFile[]; jobs: GenerationJob[]; gpu: GpuTelemetry | null; h3Report: ReturnType<typeof h3StackReport>; scanning: boolean; status: ComfyStatus; checking: boolean; diagnosticRunning: boolean; benchmarkRunning: boolean; benchmarkConfig: H3BenchmarkConfig; setBenchmarkConfig(value: H3BenchmarkConfig): void; benchmarkResults: H3BenchmarkResult[]; ollamaModels: OllamaModel[]; localLlmStatus: LocalLlmStatus | null; localLlmChecking: boolean; legacyMigration: { available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null; legacyMigrationRunning: boolean; onRefreshOllama(): void; onScan(): void; onCheck(): void; onSave(): void; onApplyDefaults(): void; onRunDiagnostics(): void; onRunBenchmark(): void; onRunLegacyMigration(): void; onFactoryReset(): void }) {
@@ -4322,6 +4457,7 @@ function SettingsView({ settings, setSettings, info, models, jobs, gpu, h3Report
   const [gpuDiagnosticStatus, setGpuDiagnosticStatus] = useState('')
   const [factoryResetOpen, setFactoryResetOpen] = useState(false)
   const [factoryResetPhrase, setFactoryResetPhrase] = useState('')
+  const [devToolsError, setDevToolsError] = useState('')
   const [activeSettingsSection, setActiveSettingsSection] = useState('display')
   const settingsSections = [
     ['display', 'Display & access'],
@@ -4388,6 +4524,9 @@ function SettingsView({ settings, setSettings, info, models, jobs, gpu, h3Report
   const routingSizes = Object.fromEntries(Object.entries(routingModelNames).map(([component, name]) => [component, estimatedComponentBytes(models.find((model) => model.name === name)?.bytes, component as RoutingComponent)]))
   const gpuRoutingPlan = resolveGpuRouting(settings.gpuRouting, routingGpuList, info, routingSizes, previewRoutingNode)
   const runtimeArgs = status.stats?.system?.argv ?? []
+  const detectedOutputDirectory = status.detectedOutputDirectory?.replace(/[\\/]+$/, '')
+  const configuredOutputDirectory = settings.outputDirectory.replace(/[\\/]+$/, '')
+  const outputDirectoryMismatch = Boolean(detectedOutputDirectory && configuredOutputDirectory.localeCompare(detectedOutputDirectory, undefined, { sensitivity: 'accent' }) !== 0)
   const hasRuntimeArg = (arg: string) => runtimeArgs.some((value) => value === arg || value.startsWith(`${arg}=`))
   const routingCapabilities = [
     { label: 'Diffusion model', node: info.UNETLoaderMultiGPU ? 'UNETLoaderMultiGPU' : info.SelectModelDevice ? 'SelectModelDevice' : undefined, cpu: Boolean(info.UNETLoaderMultiGPU) },
@@ -4472,8 +4611,8 @@ function SettingsView({ settings, setSettings, info, models, jobs, gpu, h3Report
   const preloadHasSeparateGpus = gpuRoutingPlan.placements.diffusion.resolved.startsWith('gpu:') && gpuRoutingPlan.placements.textEncoder.resolved.startsWith('gpu:') && gpuRoutingPlan.placements.diffusion.resolved !== gpuRoutingPlan.placements.textEncoder.resolved
   return <div className="standard-page settings-page"><div className="page-heading"><div><p className="eyebrow">APPLICATION</p><h1>Settings</h1><p>Organize your local engine, models, workspace scale, and output tools. Changes are saved automatically; this button also rescans models and refreshes connections.</p></div><button className="primary-button" onClick={onSave}><Save size={17} />Save & refresh</button></div>
     <div className="settings-layout"><aside className="settings-sidebar" aria-label="Settings sections"><span>SETTINGS</span>{settingsSections.map(([id, label]) => <button key={id} type="button" className={activeSettingsSection === id ? 'active' : ''} onClick={() => openSettingsSection(id)}>{label}</button>)}</aside><div className="settings-content">
-    <section className="settings-section settings-display-section" id="settings-display"><div className="settings-heading"><div><SlidersHorizontal size={19} /><span><strong>Display & access</strong><small>Make the workspace comfortable at your screen resolution and text size.</small></span></div><output>{settings.uiScale}%</output></div><div className="ui-scale-control"><div><label htmlFor="ui-scale">Interface scale</label><small>Changes the entire application immediately. The choice is saved with your local settings.</small></div><div><input id="ui-scale" type="range" min="75" max="150" step="5" value={settings.uiScale} onChange={(event) => { const uiScale = Number(event.target.value); setSettings({ ...settings, uiScale }); void window.minimax.setUiScale(uiScale / 100) }} /><div><button type="button" className="secondary-button" onClick={() => { setSettings({ ...settings, uiScale: 100 }); void window.minimax.setUiScale(1) }}>Reset to 100%</button><strong>{settings.uiScale}%</strong></div></div></div></section>
-    <section className="settings-section" id="settings-engine"><div className="settings-heading"><div><Activity size={19} /><span><strong>ComfyUI engine</strong><small>The desktop app communicates only with this local address.</small></span></div><span className={`health-pill ${status.connected ? 'online' : ''}`}>{status.connected ? 'Connected' : 'Offline'}</span></div><div className="connection-row"><div className="field-group grow"><label htmlFor="comfy-url">Server URL</label><input id="comfy-url" value={settings.comfyUrl} onChange={(event) => setSettings({ ...settings, comfyUrl: event.target.value })} /></div><button className="secondary-button test-button" onClick={onCheck} disabled={checking}>{checking ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}Test connection</button></div>{status.connected && status.stats?.devices?.[0] && <div className="device-strip"><Gauge size={17} /><span><strong>{status.stats.devices[0].name ?? 'Compute device'}</strong><small>{status.stats.devices[0].vram_total ? `${formatBytes(status.stats.devices[0].vram_total)} VRAM · ${formatBytes(status.stats.devices[0].vram_free ?? 0)} free` : 'ComfyUI device detected'}</small></span></div>}</section>
+    <section className="settings-section settings-display-section" id="settings-display"><div className="settings-heading"><div><SlidersHorizontal size={19} /><span><strong>Display & access</strong><small>Make the workspace comfortable at your screen resolution and text size.</small></span></div><output>{settings.uiScale}%</output></div><div className="ui-scale-control"><div><label htmlFor="ui-scale">Interface scale</label><small>Changes the entire application immediately. The choice is saved with your local settings.</small></div><div><input id="ui-scale" type="range" min="75" max="150" step="5" value={settings.uiScale} onChange={(event) => { const uiScale = Number(event.target.value); setSettings({ ...settings, uiScale }); void window.minimax.setUiScale(uiScale / 100) }} /><div><button type="button" className="secondary-button" onClick={() => { setSettings({ ...settings, uiScale: 100 }); void window.minimax.setUiScale(1) }}>Reset to 100%</button><strong>{settings.uiScale}%</strong></div></div></div><div className="connection-row"><div className="field-group grow"><strong>Developer tools</strong><small>Inspect renderer errors and performance while a video is rendering.</small></div><button type="button" className="secondary-button" onClick={() => { setDevToolsError(''); void window.minimax.openDevTools().catch((cause) => setDevToolsError(cause instanceof Error ? cause.message : String(cause))) }}><ExternalLink size={15} />Open DevTools</button></div>{devToolsError && <p className="settings-warning" role="alert"><AlertCircle size={15} />{devToolsError}</p>}</section>
+    <section className="settings-section" id="settings-engine"><div className="settings-heading"><div><Activity size={19} /><span><strong>ComfyUI engine</strong><small>The desktop app communicates only with this local address.</small></span></div><span className={`health-pill ${status.connected ? 'online' : ''}`}>{status.connected ? 'Connected' : 'Offline'}</span></div><div className="connection-row"><div className="field-group grow"><label htmlFor="comfy-url">Server URL</label><input id="comfy-url" value={settings.comfyUrl} onChange={(event) => setSettings({ ...settings, comfyUrl: event.target.value })} /></div><button className="secondary-button test-button" onClick={onCheck} disabled={checking}>{checking ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}Test connection</button></div>{status.connected && status.stats?.devices?.[0] && <div className="device-strip"><Gauge size={17} /><span><strong>{status.stats.devices[0].name ?? 'Compute device'}</strong><small>{status.stats.devices[0].vram_total ? `${formatBytes(status.stats.devices[0].vram_total)} VRAM · ${formatBytes(status.stats.devices[0].vram_free ?? 0)} free` : 'ComfyUI device detected'}</small></span></div>}{outputDirectoryMismatch && <div className="settings-warning" role="alert"><AlertCircle size={15} /><span><strong>Output folder does not match the running ComfyUI</strong><small>ComfyUI is saving to <code>{detectedOutputDirectory}</code>. Oyama is looking in <code>{settings.outputDirectory}</code>, so completed renders can appear missing.</small></span><button type="button" className="secondary-button" onClick={() => setSettings({ ...settings, outputDirectory: detectedOutputDirectory!, clipMasterOutputDirectory: `${detectedOutputDirectory}\\video` })}>Use detected folder</button></div>}</section>
     <section className="settings-section gpu-routing-section" id="settings-routing"><div className="settings-heading"><div><Gauge size={19} /><span><strong>GPU Routing</strong><small>Place whole model components on independent devices; VAEs are never split.</small></span></div><span className={`health-pill ${gpuRoutingPlan.warnings.length ? '' : 'online'}`}>{gpuRoutingPlan.warnings.length ? 'Fallback active' : 'Ready'}</span></div>
       <div className="gpu-routing-presets"><SelectField label="Routing preset" value={settings.gpuRouting.preset} onChange={(preset) => updateGpuRouting({ preset: preset as AppSettings['gpuRouting']['preset'] })} options={[["automatic", 'Automatic'], ["single", 'Single GPU'], ["split", 'Diffusion GPU 0 / VAE GPU 1'], ["custom", 'Custom']]} /><SelectField label="Residency strategy" value={gpuRoutingPlan.workflow.strategy} onChange={(strategy) => updateGpuRouting({ strategy: strategy as AppSettings['gpuRouting']['strategy'], ...(strategy !== 'resident' ? { preloadDiffusionDuringTextEncoding: false } : {}) })} options={[["resident", 'Keep Resident'], ["sequential", 'Sequential Offload'], ["cpu-fallback", 'CPU Fallback']]} /></div>
       <div className="gpu-loading-modes" aria-label="H3 model loading options">
@@ -4561,7 +4700,7 @@ function SettingsView({ settings, setSettings, info, models, jobs, gpu, h3Report
       <p className="settings-note">{settings.llmProvider === 'lmstudio' ? 'LM Studio is opt-in and restricted to loopback addresses (localhost, 127.0.0.1, or ::1). Start its Local Server and load a model before testing.' : 'Prompts and reference images go directly to the selected local Ollama server. Embedding and cloud-backed entries are excluded. Image analysis requires a vision-capable model; text-only models still support prompt refinement.'}</p>
     </section>
     <section className="settings-section" id="settings-models"><div className="settings-heading"><div><HardDrive size={19} /><span><strong>Model locations</strong><small>Files are indexed in place and are never moved or copied.</small></span></div><button className="secondary-button" onClick={onScan} disabled={scanning}>{scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}{scanning ? 'Scanning…' : 'Rescan'}</button></div><div className="path-table">{pathRows.map((row) => { const count = models.filter((model) => model.kind === row.kind).length; return <div className="path-row" key={row.kind}><div className="path-kind"><Folder size={17} /><span><strong>{row.label}</strong><small>{row.note}</small></span></div><div className="path-input"><input value={settings.paths[row.kind]} onChange={(event) => setSettings({ ...settings, paths: { ...settings.paths, [row.kind]: event.target.value } })} /><button onClick={async () => { const path = await window.minimax.chooseDirectory(settings.paths[row.kind]); if (path) setSettings({ ...settings, paths: { ...settings.paths, [row.kind]: path } }) }} aria-label={`Browse for ${row.label}`}><FolderOpen size={17} /></button></div><span className="file-count">{count} files</span></div>})}</div></section>
-    <section className="settings-section" id="settings-storage"><div className="settings-heading"><div><FolderOpen size={19} /><span><strong>Output & clip tools</strong><small>Completed videos, extracted frames, and editor exports stay local.</small></span></div></div><div className="connection-row"><div className="field-group grow"><label htmlFor="output-path">ComfyUI output directory</label><input id="output-path" value={settings.outputDirectory} onChange={(event) => setSettings({ ...settings, outputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.outputDirectory); if (path) setSettings({ ...settings, outputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><div className="connection-row"><div className="field-group grow"><label htmlFor="clip-master-output-path">Clip Master default output folder</label><input id="clip-master-output-path" value={settings.clipMasterOutputDirectory} onChange={(event) => setSettings({ ...settings, clipMasterOutputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.clipMasterOutputDirectory); if (path) setSettings({ ...settings, clipMasterOutputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><p className="settings-note">Defaults to ComfyUI/output/video. Clip Master creates a separate ClipMaster/source-clip folder here for frames and suggests this folder when exporting a trimmed video; the save dialog can still use another location.</p><div className="connection-row clip-tool-path"><div className="field-group grow"><label htmlFor="ffmpeg-path">FFmpeg executable</label><input id="ffmpeg-path" value={settings.ffmpegPath} onChange={(event) => setSettings({ ...settings, ffmpegPath: event.target.value })} /></div></div><p className="settings-note">The clip editor uses FFmpeg for frame extraction, trim points, joining, and full-project export.</p><label className="settings-check"><input type="checkbox" checked={settings.blurNsfwLivePreviews} onChange={(event) => setSettings({ ...settings, blurNsfwLivePreviews: event.target.checked })} /><span><strong>Blur sensitive live previews</strong><small>When enabled, the local preview blurs if the render prompt contains explicit-adult wording. Hover or keyboard-focus the preview to reveal it. This never blocks, changes, or uploads a render.</small></span></label><div className="legacy-migration-settings"><div><strong>Previous Studio data</strong><small>{legacyMigration?.needsBrowserStorageRepair ? 'Restore the previous local characters, projects, and workspace state. This replaces Oyama browser-backed workspace data, then requires a restart.' : legacyMigration?.migrated ? 'The previous MiniMax Studio profile was imported. Run this again only to collect files added to the old app after the first import.' : legacyMigration?.available ? 'Import your previous MiniMax Studio profile into Oyama. Existing Oyama data is never replaced.' : 'No previous MiniMax Studio profile was found on this computer.'}</small></div><button type="button" className="secondary-button" disabled={!legacyMigration?.available || legacyMigrationRunning} onClick={onRunLegacyMigration}>{legacyMigrationRunning ? <LoaderCircle className="spin" size={15} /> : <History size={15} />}{legacyMigrationRunning ? 'Importing…' : legacyMigration?.needsBrowserStorageRepair ? 'Restore projects & characters' : legacyMigration?.migrated ? 'Import missing data again' : 'Import previous data'}</button></div></section>
+    <section className="settings-section" id="settings-storage"><div className="settings-heading"><div><FolderOpen size={19} /><span><strong>Output & clip tools</strong><small>Completed videos, extracted frames, and editor exports stay local.</small></span></div></div>{detectedOutputDirectory && <p className={`settings-note ${outputDirectoryMismatch ? 'warning' : ''}`} role="status">Running ComfyUI output: <code>{detectedOutputDirectory}</code>{outputDirectoryMismatch && <button type="button" className="secondary-button" onClick={() => setSettings({ ...settings, outputDirectory: detectedOutputDirectory, clipMasterOutputDirectory: `${detectedOutputDirectory}\\video` })}>Use this folder</button>}</p>}<div className="connection-row"><div className="field-group grow"><label htmlFor="output-path">ComfyUI output directory</label><input id="output-path" value={settings.outputDirectory} onChange={(event) => setSettings({ ...settings, outputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.outputDirectory); if (path) setSettings({ ...settings, outputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><div className="connection-row"><div className="field-group grow"><label htmlFor="clip-master-output-path">Clip Master default output folder</label><input id="clip-master-output-path" value={settings.clipMasterOutputDirectory} onChange={(event) => setSettings({ ...settings, clipMasterOutputDirectory: event.target.value })} /></div><button className="secondary-button test-button" onClick={async () => { const path = await window.minimax.chooseDirectory(settings.clipMasterOutputDirectory); if (path) setSettings({ ...settings, clipMasterOutputDirectory: path }) }}><FolderOpen size={16} />Browse</button></div><p className="settings-note">Defaults to ComfyUI/output/video. Clip Master creates a separate ClipMaster/source-clip folder here for frames and suggests this folder when exporting a trimmed video; the save dialog can still use another location.</p><div className="connection-row clip-tool-path"><div className="field-group grow"><label htmlFor="ffmpeg-path">FFmpeg executable</label><input id="ffmpeg-path" value={settings.ffmpegPath} onChange={(event) => setSettings({ ...settings, ffmpegPath: event.target.value })} /></div></div><p className="settings-note">The clip editor uses FFmpeg for frame extraction, trim points, joining, and full-project export.</p><label className="settings-check"><input type="checkbox" checked={settings.blurNsfwLivePreviews} onChange={(event) => setSettings({ ...settings, blurNsfwLivePreviews: event.target.checked })} /><span><strong>Blur sensitive live previews</strong><small>When enabled, the local preview blurs if the render prompt contains explicit-adult wording. Hover or keyboard-focus the preview to reveal it. This never blocks, changes, or uploads a render.</small></span></label><div className="legacy-migration-settings"><div><strong>Previous Studio data</strong><small>{legacyMigration?.needsBrowserStorageRepair ? 'Restore the previous local characters, projects, and workspace state. This replaces Oyama browser-backed workspace data, then requires a restart.' : legacyMigration?.migrated ? 'The previous MiniMax Studio profile was imported. Run this again only to collect files added to the old app after the first import.' : legacyMigration?.available ? 'Import your previous MiniMax Studio profile into Oyama. Existing Oyama data is never replaced.' : 'No previous MiniMax Studio profile was found on this computer.'}</small></div><button type="button" className="secondary-button" disabled={!legacyMigration?.available || legacyMigrationRunning} onClick={onRunLegacyMigration}>{legacyMigrationRunning ? <LoaderCircle className="spin" size={15} /> : <History size={15} />}{legacyMigrationRunning ? 'Importing…' : legacyMigration?.needsBrowserStorageRepair ? 'Restore projects & characters' : legacyMigration?.migrated ? 'Import missing data again' : 'Import previous data'}</button></div></section>
     <section className="settings-section factory-reset-section" id="settings-reset">
       <div className="settings-heading"><div><RotateCcw size={19} /><span><strong>Factory reset</strong><small>Clear all saved workspaces, characters, assets, projects, presets, and library history. Restore default settings.</small></span></div></div>
       <p className="settings-note">Generated media, imported files, models, and ComfyUI remain on disk. App records cannot be recovered through Undo. Finish or cancel active generations and close other editor windows first.</p>

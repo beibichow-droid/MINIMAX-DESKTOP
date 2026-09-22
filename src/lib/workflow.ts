@@ -330,6 +330,8 @@ export function buildMiniMaxWorkflow(
       ? ['161', 1]
       : options.continuationAssembly.trimFrames
     prompt['171'] = { class_type: 'MiniMaxH3LoopTrim', inputs: { images: ['16', 0], audio: ['17', 0], trim_frames: trimFrames, fps: 24, match_tail: true } }
+    prompt['173'] = { class_type: 'CreateVideo', inputs: { images: ['171', 0], audio: ['171', 1], fps: 24, bit_depth: 8, color_space: 'sRGB' } }
+    prompt['174'] = { class_type: 'SaveVideo', inputs: { video: ['173', 0], filename_prefix: `${options.filenamePrefix}_Beat`, format: 'auto', codec: 'auto' } }
     prompt['172'] = { class_type: 'MiniMaxH3VideoMerge', inputs: { images_a: previousFrames, audio_a: ['1701', 1], images_b: ['171', 0], audio_b: ['171', 1], seam_smooth: 1, color_match: 'seam_fade', blend_frames: options.continuationAssembly.blendFrames, fps: 24 } }
     prompt['18'] = { class_type: 'CreateVideo', inputs: { images: ['172', 0], audio: ['172', 1], fps: 24, bit_depth: 8, color_space: 'sRGB' } }
   }
@@ -356,7 +358,7 @@ export function buildMiniMaxReferenceStillWorkflow(options: GenerationOptions, m
 
 export type ComfyOutputFile = { filename: string; subfolder?: string; type?: string }
 
-export function extractOutputFile(history: Record<string, unknown>, promptId: string, mediaType: 'video' | 'audio' | 'image' = 'video'): ComfyOutputFile | undefined {
+export function extractOutputFile(history: Record<string, unknown>, promptId: string, mediaType: 'video' | 'audio' | 'image' = 'video', nodeId?: string): ComfyOutputFile | undefined {
   const entry = history[promptId] as { outputs?: Record<string, Record<string, unknown>> } | undefined
   if (!entry?.outputs) return undefined
   const candidates: ComfyOutputFile[] = []
@@ -376,9 +378,11 @@ export function extractOutputFile(history: Record<string, unknown>, promptId: st
     }
     Object.values(object).forEach(visit)
   }
-  if (mediaType === 'image' && entry.outputs['73']) visit(entry.outputs['73'])
+  if (nodeId) visit(entry.outputs[nodeId])
+  else if (mediaType === 'image' && entry.outputs['73']) visit(entry.outputs['73'])
   else if (entry.outputs['84']) visit(entry.outputs['84'])
   else if (entry.outputs['70']) visit(entry.outputs['70'])
+  else if (mediaType === 'video' && entry.outputs['19']) visit(entry.outputs['19'])
   else visit(entry.outputs)
   const expected = mediaType === 'audio' ? /\.(flac|wav|mp3|ogg|m4a|aac|opus)$/i : mediaType === 'image' ? /\.(png|jpe?g|webp)$/i : /\.(mp4|webm|mov|mkv|gif)$/i
   // Do not fall through to an arbitrary output. In particular, a SaveVideo

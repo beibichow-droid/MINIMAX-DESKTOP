@@ -1,7 +1,23 @@
 const assert = require('node:assert/strict')
 const { load } = require('./test-ts-loader.cjs')
-const { buildMiniMaxWorkflow } = load('src/lib/workflow.ts')
-const { continuationBeatSignature, continuationOutputName, continuationOutputStem, continuationPreviousAction, continuationTiming } = load('src/lib/continuation.ts')
+const { buildMiniMaxWorkflow, extractOutputFile } = load('src/lib/workflow.ts')
+const { normalizeContinuationSources, continuationReferenceReplaced, continuationSourceState, continuationBeatSignature, continuationOutputName, continuationOutputStem, continuationPreviousAction, continuationTiming, nextContinuationOpenRequest } = load('src/lib/continuation.ts')
+const { bindSceneReferences } = load('src/lib/scenePromptState.ts')
+const { compileScene } = load('src/lib/h3SceneCompiler.ts')
+const legacySource = { prompt: 'Kierra walks forward.', duration: 5, mode: 'reference', referenceFiles: [{ kind: 'image', path: 'kierra.png', name: 'Character: Kierra / master identity', referenceRole: 'subject', referenceRetention: 'preserve' }] }
+const restoredSource = continuationSourceState(legacySource)
+assert.equal(restoredSource.references[0].ownerId, restoredSource.characters[0].id)
+const inheritedSource = bindSceneReferences(restoredSource, [{ file: legacySource.referenceFiles[0], purpose: 'generic', label: 'Inherited identity', source: 'continuity' }])
+assert.equal(compileScene(inheritedSource).conflicts.some(conflict => conflict.code === 'owner-required'), false, 'legacy continuation keeps the source identity with Kierra')
+const beatState = { ...restoredSource, scene: 'What happens next: Kierra turns toward the door.', references: restoredSource.references, characters: restoredSource.characters }
+const beatRender = bindSceneReferences(beatState, [{ file: legacySource.referenceFiles[0], purpose: 'generic', label: 'Inherited identity', source: 'continuity' }])
+assert.equal(compileScene(beatRender).conflicts.some(conflict => conflict.code === 'owner-required'), false, 'beat preflight accepts Kierra before ComfyUI submission')
+const repairedSource = continuationSourceState({ ...legacySource, continuityState: { ...restoredSource, references: restoredSource.references.map(ref => ({ ...ref, ownerId: undefined })) } })
+assert.equal(repairedSource.references[0].ownerId, repairedSource.characters[0].id, 'stored continuation references recover a missing character owner')
+const firstOpen = nextContinuationOpenRequest({ id: 0, sourceId: null }, 'completed-video-1')
+const secondOpen = nextContinuationOpenRequest(firstOpen, 'completed-video-1')
+assert.equal(secondOpen.sourceId, firstOpen.sourceId)
+assert.notEqual(secondOpen.id, firstOpen.id, 'Reopening the same completed clip must produce a fresh continuation request')
 const models = { fl2va: 'fl2va', ref2va: 'ref2va', fastH3: 'fast', textEncoder: 'clip', videoVae: 'video', audioVae: 'audio', fl2vLora: 'fl-lora', ref2vLora: 'ref-lora' }
 const base = { mode: 'text', prompt: 'She walks to the window.', width: 768, height: 768, duration: 5, seed: 42, steps: 30, turbo: 'off', sampler: 'res_multistep', scheduler: 'simple', refImageSize: 'match', filenamePrefix: 'video/test', referenceImages: [], referenceVideos: [], referenceAudios: [] }
 const captured = buildMiniMaxWorkflow({ ...base, latentCapture: { filenamePrefix: 'h3_context/job-1' } }, models, { images: [], videos: [], audios: [] })
@@ -26,6 +42,14 @@ assert.deepEqual(Array.from(motion['172'].inputs.audio_a), ['1701', 1])
 assert.deepEqual(Array.from(motion['18'].inputs.images), ['172', 0])
 assert.deepEqual(Array.from(motion['18'].inputs.audio), ['172', 1])
 assert.equal(motion['190'].inputs.filename_prefix, 'h3_context/job-2')
+assert.deepEqual(Array.from(motion['190'].inputs.latent), ['15', 0], 'The next beat must reuse the sampled trailing latent, not an assembled or re-encoded movie')
+assert.deepEqual(Array.from(motion['173'].inputs.images), ['171', 0], 'Individual export must exclude repeated context')
+assert.deepEqual(Array.from(motion['173'].inputs.audio), ['171', 1], 'Individual export must use synchronized trimmed audio')
+assert.equal(motion['174'].inputs.filename_prefix, 'video/test_Beat')
+const outputHistory = { render: { outputs: { '174': { videos: [{ filename: 'beat.mp4' }] }, '19': { videos: [{ filename: 'combined.mp4' }] } } } }
+assert.equal(extractOutputFile(outputHistory, 'render').filename, 'combined.mp4')
+assert.equal(extractOutputFile(outputHistory, 'render', 'video', '174').filename, 'beat.mp4')
+assert.equal(extractOutputFile(outputHistory, 'render', 'video', 'missing'), undefined)
 const silentMotion = buildMiniMaxWorkflow({ ...base, duration: timing.renderDuration, motionContext: { latentPath: 'h3_context/job-1_00001.safetensors', contextFrames: 22, blendFrames: 0, carryAudio: false, suppressAudio: true }, continuationAssembly: { sourceVideo: { name: 'source.mp4' }, trimFrames: timing.trimFrames, blendFrames: 0, useMotionTrim: true } }, models, { images: [], videos: [], audios: [], source: { name: 'source.mp4' } })
 assert.equal(silentMotion['161'].class_type, 'MiniMaxH3MotionContext')
 assert.deepEqual(Array.from(silentMotion['160'].inputs.vae), ['3', 0])
@@ -49,7 +73,21 @@ const beat1 = { id: 'one', name: 'Walk to Window', prompt: 'Walk to the window.'
 const beat2 = { id: 'two', name: 'Look Outside', prompt: 'Look Outside', sourceMode: 'previous', replacements: {} }
 const beat3 = { id: 'three', name: 'Turn to Door', prompt: 'Turn toward the door.', sourceMode: 'previous', replacements: {} }
 const script = { videoName: 'Morning Scene', beats: [beat1, beat2, beat3] }
+const deletedBranch = normalizeContinuationSources([beat1, { ...beat3, sourceMode: 'beat', sourceBeatId: 'deleted' }])
+assert.equal(deletedBranch[1].sourceMode, 'previous', 'Deleting a branch source must not leave an impossible dependency')
+assert.equal(normalizeContinuationSources([{ ...beat1, sourceMode: 'beat', sourceBeatId: 'three' }, beat3])[0].sourceMode, 'original', 'The first beat must explicitly use the original source')
+assert.equal(normalizeContinuationSources([beat1, { ...beat3, sourceMode: 'beat', sourceBeatId: 'one' }])[1].sourceBeatId, 'one')
+assert.equal(normalizeContinuationSources([{ ...beat1, sourceMode: 'original' }, { ...beat2, sourceMode: 'previous' }, { ...beat3, sourceMode: 'original' }])[2].sourceMode, 'original', 'Each beat must retain its own source selection')
+const alice = { path: 'alice.png', referenceRole: 'wardrobe' }
+const bob = { path: 'bob.png', referenceRole: 'wardrobe' }
+const ownership = [{ file: alice, ownerId: 'alice' }, { file: bob, ownerId: 'bob' }]
+const replacement = { replacements: { wardrobe: { path: 'new-coat.png' } }, replacementOwnerIds: { wardrobe: 'alice' } }
+assert.equal(continuationReferenceReplaced(replacement, alice, ownership), true)
+assert.equal(continuationReferenceReplaced(replacement, bob, ownership), false, 'Replacing Alice’s wardrobe must preserve Bob’s references')
 assert.notEqual(continuationBeatSignature(beat1, script.videoName, 'text:last'), continuationBeatSignature(beat1, script.videoName, 'reference:motion'))
+const sharedContinuity = { dialogueMode: 'inherit', contextFrames: 22, blendFrames: 0, carryAudio: true }
+assert.notEqual(continuationBeatSignature(beat1, script.videoName, 'text:motion', sharedContinuity), continuationBeatSignature(beat1, script.videoName, 'text:motion', { ...sharedContinuity, contextFrames: 39 }), 'Changing an all-beats continuity setting must invalidate the previous render signature')
+assert.equal(JSON.parse(continuationBeatSignature(beat1, script.videoName, 'text:motion', sharedContinuity)).continuity.carryAudio, true)
 assert.equal(continuationOutputStem(script, beat3), 'Morning-Scene__beat1-Walk-to-Window_beat2-Look-Outside_beat3-Turn-to-Door')
 assert.equal(continuationOutputStem({ ...script, beats: [beat1, beat2, { ...beat3, sourceMode: 'original' }] }, { ...beat3, sourceMode: 'original' }), 'Morning-Scene__beat3-Turn-to-Door')
 assert.equal(continuationOutputStem({ ...script, beats: [beat1, beat2, { ...beat3, sourceMode: 'beat', sourceBeatId: beat1.id }] }, { ...beat3, sourceMode: 'beat', sourceBeatId: beat1.id }), 'Morning-Scene__beat1-Walk-to-Window_beat3-Turn-to-Door')

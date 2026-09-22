@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol, session } from 'electron'
-import { createReadStream, existsSync } from 'node:fs'
-import { cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { constants, createReadStream, createWriteStream, existsSync } from 'node:fs'
+import { copyFile, cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { writeAtomicFile } from './atomicFile.js'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
 import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import WebSocket from 'ws'
 
 type ModelKind = 'diffusion_models' | 'text_encoders' | 'vae' | 'loras' | 'vae_approx' | 'clip_vision'
@@ -508,7 +509,14 @@ function cleanUrl(url: string) {
 async function comfyFetch(url: string, path: string, init?: RequestInit) {
   const response = await fetch(`${cleanUrl(url)}${path}`, init)
   if (!response.ok) {
-    const message = await response.text().catch(() => '')
+    const body = await response.text().catch(() => '')
+    let message = body
+    try {
+      const parsed = JSON.parse(body) as { error?: { message?: string } | string; node_errors?: Record<string, { errors?: Array<{ message?: string; details?: string }> }> }
+      const promptError = typeof parsed.error === 'string' ? parsed.error : parsed.error?.message
+      const nodeError = Object.entries(parsed.node_errors ?? {}).flatMap(([nodeId, value]) => (value.errors ?? []).map(error => `Node ${nodeId}: ${error.message ?? error.details ?? 'invalid input'}`))[0]
+      message = [promptError, nodeError].filter(Boolean).join(' · ')
+    } catch { /* Preserve non-JSON server errors verbatim. */ }
     throw new Error(message || `ComfyUI returned ${response.status}`)
   }
   const contentType = response.headers.get('content-type') ?? ''
@@ -838,12 +846,17 @@ async function resolveUploadSource(source: string) {
     const configured = new URL(cleanUrl((await loadSettings()).comfyUrl))
     const target = new URL(upstream)
     if (target.origin !== configured.origin || target.pathname !== '/view') throw new Error('The video is outside the configured ComfyUI server.')
-    const response = await fetch(target)
+    const response = await fetch(target, { signal: AbortSignal.timeout(90_000) }).catch((error: unknown) => {
+      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) throw new Error('ComfyUI did not return the source video within 90 seconds. Check its connection and retry.')
+      throw error
+    })
     if (!response.ok) throw new Error(`Could not retrieve the ComfyUI video (${response.status}).`)
+    if (!response.body) throw new Error('ComfyUI returned an empty video response.')
     const extension = extname(target.searchParams.get('filename') ?? '').toLowerCase()
     if (!selectedMediaExtensions.has(extension)) throw new Error('The ComfyUI media type is unsupported.')
     const temporary = join(app.getPath('temp'), `minimax-upload-${randomUUID()}${extension}`)
-    await writeFile(temporary, Buffer.from(await response.arrayBuffer()))
+    try { await pipeline(Readable.fromWeb(response.body as unknown as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(temporary)) }
+    catch (error) { await unlink(temporary).catch(() => undefined); throw error }
     return temporary
   }
   throw new Error('Unsupported media source.')
@@ -898,7 +911,7 @@ function createWindow() {
   void loadSettings().then((settings) => window.webContents.setZoomFactor(settings.uiScale / 100))
   window.webContents.setWindowOpenHandler(({ url, frameName }) => {
     if (url !== 'about:blank') return { action: 'deny' }
-    const isPreviewMonitor = frameName === 'oyama-ai-video-studio-preview'
+    const isPreviewMonitor = frameName === 'oyama-ai-video-studio-preview' || frameName === 'oyama-continuation'
     return {
       action: 'allow',
       overrideBrowserWindowOptions: {
@@ -1000,6 +1013,65 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('window:open-studio', () => { if (!studioWindow || studioWindow.isDestroyed()) createWindow(); if (studioWindow?.isMinimized()) studioWindow.restore(); studioWindow?.show(); studioWindow?.focus() })
   ipcMain.handle('window:open-movie-editor', () => { createMovieEditorWindow() })
+  ipcMain.handle('video:continuation-source', async (_event, sources: string[], throughTime: number | null, outputDirectory: string, ffmpegPath: string) => {
+    if (!Array.isArray(sources) || !sources.length || sources.length > 8) throw new Error('Select a valid continuation source.')
+    if (throughTime !== null && (!Number.isFinite(throughTime) || throughTime < 0)) throw new Error('Choose a valid source frame.')
+    let input = ''
+    let temporaryInput = false
+    let lastError: unknown
+    for (const source of sources) {
+      try {
+        input = await resolveVideoSource(source)
+        temporaryInput = source.startsWith('minimax-media:') && new URL(source).hostname === 'comfy'
+        break
+      } catch (error) { lastError = error }
+    }
+    if (!input) throw lastError ?? new Error('The source video is unavailable.')
+    try {
+    const metadata = await probeClipVideoMetadata(input, ffmpegPath)
+    if (throughTime !== null && throughTime >= metadata.duration) throw new Error('The chosen frame is outside this source. Choose a frame within the video.')
+    // LoadVideo preserves native cadence, while the H3 merger uses 24 fps.
+    // Normalize before loading so a 30/60 fps source cannot play in slow motion.
+    const frames = throughTime === null ? Math.max(1, Math.round(metadata.duration * 24)) : Math.floor(throughTime * 24) + 1
+    const folder = join(outputDirectory, 'continuations', '_sources')
+    await mkdir(folder, { recursive: true })
+    const output = join(folder, `source-${randomUUID()}.mp4`)
+    const audioStreams = JSON.parse(await runFfprobe(ffmpegPath, ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'json', input])) as { streams?: unknown[] }
+    const hasAudio = Boolean(audioStreams.streams?.length)
+    await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-i', input,
+      ...(!hasAudio ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'] : []),
+      '-map', '0:v:0', '-map', hasAudio ? '0:a:0' : '1:a:0', '-vf', `fps=24,trim=end_frame=${frames},setpts=PTS-STARTPTS,pad=ceil(iw/2)*2:ceil(ih/2)*2`,
+      '-af', `apad,atrim=duration=${frames / 24},asetpts=PTS-STARTPTS`,
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-r', '24', '-fps_mode', 'cfr',
+      '-c:a', 'aac', '-movflags', '+faststart', '-n', output]).catch(async error => {
+        await unlink(output).catch(() => undefined)
+        throw error
+      })
+    return output
+    } finally {
+      if (temporaryInput) await unlink(input).catch(() => undefined)
+    }
+  })
+  ipcMain.handle('window:open-dev-tools', (event) => {
+    const target = BrowserWindow.fromWebContents(event.sender)
+    if (!target || target.isDestroyed()) throw new Error('The current window is unavailable. Reopen the studio and try again.')
+    target.webContents.openDevTools({ mode: 'detach', activate: true })
+  })
+  ipcMain.handle('video:export', async (event, source: string, suggestedName: string) => {
+    const input = await resolveVideoSource(source)
+    const extension = extname(input).slice(1)
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    const options = { title: 'Export video', defaultPath: `${basename(suggestedName).replace(/\.[^.]+$/, '').replace(/[<>:"/\\|?*]/g, '-')}.${extension}`, filters: [{ name: 'Video', extensions: [extension] }] }
+    const result = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return null
+    if (resolve(input) === resolve(result.filePath)) throw new Error('Choose a different destination to preserve the source video.')
+    // An export must never replace a source or an earlier saved version.
+    await copyFile(input, result.filePath, constants.COPYFILE_EXCL).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'EEXIST') throw new Error('That file already exists. Choose a new filename for this export.')
+      throw error
+    })
+    return result.filePath
+  })
   ipcMain.handle('lan:status', () => lanStatus)
   ipcMain.handle('lan:sync-characters', (_event, characters: unknown[]) => { mobileCharacterLibrary = Array.isArray(characters) ? characters : []; return { synced: mobileCharacterLibrary.length } })
   ipcMain.handle('lan:rotate-token', async () => {
@@ -1059,21 +1131,32 @@ app.whenReady().then(async () => {
   ipcMain.handle('comfy:status', async (_event, url: string) => {
     const started = Date.now()
     try {
-      const stats = await comfyFetch(url, '/system_stats')
-      return { connected: true, latencyMs: Date.now() - started, stats }
+      const stats = await comfyFetch(url, '/system_stats', { signal: AbortSignal.timeout(15_000) }) as { system?: { argv?: string[] } }
+      const argv = stats.system?.argv ?? []
+      const outputIndex = argv.findIndex(value => value === '--output-directory')
+      const detectedOutputDirectory = outputIndex >= 0 ? argv[outputIndex + 1] : argv.find(value => value.startsWith('--output-directory='))?.slice('--output-directory='.length)
+      return { connected: true, latencyMs: Date.now() - started, stats, detectedOutputDirectory }
     } catch (error) {
       return { connected: false, latencyMs: Date.now() - started, error: error instanceof Error ? error.message : String(error) }
     }
   })
-  ipcMain.handle('comfy:submit', (_event, url: string, prompt: unknown, clientId?: string) =>
-    comfyFetch(url, '/prompt', {
+  ipcMain.handle('comfy:submit', async (_event, url: string, prompt: unknown, clientId?: string) => {
+    try {
+      const result = await comfyFetch(url, '/prompt', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, client_id: clientId ?? randomUUID() }),
-    }),
-  )
-  ipcMain.handle('comfy:queue', (_event, url: string) => comfyFetch(url, '/queue'))
-  ipcMain.handle('comfy:info', (_event, url: string) => comfyFetch(url, '/object_info'))
+      signal: AbortSignal.timeout(60_000),
+      }) as { prompt_id?: unknown; node_errors?: unknown }
+      if (typeof result.prompt_id !== 'string' || !result.prompt_id) throw new Error('ComfyUI accepted the request but did not return a prompt ID. Check its queue before retrying to avoid a duplicate render.')
+      return result
+    } catch (error) {
+      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) throw new Error('ComfyUI did not respond to the workflow submission within one minute. Check its queue before retrying to avoid a duplicate render.')
+      throw error
+    }
+  })
+  ipcMain.handle('comfy:queue', (_event, url: string) => comfyFetch(url, '/queue', { signal: AbortSignal.timeout(10_000) }))
+  ipcMain.handle('comfy:info', (_event, url: string) => comfyFetch(url, '/object_info', { signal: AbortSignal.timeout(30_000) }))
   ipcMain.handle('comfy:upload-data', async (_event, url: string, data: string) => {
     if (!data.startsWith('data:image/png;base64,') || data.length > 64_000_000) throw new Error('Invalid prepared image.')
     const form = new FormData()
@@ -1122,7 +1205,7 @@ app.whenReady().then(async () => {
     await writeFile(target, Buffer.from(await response.arrayBuffer()))
     return { path: target, name: basename(target) }
   })
-  ipcMain.handle('comfy:history', (_event, url: string, promptId: string) => comfyFetch(url, `/history/${encodeURIComponent(promptId)}`))
+  ipcMain.handle('comfy:history', (_event, url: string, promptId: string) => comfyFetch(url, `/history/${encodeURIComponent(promptId)}`, { signal: AbortSignal.timeout(10_000) }))
   ipcMain.handle('comfy:cancel', async (_event, url: string, promptId: string) => {
     if (!promptId || typeof promptId !== 'string') throw new Error('A ComfyUI prompt ID is required to cancel a generation.')
     const queue = await comfyFetch(url, '/queue') as { queue_running?: unknown[][]; queue_pending?: unknown[][] }
@@ -1165,13 +1248,22 @@ app.whenReady().then(async () => {
     // path. Resolve it through the same guarded media loader used by frame
     // extraction so continuation can reuse a video that already previews.
     const source = await resolveUploadSource(filePath)
-    const bytes = await readFile(source)
-    const form = new FormData()
-    form.append('image', new Blob([bytes]), basename(source))
-    form.append('type', 'input')
-    form.append('subfolder', subfolder)
-    form.append('overwrite', 'true')
-    return comfyFetch(url, '/upload/image', { method: 'POST', body: form })
+    const temporarySource = filePath.startsWith('minimax-media:') && new URL(filePath).hostname === 'comfy'
+    try {
+      const bytes = await readFile(source)
+      const form = new FormData()
+      form.append('image', new Blob([bytes]), basename(source))
+      form.append('type', 'input')
+      form.append('subfolder', subfolder)
+      form.append('overwrite', 'true')
+      try { return await comfyFetch(url, '/upload/image', { method: 'POST', body: form, signal: AbortSignal.timeout(90_000) }) }
+      catch (error) {
+        if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) throw new Error(`ComfyUI did not finish uploading ${basename(source)} within 90 seconds. Check that ComfyUI is responsive, then retry this beat.`)
+        throw error
+      }
+    } finally {
+      if (temporarySource) await unlink(source).catch(() => undefined)
+    }
   })
   ipcMain.handle('ollama:status', async (_event, url: string, provider: LlmProvider = 'ollama') => ({ connected: true, models: await listLlmModels(url, provider) }))
   ipcMain.handle('ollama:generate', async (_event, url: string, model: string, prompt: string, provider: LlmProvider = 'ollama') => generateWithLlm(url, model, prompt, provider))
@@ -1335,24 +1427,33 @@ app.whenReady().then(async () => {
     return { path: output, name }
   })
   ipcMain.handle('video:thumbnail', async (_event, source: string, ffmpegPath: string) => {
-    // Keep thumbnails out of the render directory and reuse them across restarts.
-    // Only local files are accepted; remote Comfy URLs must first be saved locally.
-    if (source.startsWith('minimax-media:')) throw new Error('A saved local video is required for a persistent thumbnail.')
-    const input = await resolveVideoSource(source)
-    const sourceStat = await stat(input)
+    // A completed render may only have a guarded ComfyUI URL when its output
+    // directory differs from the configured local folder.
+    const remote = source.startsWith('minimax-media:') && new URL(source).hostname === 'comfy'
+    const localInput = remote ? null : await resolveVideoSource(source)
+    const sourceStat = localInput ? await stat(localInput) : null
     const root = join(app.getPath('userData'), 'video-thumbnails')
     await mkdir(root, { recursive: true })
-    const key = createHash('sha256').update(`${input}|${sourceStat.size}|${sourceStat.mtimeMs}`).digest('hex')
+    const key = createHash('sha256').update(`v2|${localInput ?? source}|${sourceStat?.size ?? ''}|${sourceStat?.mtimeMs ?? ''}`).digest('hex')
     const output = join(root, `${key}.jpg`)
     if (!existsSync(output)) {
       const temporary = join(root, `${key}-${randomUUID()}.jpg`)
+      let input: string | null = localInput
       try {
-        await runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-ss', '0.2', '-i', input, '-map', '0:v:0', '-frames:v', '1', '-vf', 'scale=480:270:force_original_aspect_ratio=decrease:force_divisible_by=2', '-q:v', '4', '-y', temporary])
+        if (!input) input = await resolveVideoSource(source)
+        const videoInput = input
+        const metadata = await probeClipVideoMetadata(videoInput, ffmpegPath).catch(() => null)
+        const position = metadata?.duration ? Math.min(2, metadata.duration / 3) : 0.2
+        const extract = (at: number) => runFfmpeg(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-ss', String(at), '-i', videoInput, '-map', '0:v:0', '-frames:v', '1', '-vf', 'scale=480:270:force_original_aspect_ratio=decrease:force_divisible_by=2', '-q:v', '4', '-y', temporary])
+        await extract(position).catch(() => extract(0))
         if (!(await stat(temporary)).size) throw new Error('FFmpeg did not create a thumbnail.')
         await rename(temporary, output).catch(async (error) => { if (!existsSync(output)) throw error })
-      } finally { await unlink(temporary).catch(() => undefined) }
+      } finally {
+        await unlink(temporary).catch(() => undefined)
+        if (remote && input) await unlink(input).catch(() => undefined)
+      }
     }
-    return `minimax-media://thumbnail?path=${encodeURIComponent(output)}`
+    return `minimax-media://thumbnail?path=${encodeURIComponent(output)}&v=2`
   })
   ipcMain.handle('video:frames', async (_event, source: string, positions: number[], outputDirectory: string, ffmpegPath: string) => {
     if (!Array.isArray(positions) || positions.length === 0 || positions.length > 100 || positions.some((position) => !Number.isFinite(position) || position < 0)) {

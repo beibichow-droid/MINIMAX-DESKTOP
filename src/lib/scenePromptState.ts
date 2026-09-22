@@ -110,11 +110,29 @@ export function bindSceneReferences(state: ScenePromptState, bindings: MovieRefe
     // role, keep authored attribute additions and add the canonical role field.
     const roleChanged = Boolean(old && (old.file.referenceRole ?? '') !== (resolvedFile.referenceRole ?? ''))
     const preserve = old && !roleChanged ? [...new Set([...old.preserve, ...attributes])] : attributes
-    refs.push(old ? { ...old, file: resolvedFile, ownerId, preserve } : { id, file: resolvedFile, ownerId, name: binding?.label ?? file.name, preserve, locks: role === 'composition' ? ['composition'] : [], anchor: anchor ?? (file.openingFrameTreatment === 'match' || file.openingFrameTreatment === 'arc' || binding?.purpose === 'continuity' ? 'opening' : undefined), observed: {}, source: binding?.characterId ? 'CHARACTER' : 'PRESERVE', ...(file.kind === 'video' ? { videoRole: 'motion' as const } : {}), ...(file.kind === 'audio' ? { audio: { relation: 'reference' as const, layer: 'ambience' as const, description: 'Sound texture' } } : {}) })
+    refs.push(old ? { ...old, file: resolvedFile, ownerId, preserve, source: binding?.characterId ? 'CHARACTER' : old.source === 'CHARACTER' ? 'PRESERVE' : old.source } : { id, file: resolvedFile, ownerId, name: binding?.label ?? file.name, preserve, locks: role === 'composition' ? ['composition'] : [], anchor: anchor ?? (file.openingFrameTreatment === 'match' || file.openingFrameTreatment === 'arc' || binding?.purpose === 'continuity' ? 'opening' : undefined), observed: {}, source: binding?.characterId ? 'CHARACTER' : 'PRESERVE', ...(file.kind === 'video' ? { videoRole: 'motion' as const } : {}), ...(file.kind === 'audio' ? { audio: { relation: 'reference' as const, layer: 'ambience' as const, description: 'Sound texture' } } : {}) })
   }
   if (state.mode === 'reference') { bindings.forEach(binding => add(binding.file, binding)); videos.forEach(file => add(file)); audios.forEach(file => add(file)) }
   else { if (first && (state.mode === 'image' || state.mode === 'frames')) add(first, undefined, 'opening'); if (last && state.mode === 'frames') add(last, undefined, 'ending') }
-  return { ...state, references: refs, characters: [...characters.values()].filter(character => character.source !== 'CHARACTER' || refs.some(ref => ref.ownerId === character.id)) }
+  const activeIds = new Set(refs.map(ref => ref.id))
+  const activeValue = (field?: Value): Value | undefined => {
+    if (!field?.referenceIds?.length) return field
+    const referenceIds = field.referenceIds.filter(id => activeIds.has(id))
+    if (!referenceIds.length && (field.source === 'PRESERVE' || field.source === 'CHARACTER')) return undefined
+    return { ...field, referenceIds: referenceIds.length ? referenceIds : undefined }
+  }
+  const cleanAttributes = (attributes: Partial<Record<Attribute, Value>>) => Object.fromEntries(Object.entries(attributes).map(([key, field]) => [key, activeValue(field)]).filter((entry) => entry[1])) as Partial<Record<Attribute, Value>>
+  const activeCharacters = [...characters.values()].filter(character => character.source !== 'CHARACTER' || refs.some(ref => ref.ownerId === character.id)).map(character => ({ ...character, attributes: cleanAttributes(character.attributes) }))
+  const activeCharacterIds = new Set(activeCharacters.map(character => character.id))
+  return {
+    ...state,
+    references: refs,
+    characters: activeCharacters,
+    overrides: cleanAttributes(state.overrides),
+    shots: state.shots.map(shot => ({ ...shot, characterIds: shot.characterIds.filter(id => activeCharacterIds.has(id)) })),
+    dialogue: state.dialogue.map(line => ({ ...line, speakerIds: line.speakerIds.filter(id => activeCharacterIds.has(id)) })),
+    continuity: { ...state.continuity, exactFrame: state.continuity.exactFrame && refs.some(ref => ref.anchor === 'opening') },
+  }
 }
 
 /** Conservative extraction: only explicit speech verbs and exact quoted words.
