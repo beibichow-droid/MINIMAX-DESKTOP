@@ -2,6 +2,8 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, protocol, sessio
 import { constants, createReadStream, createWriteStream, existsSync } from 'node:fs'
 import { copyFile, cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { writeAtomicFile } from './atomicFile.js'
+import { cancelComfyPrompt } from './comfyCancellation.js'
+import { readGpuTelemetry } from './gpuTelemetry.js'
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -73,8 +75,6 @@ type AppSettings = {
 }
 
 type LanStatus = { running: boolean; url?: string; desktopUrl?: string; port?: number; error?: string }
-type GpuTelemetryDevice = { index: number; name: string; usagePercent: number; vramPercent: number; vramUsedMb: number; vramTotalMb: number; vramFreeMb: number }
-type GpuTelemetry = { available: boolean; name?: string; usagePercent?: number; vramPercent?: number; vramUsedMb?: number; vramTotalMb?: number; devices?: GpuTelemetryDevice[] }
 type RenderBenchmark = { jobId: string; hardwareKey: string; hardwareLabel: string; provider: 'minimax'; mode: string; turbo: string; attention: string; width: number; height: number; duration: number; steps: number; engineMs: number; measuredAt: number }
 const ltxUpscaleRequiredNodes = ['VAEEncodeTiled', 'LatentUpscaleModelLoader', 'LTXVLatentUpsampler', 'VAEDecodeTiled', 'ImageFromBatch', 'RepeatImageBatch', 'ImageBatch']
 const ltxNativeRequiredNodes = ['LTXVConditioning', 'LTXVEmptyLatentAudio', 'EmptyLTXVLatentVideo', 'LTXVDualCFGGuider', 'LTXVSeparateAVLatent', 'LTXVConcatAVLatent', 'LTXVLatentUpsampler', 'LTXVAudioVAEDecode', 'ManualSigmas', 'VAEDecodeTiled', 'CLIPTextEncode', 'KSamplerSelect', 'SamplerCustomAdvanced']
@@ -82,35 +82,6 @@ let lanToken = ''
 let mobileCharacterLibrary: unknown[] = []
 let lanServer: Server | null = null
 let lanStatus: LanStatus = { running: false }
-
-function readGpuTelemetry(): Promise<GpuTelemetry> {
-  return new Promise((resolve) => {
-    const child = spawn('nvidia-smi', ['--query-gpu=name,utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'], { windowsHide: true })
-    let output = ''
-    let settled = false
-    const finish = (value: GpuTelemetry) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve(value)
-    }
-    const timer = setTimeout(() => { child.kill(); finish({ available: false }) }, 1800)
-    child.stdout.on('data', (chunk) => { output += String(chunk) })
-    child.on('error', () => finish({ available: false }))
-    child.on('close', (code) => {
-      if (code !== 0 || !output.trim()) { finish({ available: false }); return }
-      const devices = output.trim().split(/\r?\n/).map((line, index) => {
-        const [name = `GPU ${index}`, usage = '', used = '', total = ''] = line.split(',').map((part) => part.trim())
-        const usagePercent = Number(usage) || 0
-        const vramUsedMb = Number(used) || 0
-        const vramTotalMb = Number(total) || 0
-        return { index, name, usagePercent, vramUsedMb, vramTotalMb, vramFreeMb: Math.max(0, vramTotalMb - vramUsedMb), vramPercent: vramTotalMb > 0 ? Math.round(vramUsedMb / vramTotalMb * 100) : 0 }
-      })
-      const primary = devices[0]
-      finish({ available: devices.length > 0, name: primary?.name, usagePercent: primary?.usagePercent, vramUsedMb: primary?.vramUsedMb, vramTotalMb: primary?.vramTotalMb, vramPercent: primary?.vramPercent, devices })
-    })
-  })
-}
 
 const modelKinds: ModelKind[] = ['diffusion_models', 'text_encoders', 'vae', 'loras', 'vae_approx', 'clip_vision']
 const modelExtensions = new Set(['.safetensors', '.pt', '.pth', '.gguf', '.onnx'])
@@ -693,11 +664,8 @@ async function handleLanRequest(request: IncomingMessage, response: ServerRespon
         const body = await readJson(request, 10_000)
         const promptId = typeof body.promptId === 'string' ? body.promptId : ''
         if (!promptId) return sendJson(response, 400, { error: 'A prompt ID is required.' })
-        const queue = await comfyFetch(settings.comfyUrl, '/queue') as { queue_running?: unknown[][]; queue_pending?: unknown[][] }
-        const running = (queue.queue_running ?? []).some((item) => item[1] === promptId)
-        if (running) await comfyFetch(settings.comfyUrl, '/interrupt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt_id: promptId }) })
-        else await comfyFetch(settings.comfyUrl, '/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ delete: [promptId] }) })
-        return sendJson(response, 200, { cancelled: true })
+        const result = await cancelComfyPrompt(promptId, (path, init) => fetch(`${cleanUrl(settings.comfyUrl)}${path}`, { ...init, signal: AbortSignal.timeout(10_000) }))
+        return sendJson(response, 200, result)
       }
       if (url.pathname.startsWith('/api/lan/history/') && request.method === 'GET') {
         const promptId = decodeURIComponent(url.pathname.slice('/api/lan/history/'.length))
@@ -1207,28 +1175,8 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('comfy:history', (_event, url: string, promptId: string) => comfyFetch(url, `/history/${encodeURIComponent(promptId)}`, { signal: AbortSignal.timeout(10_000) }))
   ipcMain.handle('comfy:cancel', async (_event, url: string, promptId: string) => {
-    if (!promptId || typeof promptId !== 'string') throw new Error('A ComfyUI prompt ID is required to cancel a generation.')
-    const queue = await comfyFetch(url, '/queue') as { queue_running?: unknown[][]; queue_pending?: unknown[][] }
-    const running = (queue.queue_running ?? []).some((item) => item[1] === promptId)
-    const pending = (queue.queue_pending ?? []).some((item) => item[1] === promptId)
-    if (running) {
-      await comfyFetch(url, '/interrupt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt_id: promptId }),
-      })
-      return { cancelled: true, state: 'running' as const }
-    }
-    if (pending) {
-      await comfyFetch(url, '/queue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ delete: [promptId] }),
-      })
-      return { cancelled: true, state: 'pending' as const }
-    }
-    const history = await comfyFetch(url, `/history/${encodeURIComponent(promptId)}`) as Record<string, unknown>
-    return { cancelled: false, state: promptId in history ? 'finished' as const : 'unknown' as const }
+    if (typeof promptId !== 'string') throw new Error('A ComfyUI prompt ID is required to cancel a generation.')
+    return cancelComfyPrompt(promptId, (path, init) => fetch(`${cleanUrl(url)}${path}`, { ...init, signal: AbortSignal.timeout(10_000) }))
   })
   ipcMain.handle('outputs:latest', async (_event, outputDirectory: string, since: number, kind: 'video' | 'audio' = 'video') => {
     const path = await findLatestMedia(outputDirectory, since, kind)
