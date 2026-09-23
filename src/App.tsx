@@ -1,5 +1,8 @@
+import { WorkspaceSidebar } from './components/WorkspaceSidebar'
+import { ReferenceSourcePanel } from './components/ReferenceSourcePanel'
 import { Dialog, DialogContent, DialogTitle } from './components/ui'
 import { WorkspaceNavigator } from './components/WorkspaceNavigator'
+import { WorkspaceSectionTabs, type WorkspaceSectionTab } from './components/WorkspaceSectionTabs'
 import { writeLocalJson } from './lib/localPersistence'
 import { useLocalPersistence } from './lib/useLocalPersistence'
 import { workspaceLabel, workspaceProjectScope, workspaceProjectLabel, workspaceStorageKey, type WorkspaceProjectScope } from './lib/workspaceNavigation'
@@ -31,14 +34,12 @@ import {
   Bookmark,
   Check,
   ChevronDown,
-  Clapperboard,
   CircleStop,
   Columns3,
   Clock3,
   Dices,
   Download,
   ExternalLink,
-  FileText,
   Film,
   Folder,
   FolderOpen,
@@ -48,9 +49,7 @@ import {
   History,
   Image as ImageIcon,
   ImagePlus,
-  Library,
   LockKeyhole,
-  ListVideo,
   LoaderCircle,
   MapPin,
   Menu,
@@ -66,7 +65,6 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
-  Scan,
   Search,
   Scissors,
   Settings,
@@ -3152,7 +3150,7 @@ function App() {
   return (
     <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} ${view === 'create' ? 'video-shell-active' : `studio-shell-active studio-view-${view}`}`}>
       <header className="titlebar" aria-label="Application title bar">
-        {view !== 'create' && <StudioTopBar onOpenNavigator={() => setNavigatorOpen(true)} view={view} musicEngine={musicEngine} projectName={workspaceProjects.find(project => project.id === activeWorkspaceProjectId && project.scope === workspaceProjectScope(view, musicEngine))?.name ?? 'Current workspace'} connected={status.connected} onNavigate={(nextView, engine) => { if (engine) setMusicEngine(engine); setView(nextView) }} onOpenProjects={() => setProjectManagerOpen(true)} onOpenSettings={() => setView('settings')} onOpenCompare={() => setCompareOpen(true)} compareOpen={compareOpen} />}
+        {view !== 'create' && <StudioTopBar view={view} musicEngine={musicEngine} projectName={workspaceProjects.find(project => project.id === activeWorkspaceProjectId && project.scope === workspaceProjectScope(view, musicEngine))?.name ?? 'Current workspace'} connected={status.connected} onOpenProjects={() => setProjectManagerOpen(true)} onOpenSettings={() => setView('settings')} onOpenCompare={() => setCompareOpen(true)} compareOpen={compareOpen} />}
         <button className="titlebar-mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open workspace menu"><Menu size={18} /></button>
         <div className="titlebar-brand"><span className="brand-mark"><Film size={18} /></span><span><strong>Oyama AI Video Studio</strong><small>Create&nbsp;&nbsp;•&nbsp;&nbsp;Visualize&nbsp;&nbsp;•&nbsp;&nbsp;Tell Stories</small></span></div>
         <button className="titlebar-search" type="button" onClick={openWorkspaceSearch} title={`Search settings in ${workspaceTips[view].title}`} aria-haspopup="dialog" aria-expanded={workspaceSearchOpen} aria-keyshortcuts="Control+F Meta+F"><Search size={15} /><span>Find a setting in {workspaceTips[view].title}…</span><kbd>Ctrl F</kbd></button>
@@ -3189,43 +3187,7 @@ function App() {
       {compareOpen && <VideoCompare onClose={closeVideoCompare} />}
       {projectManagerOpen && <WorkspaceProjectManager activeScope={workspaceProjectScope(view, musicEngine)} projects={workspaceProjects} onClose={() => setProjectManagerOpen(false)} onSave={saveWorkspaceProject} onLoad={loadWorkspaceProject} onRename={renameWorkspaceProject} onDelete={deleteWorkspaceProject} feedback={notice} />}
 
-      {sidebarOpen && <button className="mobile-sidebar-backdrop" aria-label="Close workspace menu" onClick={() => setSidebarOpen(false)} />}
-      <aside className="sidebar" onClick={(event) => { if (window.innerWidth <= 680 && (event.target as HTMLElement).closest('button')) setSidebarOpen(false) }}>
-        <div className="sidebar-top">
-          <button className="icon-button sidebar-toggle" onClick={() => setSidebarOpen((value) => !value)} aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}><PanelLeftClose size={18} /></button>
-        </div>
-        <nav aria-label="Primary navigation">
-          <div className="nav-group"><span className="nav-section-label">Create</span>
-            <NavButton active={view === 'scratchpad'} icon={FileText} label="Scratchpad" onClick={() => setView('scratchpad')} />
-            <NavButton active={view === 'create'} icon={WandSparkles} label="Video" onClick={() => { setCharacterHandoff(null); setView('create') }} />
-            <NavButton active={view === 'continue'} icon={SkipForward} label="Continue" onClick={() => setView('continue')} />
-            <NavButton active={view === 'zimage'} icon={ImageIcon} label="Image" onClick={() => setView('zimage')} />
-            <NavButton active={view === 'referenceprep'} icon={Scan} label="Reference Prep" onClick={() => setView('referenceprep')} />
-            <NavButton active={view === 'ltx25'} icon={Aperture} label="LTX 2.5" onClick={() => setView('ltx25')} />
-            <NavButton active={view === 'music' && musicEngine === 'acestep'} icon={Music2} label="ACE-Step" onClick={() => { setMusicEngine('acestep'); setView('music') }} />
-            <NavButton active={view === 'music' && musicEngine === 'music3'} icon={Music2} label="Music 3" onClick={() => { setMusicEngine('music3'); setView('music') }} />
-          </div>
-          <div className="nav-group"><span className="nav-section-label">Assets</span>
-            <NavButton active={view === 'characters'} icon={Users} label="Characters" itemType="character" onClick={() => setView('characters')} />
-            <NavButton active={view === 'hair'} icon={Scissors} label="Hair" onClick={() => setView('hair')} />
-            <NavButton active={view === 'wardrobes'} icon={Shirt} label="Wardrobe" itemType="wardrobe" onClick={() => setView('wardrobes')} />
-            <NavButton active={view === 'accessories'} icon={Watch} label="Accessories" onClick={() => setView('accessories')} />
-            <NavButton active={view === 'locations'} icon={MapPin} label="Locations" itemType="location" onClick={() => setView('locations')} />
-          </div>
-          <div className="nav-group"><span className="nav-section-label">Project</span>
-            <NavButton active={view === 'library'} icon={Library} label="Library" onClick={() => setView('library')} />
-            <NavButton active={view === 'queue'} icon={ListVideo} label="Queue" count={pendingJobs.length} onClick={() => setView('queue')} />
-            <NavButton active={view === 'movie'} icon={Clapperboard} label="Oyama AI Movie" onClick={() => setView('movie')} />
-            <NavButton active={view === 'clipmaster'} icon={Film} label="Clip Master" onClick={() => setView('clipmaster')} />
-          </div>
-        </nav>
-        <div className="sidebar-spacer" />
-        <div className={`model-health ${modelReady ? 'healthy' : ''}`}>
-          <HardDrive size={17} />
-          <div><strong>{modelReady ? 'Models ready' : 'Models incomplete'}</strong><span>{models.length} local files indexed</span></div>
-        </div>
-        <NavButton active={view === 'settings'} icon={Settings} label="Settings" onClick={() => setView('settings')} />
-      </aside>
+      <WorkspaceSidebar view={view} musicEngine={musicEngine} open={sidebarOpen} connected={status.connected} modelReady={modelReady} modelCount={models.length} pendingCount={pendingJobs.length} workspaceName={workspaceLabel(view, musicEngine)} projectName={workspaceProjects.find(project => project.id === activeWorkspaceProjectId && project.scope === workspaceProjectScope(view, musicEngine))?.name ?? 'Current workspace'} onToggle={() => setSidebarOpen(value => !value)} onClose={() => setSidebarOpen(false)} onBrowse={() => setNavigatorOpen(true)} onNavigate={(next, engine) => { if (engine) setMusicEngine(engine); setView(next) }} onVideo={() => { setCharacterHandoff(null); setView('create') }} />
 
       <main className="main-area" ref={mainAreaRef} aria-label={workspaceLabel(view, musicEngine)}>
         {!legacyMigrationDismissed && legacyMigration && (legacyMigration.available || legacyMigration.migrated) && <section className="legacy-migration-banner" aria-label="Previous Studio data migration"><div><strong>{legacyMigration.needsBrowserStorageRepair ? 'Restore your previous Studio projects and characters' : legacyMigration.migrated ? 'Previous Studio data is ready in Oyama' : 'Bring your previous Studio data into Oyama'}</strong><span>{legacyMigration.needsBrowserStorageRepair ? 'Settings were imported, but local characters, projects, and workspace state need one repair import. Open Settings to restore them.' : legacyMigration.migrated ? 'Your prior local profile was copied safely. You can rerun the import from Settings if you need to recover files added later.' : 'Import settings, saved intents, local projects, LAN pairing, and downloaded tools without replacing Oyama files.'}</span></div><div className="legacy-migration-banner-actions"><button type="button" className="secondary-button" onClick={() => setView('settings')}>Open Settings</button><button type="button" className="icon-button" onClick={dismissLegacyMigrationBanner} aria-label="Dismiss previous Studio migration notice" title="Dismiss"><X size={16} /></button></div></section>}
@@ -3235,6 +3197,7 @@ function App() {
             projectName={workspaceProjects.find(project => project.id === activeWorkspaceProjectId && project.scope === workspaceProjectScope(view, musicEngine))?.name ?? 'Current workspace'} onOpenProjects={() => setProjectManagerOpen(true)} onNavigate={(nextView, engine) => { if (engine) setMusicEngine(engine); setView(nextView) }} onReset={resetCurrentWorkspace} historyJobs={jobs.filter(job => job.provider === 'minimax').slice(0, 12)} onSelectJob={selectActiveJob} onGenerate={() => void generateRef.current?.('video', renderAnyway)} onGenerateStill={() => void generateRef.current?.('image')} onCancel={() => { if (activeRenderJob) void cancelJob(activeRenderJob) }} activeRenderJob={activeRenderJob} cancelling={Boolean(activeRenderJob && cancellingIds.has(activeRenderJob.id))} onOpenSettings={() => setView('settings')} onOpenCompare={() => setCompareOpen(true)} compareOpen={compareOpen}
             info={info}
             gpuRoutingSummary={h3GpuRouting?.summary ?? 'GPU Routing: Auto'}
+            attentionBackendLabel={currentH3AttentionLabel}
             gpuRoutingWarning={h3GpuRouting?.vramWarnings[0] ?? h3GpuRouting?.warnings[0]}
             renderIntents={settings.renderSettingsPresets}
             onApplyIntent={(intent) => {
@@ -3527,10 +3490,6 @@ function WorkspaceProjectManager({ activeScope, projects, onClose, onSave, onLoa
   </Dialog>
 }
 
-function NavButton({ active, icon: Icon, label, count, itemType, onClick }: { active: boolean; icon: typeof Film; label: string; count?: number; itemType?: 'character' | 'wardrobe' | 'location'; onClick(): void }) {
-  return <button className={`nav-button ${active ? 'active' : ''}`} data-item-type={itemType} title={label} aria-current={active ? 'page' : undefined} aria-label={label} onClick={onClick}><Icon size={19} /><span>{label}</span>{count ? <em>{count}</em> : null}</button>
-}
-
 function Notice({ tone, text, onClose }: { tone: 'error' | 'success' | 'neutral'; text: string; onClose(): void }) {
   return <div className={`notice ${tone}`} role={tone === 'error' ? 'alert' : 'status'}>{tone === 'error' ? <AlertCircle size={17} /> : tone === 'success' ? <Check size={17} /> : <Activity size={17} />}<span>{text}</span><button onClick={onClose} aria-label="Dismiss"><X size={16} /></button></div>
 }
@@ -3596,35 +3555,36 @@ type VideoShellProps = CreateViewProps & {
   onNavigate(view: View, engine?: 'acestep' | 'music3'): void; onReset(): void; historyJobs: GenerationJob[]; onSelectJob(id: string): void
   onGenerate(): void; onGenerateStill(): void; onCancel(): void
   activeRenderJob?: GenerationJob; cancelling: boolean
+  attentionBackendLabel: string
 }
 
 const videoModeLabels: Array<[GenerationMode, string]> = [['reference', 'References'], ['text', 'Text'], ['image', 'Image'], ['frames', 'First + last']]
+type H3Section = 'source' | 'prompt' | 'settings' | 'result'
+const h3Sections: readonly WorkspaceSectionTab<H3Section>[] = [
+  { id: 'source', label: 'Source', description: 'Mode & media' },
+  { id: 'prompt', label: 'Create', description: 'Describe the shot' },
+  { id: 'settings', label: 'Settings', description: 'Output & quality' },
+  { id: 'result', label: 'Result', description: 'Renders & actions' },
+]
 
-function StudioTopBar({ onOpenNavigator, view, musicEngine, projectName, connected, onNavigate, onOpenProjects, onOpenSettings, onOpenCompare, compareOpen }: {
-  onOpenNavigator(): void; view: View; musicEngine: 'acestep' | 'music3'; projectName: string; connected: boolean
-  onNavigate(next: View, engine?: 'acestep' | 'music3'): void; onOpenProjects(): void; onOpenSettings(): void; onOpenCompare(): void; compareOpen: boolean
+function StudioTopBar({ view, musicEngine, projectName, connected, onOpenProjects, onOpenSettings, onOpenCompare, compareOpen }: {
+  view: View; musicEngine: 'acestep' | 'music3'; projectName: string; connected: boolean
+  onOpenProjects(): void; onOpenSettings(): void; onOpenCompare(): void; compareOpen: boolean
 }) {
-  const tabs: Array<{ label: string; view: View; engine?: 'acestep' | 'music3' }> = [
-    { label: 'Scratchpad', view: 'scratchpad' }, { label: 'Video', view: 'create' }, { label: 'Continue', view: 'continue' }, { label: 'Image', view: 'zimage' },
-    { label: 'Music', view: 'music', engine: musicEngine }, { label: 'Library', view: 'library' }, { label: 'Movie', view: 'movie' },
-  ]
   return <div className="studio-topbar">
-    <button type="button" className="workspace-switcher" data-workspace-trigger onClick={onOpenNavigator} aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K" title="Browse all workspaces (Ctrl+K)"><Menu size={18} /><span><strong>Workspaces</strong><small>{workspaceLabel(view, musicEngine)}</small></span><ChevronDown size={13} /></button>
-    <nav aria-label="Primary workspaces">{tabs.map(tab => <button type="button" key={tab.label} className={view === tab.view ? 'active' : ''} aria-current={view === tab.view ? 'page' : undefined} onClick={() => onNavigate(tab.view, tab.engine)}>{tab.label}</button>)}</nav>
-    <button type="button" className="video-project-name" onClick={onOpenProjects} title="Open projects">Project: {projectName}<ChevronDown size={13} /></button>
+    <span className="studio-topbar-current" aria-current="page">{workspaceLabel(view, musicEngine)}</span>
     <span className="video-mode-spacer" />
+    <button type="button" className="video-project-name" onClick={onOpenProjects} title="Open projects">Project: {projectName}<ChevronDown size={13} /></button>
     <button className="compare-titlebar-button" type="button" onClick={onOpenCompare} aria-haspopup="dialog" aria-expanded={compareOpen} title="Open Video Compare"><Columns3 size={15} /><span>Compare</span></button>
     <button type="button" className={`video-pipeline-state ${connected ? 'ready' : ''}`} onClick={onOpenSettings} title="Open connection settings"><i />{connected ? 'Engine connected' : 'Offline · Set up'}</button>
-    <button type="button" className="video-mode-settings" title="Application settings" aria-label="Application settings" onClick={onOpenSettings}><Settings size={18} /></button>
     <span className="video-window-gutter" aria-hidden="true" />
-
   </div>
 }
 
-function ModeBar({ mode, setMode, projectName, onOpenProjects, connected, modelReady, onOpenSettings, onOpenCompare, compareOpen, onOpenNavigator }: Pick<VideoShellProps, 'mode' | 'setMode' | 'projectName' | 'onOpenProjects' | 'connected' | 'modelReady' | 'onOpenSettings' | 'onOpenCompare' | 'compareOpen' | 'onOpenNavigator'>) {
+function ModeBar({ projectName, onOpenProjects, connected, modelReady, onOpenSettings, onOpenCompare, compareOpen, onOpenNavigator }: Pick<VideoShellProps, 'projectName' | 'onOpenProjects' | 'connected' | 'modelReady' | 'onOpenSettings' | 'onOpenCompare' | 'compareOpen' | 'onOpenNavigator'>) {
   return <header className="video-mode-bar">
-    <button type="button" className="workspace-switcher" data-workspace-trigger onClick={onOpenNavigator} aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K" title="Browse all workspaces (Ctrl+K)"><Menu size={18} /><span><strong>Workspaces</strong><small>Video · MiniMax H3</small></span><ChevronDown size={13} /></button>
-    <nav aria-label="Video input mode">{videoModeLabels.map(([id, label]) => <button key={id} type="button" aria-pressed={mode === id} title={modeInfo.find(item => item.id === id)?.note} className={mode === id ? 'active' : ''} onClick={() => setMode(id)}>{label}</button>)}</nav>
+    <div className="video-mode-identity"><strong>H3 Video</strong><small>Create with MiniMax H3</small></div>
+    <button type="button" className="video-workspace-switcher" onClick={onOpenNavigator} aria-haspopup="dialog" title="Browse workspaces"><Menu size={16} /><span>Workspaces</span></button>
     <button type="button" className="video-project-name" onClick={onOpenProjects}>Project: {projectName}<ChevronDown size={13} /></button>
     <span className="video-mode-spacer" />
     <button className="compare-titlebar-button" type="button" onClick={onOpenCompare} aria-haspopup="dialog" aria-expanded={compareOpen} title="Open Video Compare"><Columns3 size={15} /><span>Compare</span></button>
@@ -3680,13 +3640,12 @@ function ModeInputStrip({ props, boundScene, selection, onSelect }: { props: Vid
   return <section className={`video-input-strip video-frame-strip ${props.mode === 'frames' ? 'paired' : ''}`}>{slots.map((slot, index) => <div className="video-frame-slot" key={slot.label}><button type="button" className="video-frame-preview" onClick={() => slot.file ? onSelect({ kind: 'reference', id: `${slot.file.kind}:${slot.file.path}:${index === 0 ? 'opening' : 'ending'}` }) : void props.chooseMedia('image', slot.setter)}>{slot.file?.preview ? <img src={slot.file.preview} alt="" /> : <ImagePlus size={25} />}</button><span><strong>{slot.label}</strong><small>{slot.file?.name || 'Add an image'}</small></span><button type="button" onClick={() => void props.chooseMedia('image', slot.setter)}>{slot.file ? 'Replace' : 'Choose'}</button>{slot.file && <button type="button" className="video-slot-remove" title={`Remove ${slot.label}`} aria-label={`Remove ${slot.label}`} onClick={() => { slot.setter(null); onSelect({ kind: 'scene' }) }}><X size={15} /></button>}</div>).reduce<React.ReactNode[]>((items, element, index) => index ? [...items, <span className="video-frame-arrow" key="arrow">→</span>, element] : [element], [])}</section>
 }
 
-function PreviewStage({ job, historyJobs, onSelectJob, livePreview, liveEnabled, blurSensitive, blocker, onViewQueue, onDetach, onContinue, onContinueReference, onSendStillToI2v }: { job?: GenerationJob; historyJobs: GenerationJob[]; onSelectJob(id: string): void; livePreview: LivePreview | null; liveEnabled: boolean; blurSensitive: boolean; blocker: string; onViewQueue(): void; onDetach(): void; onContinue: VideoShellProps['onContinue']; onContinueReference: VideoShellProps['onContinueReference']; onSendStillToI2v: VideoShellProps['onSendStillToI2v'] }) {
-  const [tab, setTab] = useState<'preview' | 'history'>('preview')
+function PreviewStage({ job, livePreview, liveEnabled, blurSensitive, blocker, onViewQueue, onDetach }: { job?: GenerationJob; livePreview: LivePreview | null; liveEnabled: boolean; blurSensitive: boolean; blocker: string; onViewQueue(): void; onDetach(): void }) {
   const live = job && ['queued', 'running'].includes(job.status) && liveEnabled && livePreview?.promptId === job.promptId ? livePreview : null
   const previewAspect = job?.width && job?.height ? `${job.width} / ${job.height}` : '16 / 9'
-  return <section className="video-preview-stage"><header><div role="tablist" aria-label="Preview view"><button type="button" role="tab" aria-selected={tab === 'preview'} className={tab === 'preview' ? 'active' : ''} onClick={() => setTab('preview')}>Preview</button><button type="button" role="tab" aria-selected={tab === 'history'} className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>History</button></div><button type="button" title="Detach preview" aria-label="Detach preview" onClick={onDetach}><PanelTopOpen size={16} /></button></header>
-    <div className="video-preview-canvas">{tab === 'history' ? <div className="video-preview-history">{historyJobs.length ? historyJobs.map(item => <button type="button" key={item.id} onClick={() => { onSelectJob(item.id); setTab('preview') }}><span className="video-history-thumb">{item.outputUrl && item.mediaType === 'image' ? <img src={item.outputUrl} alt="" /> : item.outputUrl && item.mediaType !== 'audio' ? <MovieMediaThumbnail source={item.outputUrl} posterUrl={item.thumbnailUrl} /> : <Film size={19} />}</span><span><strong>{shortPrompt(item.prompt) || 'Untitled render'}</strong><small>{item.status} · {item.width} × {item.height} · {item.duration}s</small></span></button>) : <div className="video-preview-empty"><History size={30} /><strong>No renders yet</strong></div>}</div> : job?.outputUrl ? job.mediaType === 'image' ? <img src={job.outputUrl} alt="Generated output" /> : <VideoPlayer src={job.outputUrl} /> : live ? <figure className={blurSensitive && job && hasSensitivePreviewWording(job.prompt) ? 'sensitive-preview' : ''} style={{ aspectRatio: previewAspect }}>{live.mime === 'video/mp4' ? <video src={live.url} autoPlay loop muted playsInline /> : <img src={live.url} alt="Live generation preview" />}<figcaption className="video-live-preview-badge"><i />Live sampler preview<small>Low resolution · final quality appears when rendering completes</small></figcaption></figure> : job && ['queued', 'running'].includes(job.status) ? <div className="video-preview-empty" role="status"><LoaderCircle size={28} className="spin" /><strong>{job.progressLabel || 'Rendering locally'}</strong><span>{Math.round(job.progress)}% · {job.width} × {job.height}</span><div className="progress"><i style={{ width: `${job.progress}%` }} /></div></div> : job?.status === 'failed' ? <div className="video-preview-empty video-preview-failed" role="alert"><AlertCircle size={30} /><strong>Render did not complete</strong><span>{job.error || 'ComfyUI stopped before an output was returned.'}</span><small>{blocker ? `Before retrying: ${blocker}` : 'Review the activity, adjust settings if needed, then Generate again.'}</small><button type="button" onClick={onViewQueue}><Activity size={15} />View render activity</button></div> : <div className="video-preview-empty" role="status"><Film size={32} /><strong>Preview</strong><span>Your generated video will appear here.</span></div>}</div>
-    {job?.outputUrl && <footer><span>{job.width} × {job.height} · {job.duration}s</span>{job.mediaType === 'image' ? <button type="button" onClick={() => onSendStillToI2v(job, 'minimax')}>Send to I2V</button> : job.provider === 'minimax' ? <div><button type="button" onClick={() => void onContinue(job)}>Continue in new window</button><button type="button" onClick={() => void onContinueReference(job)}>Continue in Reference</button></div> : null}<VideoExportButtons job={job} /></footer>}</section>
+  return <section className="video-preview-stage"><header><strong>Preview</strong><button type="button" title="Detach preview" aria-label="Detach preview" onClick={onDetach}><PanelTopOpen size={16} /></button></header>
+    <div className="video-preview-canvas">{job?.outputUrl ? job.mediaType === 'image' ? <img src={job.outputUrl} alt="Generated output" /> : <VideoPlayer src={job.outputUrl} /> : live ? <figure className={blurSensitive && job && hasSensitivePreviewWording(job.prompt) ? 'sensitive-preview' : ''} style={{ aspectRatio: previewAspect }}>{live.mime === 'video/mp4' ? <video src={live.url} autoPlay loop muted playsInline /> : <img src={live.url} alt="Live generation preview" />}<figcaption className="video-live-preview-badge"><i />Live sampler preview<small>Low resolution · final quality appears when rendering completes</small></figcaption></figure> : job && ['queued', 'running'].includes(job.status) ? <div className="video-preview-empty" role="status"><LoaderCircle size={28} className="spin" /><strong>{job.progressLabel || 'Rendering locally'}</strong><span>{Math.round(job.progress)}% · {job.width} × {job.height}</span><div className="progress"><i style={{ width: `${job.progress}%` }} /></div></div> : job?.status === 'failed' ? <div className="video-preview-empty video-preview-failed" role="alert"><AlertCircle size={30} /><strong>Render did not complete</strong><span>{job.error || 'ComfyUI stopped before an output was returned.'}</span><small>{blocker ? `Before retrying: ${blocker}` : 'Review the activity, adjust settings if needed, then Generate again.'}</small><button type="button" onClick={onViewQueue}><Activity size={15} />View render activity</button></div> : <div className="video-preview-empty" role="status"><Film size={32} /><strong>Preview</strong><span>Your generated video will appear here.</span></div>}</div>
+</section>
 }
 
 function GenerateBar({ props, blocker }: { props: VideoShellProps; blocker: string }) {
@@ -3705,7 +3664,7 @@ function GenerateBar({ props, blocker }: { props: VideoShellProps; blocker: stri
   const nextStepIn = sampler?.nextStepIn
   const completionTime = remainingMs !== undefined ? new Date(now + remainingMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : undefined
   const announcedStage = active?.status === 'queued' ? 'Waiting in render queue' : active?.progressLabel?.includes('Refinement') ? 'Refinement pass' : active?.progressLabel?.includes('step') ? 'Sampling pass' : active?.progressLabel || 'Rendering locally'
-  return <footer className={`video-generate-bar ${active ? 'is-rendering' : ''}`}><div className="video-generate-context"><span className="video-generate-thumb">{props.firstFrame?.preview && props.mode !== 'reference' ? <img src={props.firstFrame.preview} alt="" /> : <Film size={21} />}</span><span><strong>{videoModeLabels.find(([id]) => id === props.mode)?.[1]}</strong><small>{props.mode === 'reference' ? 'Reference to Video' : props.mode === 'text' ? 'Text to Video' : props.mode === 'image' ? 'Image to Video' : 'First / Last Frame'}</small></span></div>{active ? <div className="video-render-estimate"><span className="video-render-estimate-heading"><i /><span className="sr-only" role="status" aria-live="polite">{announcedStage}</span><strong>{active.status === 'queued' ? `Waiting in render queue${active.queuePosition ? ` · position ${active.queuePosition}` : ''}` : active.progressLabel || 'Rendering locally'}</strong><b>{Math.round(active.progress)}%</b></span><span className="video-render-progress"><i style={{ width: `${Math.max(2, active.progress)}%` }} /></span><span className="video-render-metrics"><small>Elapsed {formatRuntime(elapsed)}</small>{sampler ? <small>Step {sampler.currentStep}/{sampler.totalSteps}</small> : null}{sampler?.rate ? <small>{formatStepDuration(sampler.rate)}</small> : null}{nextStepIn !== undefined && sampler?.remainingSteps ? <small>Next step {formatStepCountdown(nextStepIn)}</small> : null}<small>{remainingMs !== undefined ? `ETA ~${formatRuntime(remainingMs)} · ${completionTime}` : active.status === 'queued' ? 'ETA starts with sampling' : 'Measuring sampler pace…'}</small></span></div> : <div className="video-generate-summary" title={blocker || 'Current output settings'}><span>{props.resolution.replace('x', ' × ')}</span><span>{props.duration}s</span><span>{quality}</span>{blocker && <em>{blocker}</em>}</div>}<span className="video-generate-spacer" />{active && <button type="button" className="video-cancel-button" disabled={props.cancelling} onClick={props.onCancel}><CircleStop size={16} />{props.cancelling ? 'Stopping…' : 'Cancel'}</button>}<button type="button" className="video-generate-button" disabled={props.submitting || Boolean(blocker) || Boolean(active)} title={blocker || (active ? 'Wait for or cancel the active render.' : 'Generate video')} onClick={props.onGenerate}><Play size={18} fill="currentColor" />{props.submitting ? 'Submitting…' : active ? 'Rendering…' : 'Generate'}</button></footer>
+  return <footer className={`video-generate-bar ${active ? 'is-rendering' : ''}`}><div className="video-generate-context"><span className="video-generate-thumb">{props.firstFrame?.preview && props.mode !== 'reference' ? <img src={props.firstFrame.preview} alt="" /> : <Film size={21} />}</span><span><strong>{videoModeLabels.find(([id]) => id === props.mode)?.[1]}</strong><small>{props.mode === 'reference' ? 'Reference to Video' : props.mode === 'text' ? 'Text to Video' : props.mode === 'image' ? 'Image to Video' : 'First / Last Frame'}</small></span></div><div className="video-status-details"><span className={props.connected ? "ready" : "offline"}><i />{props.connected ? "Connected" : "Offline"}</span><span title="Attention backend">Attention: {props.attentionBackendLabel}</span><span title="GPU routing">{props.gpuRoutingSummary}</span></div>{active ? <div className="video-render-estimate"><span className="video-render-estimate-heading"><i /><span className="sr-only" role="status" aria-live="polite">{announcedStage}</span><strong>{active.status === 'queued' ? `Waiting in render queue${active.queuePosition ? ` · position ${active.queuePosition}` : ''}` : active.progressLabel || 'Rendering locally'}</strong><b>{Math.round(active.progress)}%</b></span><span className="video-render-progress"><i style={{ width: `${Math.max(2, active.progress)}%` }} /></span><span className="video-render-metrics"><small>Elapsed {formatRuntime(elapsed)}</small>{sampler ? <small>Step {sampler.currentStep}/{sampler.totalSteps}</small> : null}{sampler?.rate ? <small>{formatStepDuration(sampler.rate)}</small> : null}{nextStepIn !== undefined && sampler?.remainingSteps ? <small>Next step {formatStepCountdown(nextStepIn)}</small> : null}<small>{remainingMs !== undefined ? `ETA ~${formatRuntime(remainingMs)} · ${completionTime}` : active.status === 'queued' ? 'ETA starts with sampling' : 'Measuring sampler pace…'}</small></span></div> : <div className="video-generate-summary" title={blocker || 'Current output settings'}><span>{props.resolution.replace('x', ' × ')}</span><span>{props.duration}s</span><span>{quality}</span>{blocker && <em>{blocker}</em>}</div>}<span className="video-generate-spacer" />{active && <button type="button" className="video-cancel-button" disabled={props.cancelling} onClick={props.onCancel}><CircleStop size={16} />{props.cancelling ? 'Stopping…' : 'Cancel'}</button>}<button type="button" className="video-generate-button" disabled={props.submitting || Boolean(blocker) || Boolean(active)} title={blocker || (active ? 'Wait for or cancel the active render.' : 'Generate video')} onClick={props.onGenerate}><Play size={18} fill="currentColor" />{props.submitting ? 'Submitting…' : active ? 'Rendering…' : 'Generate'}</button></footer>
 }
 
 function Inspector({ props, boundScene, selection, selectedFile, selectedReference, onClearSelection, onUpdateScene, onUpdateFile, onPreset, onSceneEditor }: {
@@ -3759,6 +3718,7 @@ function Inspector({ props, boundScene, selection, selectedFile, selectedReferen
 }
 
 function VideoWorkspaceShell(props: VideoShellProps) {
+  const [activeSection, setActiveSection] = useState<H3Section>('prompt')
   const [selection, setSelection] = useState<SceneInspectorSelection>({ kind: 'scene' })
   const [sceneEditorOpen, setSceneEditorOpen] = useState(false)
   const [previewPopoutRoot, setPreviewPopoutRoot] = useState<HTMLElement | null>(null)
@@ -3794,11 +3754,37 @@ function VideoWorkspaceShell(props: VideoShellProps) {
   }
   const detach = () => { if (popoutRef.current && !popoutRef.current.closed) { popoutRef.current.focus(); return } const popup = window.open('', 'oyama-video-preview', 'popup=yes,width=1080,height=720,resizable=yes'); if (!popup) return; popup.document.title = 'Oyama · Preview'; document.querySelectorAll('link[rel="stylesheet"], style').forEach(node => popup.document.head.appendChild(node.cloneNode(true))); const root = popup.document.createElement('main'); popup.document.body.appendChild(root); popoutRef.current = popup; setPreviewPopoutRoot(root); popup.addEventListener('beforeunload', () => { popoutRef.current = null; setPreviewPopoutRoot(null) }, { once: true }) }
   useEffect(() => () => popoutRef.current?.close(), [])
+  const assetRail = <AssetRail props={props} onSelect={file => { setRailAsset(file); const ref = boundScene.references.find(item => item.file.path === file.path); setSelection(ref ? { kind: 'reference', id: ref.id } : { kind: 'scene' }); setActiveSection('settings') }} />
   return <div className="video-workspace-shell">
-    <ModeBar mode={props.mode} setMode={value => { setSelection({ kind: 'scene' }); setRailAsset(null); if (value !== 'text' && props.turbo === 'fast') choosePreset('off'); props.setMode(value) }} projectName={props.projectName} onOpenProjects={props.onOpenProjects} connected={props.connected} modelReady={props.modelReady} onOpenSettings={props.onOpenSettings} onOpenCompare={props.onOpenCompare} compareOpen={props.compareOpen} onOpenNavigator={props.onOpenNavigator} />
-    <div className="video-workspace-main"><AssetRail props={props} onSelect={file => { setRailAsset(file); const ref = boundScene.references.find(item => item.file.path === file.path); setSelection(ref ? { kind: 'reference', id: ref.id } : { kind: 'scene' }) }} />
-      <main className="video-creative-area"><details className="video-continuation-opt-in"><summary>Optional · Continue a video</summary><p>Plan additional beats with motion context, frame continuity, and combined exports.</p><button className="secondary-button" onClick={props.onOpenContinuation}>Open continuation window</button>{props.latestJob?.status === 'completed' && props.latestJob.mediaType !== 'image' && <button className="secondary-button" onClick={() => void props.onContinue(props.latestJob!)}>Continue in new window</button>}</details><PromptPanel prompt={props.prompt} setPrompt={props.setPrompt} onPromptTool={props.onPromptTool} promptingTool={props.promptingTool} promptSuggestion={props.promptSuggestion} onUseSuggestion={props.onUseSuggestion} onDismissSuggestion={props.onDismissSuggestion} /><ModeInputStrip props={props} boundScene={boundScene} selection={selection} onSelect={value => { setRailAsset(null); setSelection(value) }} /><PreviewStage job={props.latestJob} historyJobs={props.historyJobs} onSelectJob={props.onSelectJob} livePreview={props.livePreview} liveEnabled={props.liveEnabled} blurSensitive={props.blurNsfwPreview} blocker={blocker} onViewQueue={() => props.onNavigate('queue')} onDetach={detach} onContinue={props.onContinue} onContinueReference={props.onContinueReference} onSendStillToI2v={props.onSendStillToI2v} /></main>
-      <Inspector props={props} boundScene={boundScene} selection={selection} selectedFile={selectedFile} selectedReference={selectedReference} onClearSelection={() => { setRailAsset(null); setSelection({ kind: 'scene' }) }} onUpdateScene={updateScene} onUpdateFile={updateFile} onPreset={choosePreset} onSceneEditor={() => setSceneEditorOpen(true)} />
+    <ModeBar projectName={props.projectName} onOpenProjects={props.onOpenProjects} connected={props.connected} modelReady={props.modelReady} onOpenSettings={props.onOpenSettings} onOpenCompare={props.onOpenCompare} compareOpen={props.compareOpen} onOpenNavigator={props.onOpenNavigator} />
+    <div className="video-workspace-main">
+      <div className="video-workbench">
+        <WorkspaceSectionTabs<H3Section> tabs={h3Sections} active={activeSection} onChange={setActiveSection} label="H3 workflow sections" />
+        <div className="video-workbench-content">
+          <section className="video-workspace-tab-panel" aria-label="Source" hidden={activeSection !== 'source'}>
+            <div className="video-workflow-intro"><h2>Choose your source</h2><p>Pick a video mode and add the media that will guide this shot.</p></div>
+            <nav className="video-source-modes" aria-label="Video input mode">{videoModeLabels.map(([id, label]) => <button key={id} type="button" aria-pressed={props.mode === id} title={modeInfo.find(item => item.id === id)?.note} className={props.mode === id ? 'active' : ''} onClick={() => { setSelection({ kind: 'scene' }); setRailAsset(null); if (id !== 'text' && props.turbo === 'fast') choosePreset('off'); props.setMode(id) }}>{label}</button>)}</nav>
+            <ModeInputStrip props={props} boundScene={boundScene} selection={selection} onSelect={value => { setRailAsset(null); setSelection(value); setActiveSection('settings') }} />
+            {props.mode === 'reference' && <ReferenceSourcePanel characters={props.characters} locations={props.locations} selectedCharacterIds={props.selectedCharacterIds} selectedLocationIds={props.selectedLocationIds} imageCount={boundScene.references.filter(ref => ref.file.kind === 'image').length} videoCount={props.referenceVideos.length} audioCount={props.referenceAudios.length} onAddCharacter={props.loadCharacter} onAddLocation={props.loadLocation} onChoose={kind => void props.chooseReference(kind)} onOpenCharacters={() => props.onNavigate('characters')} onOpenLocations={() => props.onNavigate('locations')} />}
+            {props.mode === 'reference' ? <details className="video-more-assets"><summary>Browse all project assets</summary>{assetRail}</details> : assetRail}
+          </section>
+          <section className="video-workspace-tab-panel" aria-label="Create" hidden={activeSection !== 'prompt'}>
+            <div className="video-workflow-intro"><h2>Describe the shot</h2><p>Write the action, camera direction, and sound you want H3 to create.</p></div>
+            <PromptPanel prompt={props.prompt} setPrompt={props.setPrompt} onPromptTool={props.onPromptTool} promptingTool={props.promptingTool} promptSuggestion={props.promptSuggestion} onUseSuggestion={props.onUseSuggestion} onDismissSuggestion={props.onDismissSuggestion} />
+            <details className="video-continuation-opt-in"><summary>Continue an existing video</summary><p>Plan additional beats with motion context, frame continuity, and combined exports.</p><button className="secondary-button" onClick={props.onOpenContinuation}>Open Continue workspace</button></details>
+          </section>
+          <section className="video-workspace-tab-panel" aria-label="Settings" hidden={activeSection !== 'settings'}>
+            <div className="video-workflow-intro"><h2>Render settings</h2><p>Set output size and quality. Expand advanced controls only when you need them.</p></div>
+            <Inspector props={props} boundScene={boundScene} selection={selection} selectedFile={selectedFile} selectedReference={selectedReference} onClearSelection={() => { setRailAsset(null); setSelection({ kind: 'scene' }) }} onUpdateScene={updateScene} onUpdateFile={updateFile} onPreset={choosePreset} onSceneEditor={() => setSceneEditorOpen(true)} />
+          </section>
+          <section className="video-workspace-tab-panel" aria-label="Result" hidden={activeSection !== 'result'}>
+            <div className="video-workflow-intro"><h2>Renders & next steps</h2><p>Review recent H3 jobs and choose a result to show in the preview.</p></div>
+            <div className="video-result-history">{props.historyJobs.length ? props.historyJobs.map(item => <button type="button" key={item.id} className={props.latestJob?.id === item.id ? 'selected' : ''} onClick={() => props.onSelectJob(item.id)}><span className="video-history-thumb">{item.outputUrl && item.mediaType === 'image' ? <img src={item.outputUrl} alt="" /> : item.outputUrl && item.mediaType !== 'audio' ? <MovieMediaThumbnail source={item.outputUrl} posterUrl={item.thumbnailUrl} /> : <Film size={19} />}</span><span><strong>{shortPrompt(item.prompt) || 'Untitled render'}</strong><small>{item.status} · {item.width} × {item.height} · {item.duration}s</small></span></button>) : <p role="status">Your H3 renders will appear here after you generate a shot.</p>}</div>
+            {props.latestJob?.outputUrl && <div className="video-result-actions"><strong>Selected result</strong><span>{props.latestJob.width} × {props.latestJob.height} · {props.latestJob.duration}s</span>{props.latestJob.mediaType === 'image' ? <button type="button" onClick={() => props.onSendStillToI2v(props.latestJob!, 'minimax')}>Send to I2V</button> : props.latestJob.provider === 'minimax' ? <><button type="button" onClick={() => void props.onContinue(props.latestJob!)}>Continue video</button><button type="button" onClick={() => void props.onContinueReference(props.latestJob!)}>Continue in Reference</button></> : null}<VideoExportButtons job={props.latestJob} /></div>}
+          </section>
+        </div>
+      </div>
+      <aside className="video-preview-column" aria-label="Video preview"><PreviewStage job={props.latestJob} livePreview={props.livePreview} liveEnabled={props.liveEnabled} blurSensitive={props.blurNsfwPreview} blocker={blocker} onViewQueue={() => props.onNavigate('queue')} onDetach={detach} /></aside>
     </div><GenerateBar props={props} blocker={blocker} />
     {previewPopoutRoot && createPortal(<DetachedPreviewMonitor job={props.latestJob} livePreview={props.livePreview} liveEnabled={props.liveEnabled} blurSensitive={props.blurNsfwPreview} />, previewPopoutRoot)}
     {sceneEditorOpen && <div className="video-scene-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setSceneEditorOpen(false) }}><div className="video-scene-dialog" role="dialog" aria-modal="true" aria-label="Scene details"><header><strong>Scene details</strong><button type="button" onClick={() => setSceneEditorOpen(false)} aria-label="Close scene details"><X size={18} /></button></header><SceneComposer state={boundScene} onChange={updateScene} selection={selection} onInspect={setSelection} options={[]} onAddReference={() => void props.chooseReference('image')} onManageReferences={() => void props.chooseReference('image')} onRemoveCharacter={props.removeCharacter} onUpdateReferenceFile={(path, file) => { const i = props.referenceImages.findIndex(item => item.path === path); if (i >= 0) props.updateReference(i, file) }} /><footer><button type="button" onClick={() => setSceneEditorOpen(false)}>Done</button></footer></div></div>}
@@ -4350,6 +4336,7 @@ function ComfyActivityConsole({ job }: { job: GenerationJob }) {
 function LibraryView({ jobs, settings, onEdit, onCreate, onUseLtx, onUseLastFrameReference, onNotice }: { jobs: GenerationJob[]; settings: AppSettings; onEdit(): void; onCreate(): void; onUseLtx(file: MediaFile): void; onUseLastFrameReference(job: GenerationJob, opening: { mode: 'match' | 'reframe' | 'arc'; cameraAngle?: string }): Promise<void>; onNotice(tone: 'error' | 'success' | 'neutral', text: string): void }) {
   const [query, setQuery] = useState('')
   const [provider, setProvider] = useState<'all' | 'minimax' | 'ltx25'>('all')
+  const [mediaType, setMediaType] = useState<'all' | 'video' | 'image'>('all')
   const [sort, setSort] = useState<'newest' | 'oldest'>('newest')
   const [bookmarkVideo, setBookmarkVideo] = useState<BookmarkVideo | null>(null)
   const [lightbox, setLightbox] = useState<GenerationJob | null>(null)
@@ -4359,7 +4346,7 @@ function LibraryView({ jobs, settings, onEdit, onCreate, onUseLtx, onUseLastFram
   const [openingMode, setOpeningMode] = useState<'match' | 'reframe' | 'arc'>('match')
   const [openingCameraAngle, setOpeningCameraAngle] = useState('side camera angle')
   const available = jobs.filter((job) => job.mediaType !== 'audio' && Boolean(job.outputUrl))
-  const filtered = available.filter((job) => (provider === 'all' || (job.provider ?? 'minimax') === provider) && (!query.trim() || job.prompt.toLowerCase().includes(query.trim().toLowerCase()))).sort((a, b) => sort === 'newest' ? b.createdAt - a.createdAt : a.createdAt - b.createdAt)
+  const filtered = available.filter((job) => (provider === 'all' || (job.provider ?? 'minimax') === provider) && (mediaType === 'all' || (mediaType === 'image' ? job.mediaType === 'image' : job.mediaType !== 'image')) && (!query.trim() || job.prompt.toLowerCase().includes(query.trim().toLowerCase()))).sort((a, b) => sort === 'newest' ? b.createdAt - a.createdAt : a.createdAt - b.createdAt)
   const videos: BookmarkVideo[] = available.filter(job => job.mediaType !== 'image').map((job) => ({ id: `job-${job.id}`, name: shortPrompt(job.prompt), source: job.outputUrl!, duration: job.duration, provider: job.provider === 'ltx25' ? 'ltx25' : 'minimax' }))
   useEffect(() => {
     if (!lightbox) return
@@ -4386,8 +4373,8 @@ function LibraryView({ jobs, settings, onEdit, onCreate, onUseLtx, onUseLastFram
     finally { setReferenceBusyId(null) }
   }
   return <div className="standard-page library-page"><div className="page-heading"><div><p className="eyebrow">LOCAL LIBRARY</p><h1>Video library</h1><p>Review renders, collect reusable frames, or assemble clips without changing the originals.</p></div><button className="primary-button" onClick={onEdit}><Scissors size={16} />Open movie editor</button></div>
-    <div className="library-toolbar"><label><span>Search renders</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search prompts…" /></label><label><span>Provider</span><select value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="all">All providers</option><option value="minimax">MiniMax H3</option><option value="ltx25">LTX 2.5</option></select></label><label><span>Sort</span><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label><div><strong>{filtered.length}</strong><span>of {available.length} assets</span></div></div>
-    {available.length === 0 ? <div className="empty-page library-first-run"><History size={28} /><strong>Your finished renders will live here</strong><span>Generate a shot to start the library. Finished videos are saved automatically on this device.</span><div className="library-first-run-actions"><button className="primary-button" onClick={onCreate}><Film size={15} />Open Video workspace</button><button className="secondary-button" onClick={onEdit}><Scissors size={15} />Open movie editor</button></div></div> : filtered.length === 0 ? <div className="empty-page compact"><Film size={25} /><strong>No results match these filters.</strong><button className="secondary-button" onClick={() => { setQuery(''); setProvider('all') }}>Clear filters</button></div> : <div className="library-grid">{filtered.map((job) => {
+    <div className="library-toolbar"><label><span>Search renders</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search prompts…" /></label><label><span>Provider</span><select value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="all">All providers</option><option value="minimax">MiniMax H3</option><option value="ltx25">LTX 2.5</option></select></label><label><span>Media</span><select value={mediaType} onChange={(event) => setMediaType(event.target.value as typeof mediaType)}><option value="all">Images and videos</option><option value="video">Videos</option><option value="image">Images</option></select></label><label><span>Sort</span><select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label><div><strong>{filtered.length}</strong><span>of {available.length} assets</span></div></div>
+    {available.length === 0 ? <div className="empty-page library-first-run"><History size={28} /><strong>Your finished renders will live here</strong><span>Generate a shot to start the library. Finished videos are saved automatically on this device.</span><div className="library-first-run-actions"><button className="primary-button" onClick={onCreate}><Film size={15} />Open Video workspace</button><button className="secondary-button" onClick={onEdit}><Scissors size={15} />Open movie editor</button></div></div> : filtered.length === 0 ? <div className="empty-page compact"><Film size={25} /><strong>No results match these filters.</strong><button className="secondary-button" onClick={() => { setQuery(''); setProvider('all'); setMediaType('all') }}>Clear filters</button></div> : <div className="library-grid">{filtered.map((job) => {
       const image = job.mediaType === 'image'
       const video = videos.find(item => item.id === `job-${job.id}`)
       const rifeBusy = rifeBusyId === job.id

@@ -46,6 +46,7 @@
 }
 .studio-topbar button, .studio-topbar .video-launcher { -webkit-app-region: no-drag; }
 .studio-topbar .video-brand { flex-basis: 166px; }
+.studio-topbar-current { display: flex; align-items: center; padding-inline: 16px; color: #f3f8ff; font-size: 14px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
 .studio-topbar nav { display: flex; align-items: stretch; gap: 4px; min-width: 0; }
 .studio-topbar nav button {
   min-width: 77px;
