@@ -14,6 +14,8 @@ import { collectWorkspaceSearchEntries, compactSearchText, highlightWorkspaceSea
 import { H3_PREVIEW_FPS, compactJob, compactSceneState, randomH3Seed, readWorkspace, withoutPreview, workspaceDefaults, type PersistedWorkspace } from './lib/workspacePersistence'
 import { WORKSPACE_PROJECTS_KEY, loadWorkspaceProjects, type WorkspaceProject } from './lib/workspaceProjects'
 import { modelPrecisionLabel, shortPrompt } from './lib/jobPresentation'
+import { comfyTerminalState, mayApplyHistoryUpdate, queuePromptPosition, queuePromptState } from './lib/comfyJobState'
+import { playableOutputUrl, readSavedJobs } from './lib/jobPersistence'
 import { H3_BENCHMARK_CONFIG_STORAGE_KEY, H3_BENCHMARK_STORAGE_KEY, benchmarkResultPatch, formatBenchmarkDuration, h3BenchmarkBackends, h3StackReport, loadH3BenchmarkConfig, loadH3BenchmarkResults, type H3BenchmarkConfig, type H3BenchmarkResult } from './lib/h3Diagnostics'
 import { findH3ParallelAttentionNode, findH3PreviewOverrideNode, findSolAttentionNode, findSolCompatibleCacheNode } from './lib/h3NodeDetection'
 import { workspaceTips } from './lib/workspaceTips'
@@ -290,31 +292,9 @@ async function waitForBenchmarkCompletion(comfyUrl: string, promptId: string, su
   throw new Error('Benchmark timed out after 30 minutes.')
 }
 
-function playableOutputUrl(value?: string) {
-  if (!value || value.startsWith('minimax-media:')) return value
-  try {
-    const url = new URL(value)
-    return url.pathname === '/view' ? `minimax-media://comfy?url=${encodeURIComponent(value)}` : value
-  } catch {
-    return value
-  }
-}
-
 const initialJobs = (): GenerationJob[] => {
-  try {
-    const stored = JSON.parse(localStorage.getItem('minimax.jobs') ?? '[]') as GenerationJob[]
-    return stored.map((job) => ({
-      ...job,
-      outputUrl: playableOutputUrl(job.outputUrl),
-      ...(!job.promptId && ['queued', 'running'].includes(job.status) ? {
-        status: 'failed' as const,
-        error: 'The app lost this render before it received a prompt ID. Check ComfyUI queue or history before retrying to avoid a duplicate; your source and script are safe.',
-        progressLabel: 'Submission interrupted',
-      } : {}),
-    }))
-  } catch {
-    return []
-  }
+  try { return readSavedJobs(localStorage.getItem('minimax.jobs')) }
+  catch { return [] }
 }
 
 function recordCharacterTurntable(characterProjectId: string | undefined, outputUrl: string) {
@@ -368,28 +348,6 @@ function syncReferencePrompt(value: string, previous: MovieReferenceBinding[], n
 function removeLegacyReferencePrompt(state: ScenePromptState): ScenePromptState {
   const scene = syncReferencePrompt(state.scene, [], [])
   return scene === state.scene ? state : { ...state, scene }
-}
-
-function queuePromptState(queue: unknown, promptId: string): 'queued' | 'running' | null {
-  if (!queue || typeof queue !== 'object') return null
-  const source = queue as { queue_running?: unknown; queue_pending?: unknown }
-  const contains = (entries: unknown) => Array.isArray(entries) && entries.some((entry) => Array.isArray(entry) && String(entry[1]) === promptId)
-  return contains(source.queue_running) ? 'running' : contains(source.queue_pending) ? 'queued' : null
-}
-
-function queuePromptPosition(queue: unknown, promptId: string) {
-  if (!queue || typeof queue !== 'object') return undefined
-  const pending = (queue as { queue_pending?: unknown }).queue_pending
-  if (!Array.isArray(pending)) return undefined
-  const index = pending.findIndex((entry) => Array.isArray(entry) && String(entry[1]) === promptId)
-  return index >= 0 ? index + 1 : undefined
-}
-
-function comfyTerminalState(entry: { status?: { status_str?: string; completed?: boolean } } | undefined) {
-  const status = entry?.status?.status_str?.toLowerCase() ?? ''
-  if (entry?.status?.completed || /^(success|completed)$/.test(status)) return 'completed' as const
-  if (/(?:error|failed|cancelled|interrupted)/.test(status)) return 'failed' as const
-  return null
 }
 
 function resolveRenderReferenceBindings(files: MediaFile[], bindings: MovieReferenceBinding[], clothingPolicy: 'wardrobe' | 'underwear' | 'unrestricted') {
@@ -1019,15 +977,21 @@ function App() {
     // History owns terminal results; the queue only describes in-flight work.
     // Allow a short gap after queue removal while ComfyUI persists history/output.
     const historyInFlight = new Set<string>()
+    const historyWarnings = new Set<string>()
     let queueInFlight = false
+    let queueWarningShown = false
     let disposed = false
+    const updateFromHistory = (snapshot: GenerationJob, update: (current: GenerationJob) => GenerationJob) => {
+      if (disposed) return
+      setJobs((current) => disposed ? current : current.map((item) => mayApplyHistoryUpdate(item, snapshot, cancellationRequests.current.has(snapshot.id)) ? update(item) : item))
+    }
     const timer = window.setInterval(() => {
       for (const job of jobsRef.current.filter((j) => j.status === 'queued' || j.status === 'running')) {
         const promptId = job.promptId
-        if (!promptId || historyInFlight.has(promptId)) continue
+        if (!promptId || historyInFlight.has(promptId) || cancellationRequests.current.has(job.id)) continue
         historyInFlight.add(promptId)
         void window.minimax.getHistory(settings.comfyUrl, promptId).then(async (history) => {
-          if (disposed) return
+          if (disposed || cancellationRequests.current.has(job.id)) return
           const entry = history[promptId] as { status?: { status_str?: string; completed?: boolean; messages?: unknown[] } } | undefined
           const mediaType = job.mediaType ?? 'video'
           const outputUrl = playableOutputUrl(extractOutputUrl(history, promptId, settings.comfyUrl, mediaType))
@@ -1035,20 +999,19 @@ function App() {
           if (terminalState === 'failed') {
             const historyEvents = comfyHistoryActivity(entry?.status?.messages).map((event) => ({ ...event, at: Date.now() }))
             const failureDetail = [...historyEvents].reverse().find(event => event.level === 'error')?.message
-            setJobs((current) => current.map((item) => {
-              if (item.id !== job.id) return item
+            updateFromHistory(job, (item) => {
               const failed = { ...item, status: 'failed' as const, error: failureDetail ? `ComfyUI execution failed: ${failureDetail}` : 'ComfyUI reported an execution error. Open render activity for details; the original may still be saved if upscaling failed.' }
               return historyEvents.reduce((next, event) => appendComfyActivity(next, event), appendComfyActivity(failed, { at: Date.now(), level: 'error', message: 'ComfyUI reported an execution error.' }))
-            }))
+            })
           } else if (mediaType === 'image' && outputUrl && terminalState === 'completed') {
             const outputFile = extractOutputFile(history, promptId, 'image')
             if (!outputFile) return
             try {
               const saved = await window.minimax.saveStillImage(settings.comfyUrl, outputFile, activeOutputDirectory)
               const localUrl = await window.minimax.mediaUrl(saved.path)
-              setJobs((current) => current.map((item) => item.id === job.id ? appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: saved.path, progressLabel: 'Reference still ready' }, { at: Date.now(), level: 'success', message: 'Output saved locally and ready to use.' }) : item))
+              updateFromHistory(job, (item) => appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: saved.path, progressLabel: 'Reference still ready' }, { at: Date.now(), level: 'success', message: 'Output saved locally and ready to use.' }))
             } catch (error) {
-              setJobs((current) => current.map((item) => item.id === job.id ? { ...item, status: 'failed', error: `The still rendered, but could not be saved locally: ${error instanceof Error ? error.message : String(error)}` } : item))
+              updateFromHistory(job, (item) => ({ ...item, status: 'failed', error: `The still rendered, but could not be saved locally: ${error instanceof Error ? error.message : String(error)}` }))
             }
           } else if (outputUrl && terminalState === 'completed') {
             const outputFile = extractOutputFile(history, promptId, mediaType)
@@ -1075,7 +1038,7 @@ function App() {
               if (localOutput) extractionError = await extractAutomatedReferenceSet('location', job.locationProjectId, localOutput, job.duration, settings)
             }
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
-            setJobs((current) => current.map((item) => item.id === job.id ? appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput ?? undefined, latentPath: latentPath ?? undefined, segmentOutputPath: segmentOutputPath ?? undefined, segmentOutputUrl, duration: completedMetadata?.duration ?? item.duration, width: completedMetadata?.width ?? item.width, height: completedMetadata?.height ?? item.height }, { at: Date.now(), level: 'success', message: item.latentFile ? 'Video and synchronized H3 AV latent saved for continuation.' : 'Output saved locally and ready to use.' }) : item))
+            updateFromHistory(job, (item) => appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput ?? undefined, latentPath: latentPath ?? undefined, segmentOutputPath: segmentOutputPath ?? undefined, segmentOutputUrl, duration: completedMetadata?.duration ?? item.duration, width: completedMetadata?.width ?? item.width, height: completedMetadata?.height ?? item.height }, { at: Date.now(), level: 'success', message: item.latentFile ? 'Video and synchronized H3 AV latent saved for continuation.' : 'Output saved locally and ready to use.' }))
           } else if (terminalState === 'completed') {
             const outputFile = extractOutputFile(history, promptId, mediaType)
             const localOutput = outputFile ? await window.minimax.resolveOutput(activeOutputDirectory, outputFile) : null
@@ -1084,17 +1047,22 @@ function App() {
             if (localOutput) recordLocationWalkthrough(job.locationProjectId, localOutput)
             const extractionError = localOutput && job.characterProjectId ? await extractAutomatedReferenceSet('character', job.characterProjectId, localOutput, job.duration, settings) : localOutput && job.locationProjectId ? await extractAutomatedReferenceSet('location', job.locationProjectId, localOutput, job.duration, settings) : null
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
-            setJobs((current) => current.map((item) => item.id === job.id ? localOutput && localUrl ? appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput }, { at: Date.now(), level: 'success', message: 'Output saved locally and ready to use.' }) : appendComfyActivity({ ...item, status: 'failed', progress: 100, renderDurationMs: Date.now() - item.createdAt, error: 'ComfyUI completed this prompt, but no matching output was found. Check the output folder and ComfyUI history.' }, { at: Date.now(), level: 'error', message: 'ComfyUI completed, but no matching output could be resolved.' }) : item))
+            updateFromHistory(job, (item) => localOutput && localUrl ? appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput }, { at: Date.now(), level: 'success', message: 'Output saved locally and ready to use.' }) : appendComfyActivity({ ...item, status: 'failed', progress: 100, renderDurationMs: Date.now() - item.createdAt, error: 'ComfyUI completed this prompt, but no matching output was found. Check the output folder and ComfyUI history.' }, { at: Date.now(), level: 'error', message: 'ComfyUI completed, but no matching output could be resolved.' }))
           }
-        }).catch(() => undefined).finally(() => historyInFlight.delete(promptId))
+        }).then(() => { historyWarnings.delete(promptId) }).catch((error) => {
+          if (disposed || historyWarnings.has(promptId)) return
+          historyWarnings.add(promptId)
+          const detail = error instanceof Error ? error.message : String(error)
+          updateFromHistory(job, (item) => appendComfyActivity({ ...item, progressLabel: 'Waiting for ComfyUI history or saved output' }, { at: Date.now(), level: 'warning', message: `Could not reconcile this render yet: ${detail}. Check ComfyUI and the configured output folder.` }))
+        }).finally(() => historyInFlight.delete(promptId))
       }
       if (queueInFlight) return
       queueInFlight = true
       const checkedAt = Date.now()
-      void window.minimax.getQueue(settings.comfyUrl).then((queue) => { if (disposed) return; setJobs((current) => {
+      void window.minimax.getQueue(settings.comfyUrl).then((queue) => { if (disposed) return; queueWarningShown = false; setJobs((current) => {
         let changed = false
         const next = current.map((job) => {
-        if (!job.promptId || !['queued', 'running'].includes(job.status)) return job
+        if (!job.promptId || !['queued', 'running'].includes(job.status) || cancellationRequests.current.has(job.id)) return job
         const queueState = queuePromptState(queue, job.promptId)
         if (queueState === 'running') {
           if (job.status === 'running' && !job.queueMissingAt && !job.queuePosition) return job
@@ -1117,7 +1085,14 @@ function App() {
         return appendComfyActivity({ ...job, status: 'failed', queueMissingAt: undefined, error: 'ComfyUI no longer reports this prompt in its queue or history. It may have been interrupted, cleared, or rejected before execution.' }, { at: checkedAt, level: 'error', message: 'Prompt disappeared from the ComfyUI queue and history.' })
         })
         return changed ? next : current
-      }) }).catch(() => undefined).finally(() => { queueInFlight = false })
+      }) }).catch((error) => {
+        if (disposed || queueWarningShown) return
+        queueWarningShown = true
+        const detail = error instanceof Error ? error.message : String(error)
+        setJobs((current) => current.map((job) => ['queued', 'running'].includes(job.status) && !cancellationRequests.current.has(job.id)
+          ? appendComfyActivity(job, { at: Date.now(), level: 'warning', message: `Could not read the ComfyUI queue: ${detail}. Check the connection in Settings; polling will retry.` })
+          : job))
+      }).finally(() => { queueInFlight = false })
     }, 1000)
     return () => { disposed = true; window.clearInterval(timer) }
   }, [activeOutputDirectory, pendingKey, settings, status.connected])

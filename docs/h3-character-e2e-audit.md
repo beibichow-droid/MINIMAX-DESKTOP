@@ -5,7 +5,10 @@
 - `pnpm test:comfy-cancel` uses a local HTTP ComfyUI simulator to exercise running and queued cancellation through the current job API and legacy queue API. It also checks a completion race, terminal states, and submission of a new job after cancellation.
 - `pnpm test:ui-e2e` uses headless Edge against the running Vite app (`pnpm dev:web`). It checks H3's offline state, visible Character settings search, inspector tabs, the Character library and Generate sections, preview visibility, uncaught browser errors, and document overflow at 1379 × 982 and 860 × 620.
 - `pnpm test:workspace-persistence` checks legacy workspace migration, malformed media recovery, saved sampling choices, and corrupt JSON fallback.
-- `pnpm typecheck`, `pnpm test`, `pnpm build:web`, and `pnpm build:electron` pass. Focused ESLint on `src`, `electron`, and the new tests passes. Repo-wide `pnpm lint` fails in the pre-existing untracked `.tmp_regex_check.cjs` file.
+- `pnpm test:comfy-job-state` checks queue/history interpretation and rejects stale terminal updates after cancellation or another job state change.
+- `pnpm test:job-persistence` checks that malformed saved jobs cannot hide valid Queue history and that older ComfyUI playback URLs migrate on load.
+- Render polling now records one actionable Queue or history warning per failing connection attempt instead of silently swallowing bridge errors. A live ComfyUI session is still needed to verify recovery after an actual engine disconnect.
+- `pnpm typecheck`, `pnpm test`, `pnpm build:web`, `pnpm build:electron`, and repo-wide `pnpm lint` pass. The ESLint configuration now gives root Node `.cjs` files the same Node globals as scripts.
 
 ## Live checks still needed
 

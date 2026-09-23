@@ -12,6 +12,8 @@
 | `src/components/LibraryView.tsx` and `src/components/VideoPlayer.tsx` | Render library filtering, output cards, and media playback controls. |
 | `src/components/SettingsView.tsx` and `src/components/FormFields.tsx` | Settings panels and shared labeled input controls. |
 | `src/lib/h3Diagnostics.ts` and `src/lib/h3NodeDetection.ts` | H3 benchmark persistence, model stack reports, and ComfyUI node detection. |
+| `src/lib/comfyJobState.ts` | Interpret ComfyUI queue/history state and guard terminal updates against cancellation races. |
+| `src/lib/jobPersistence.ts` | Restore saved Queue jobs independently, isolating malformed entries and migrating playback URLs. |
 | `electron/comfyCancellation.ts` | One cancellation path for Electron IPC and LAN, with modern ComfyUI and legacy queue handling. |
 | `electron/gpuTelemetry.ts` | Bounded `nvidia-smi` polling behind the desktop process. |
 
