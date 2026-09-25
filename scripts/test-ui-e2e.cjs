@@ -136,7 +136,7 @@ async function main() {
   await until(() => evaluate(`Boolean(document.querySelector('.ripple-workspace')?.getClientRects().length)`), 'Ripple after Photo Edit')
   await evaluate(`(() => { const image = { path: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="32" height="24"/%3E', name: 'edited-frame.svg', kind: 'image' }; localStorage.setItem('oyama.photo-edit.workspace.v1', JSON.stringify({ source: image, result: image, prompt: 'Make the jacket red.', seed: 42, job: null })); })()`)
   assert.ok(await clickText('Photo Edit'), 'Reopen Photo Edit with saved result')
-  await until(() => evaluate(`Boolean(document.querySelector('.photo-edit-result-stage img'))`), 'saved edited photo preview')
+  await until(() => evaluate(`document.querySelector('.photo-edit-result-stage img')?.naturalWidth > 0 && !document.querySelector('.photo-edit-use')?.disabled`), 'loaded edited photo preview')
   assert.ok(await clickText('Use as Ripple replacement'), 'Send edited photo to Ripple')
   await until(() => evaluate(`Boolean(document.querySelector('.ripple-frame-button img'))`), 'Ripple replacement preview')
   assert.ok(await evaluate(`JSON.parse(localStorage.getItem('ltx-ripple.workspace.v1')).editedFrame.name === 'edited-frame.svg'`), 'Ripple persists the selected replacement image')

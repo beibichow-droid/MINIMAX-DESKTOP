@@ -20,6 +20,13 @@ assert.equal(chunks[1].startFrame, 216)
 assert.equal(chunks[1].overlapFrames, 24)
 assert.ok(chunks.at(-1).startFrame + chunks.at(-1).sourceFrames >= 60 * 24)
 assert.throws(() => planRippleChunks(301, 10, 1), /5 minutes/)
+const shortTail = planRippleChunks(11, 10, 2)
+assert.equal(shortTail.at(-1).sourceFrames, 104, 'A short final chunk stays longer than twice its overlap')
+for (const chunkLength of [5, 10, 15]) for (const overlap of [0, 1 / 3, 2 / 3, 1, 2]) for (const duration of [5.1, 10.1, 11, 15.1, 20.1, 60.1, 299.9]) {
+  const planned = planRippleChunks(duration, chunkLength, overlap)
+  assert.ok(planned.at(-1).startFrame + planned.at(-1).sourceFrames >= Math.ceil(Math.round(duration * 24) / 8) * 8)
+  assert.ok(planned.every(chunk => chunk.index === 0 || chunk.overlapFrames < chunk.sourceFrames / 2), `Assembler accepts ${duration}s with ${chunkLength}s chunks and ${overlap}s overlap`)
+}
 assert.equal(JSON.stringify(rippleSize(1920, 1080)), JSON.stringify({ width: 768, height: 448 }))
 assert.equal(JSON.stringify(resolveFrameSize({ width: 1920, height: 1080 }, { mode: 'source', width: 768, height: 512 })), JSON.stringify({ width: 1920, height: 1088 }))
 assert.equal(JSON.stringify(resolveFrameSize({ width: 1920, height: 1080 }, { mode: 'detailed', width: 768, height: 512 })), JSON.stringify({ width: 1024, height: 576 }))

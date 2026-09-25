@@ -30,13 +30,14 @@ export function inferFireRedSelection(info: ObjectInfo): FireRedSelection {
   return { model, modelLoader, encoder, vae, lightningLora }
 }
 
-export function buildFireRedEditWorkflow(source: UploadedFile, prompt: string, seed: number, selection: FireRedSelection, mode: 'turbo' | 'quality', size: FrameSize): ComfyPrompt {
+export function buildFireRedEditWorkflow(source: UploadedFile, prompt: string, seed: number, selection: FireRedSelection, mode: 'turbo' | 'quality', size: FrameSize, references: UploadedFile[] = []): ComfyPrompt {
   if (!prompt.trim()) throw new Error('Describe the photo edit before rendering.')
   if (!selection.model || !selection.encoder || !selection.vae) throw new Error('FireRed model, text encoder, and VAE are required.')
   if (!Number.isSafeInteger(seed) || seed < 0) throw new Error('Choose a valid nonnegative seed.')
   if (mode !== 'turbo' && mode !== 'quality') throw new Error('Choose Turbo or Quality mode.')
   if (mode === 'turbo' && !selection.lightningLora) throw new Error('Turbo requires a FireRed 8-step Lightning LoRA.')
   if (!isValidFrameSize(size)) throw new Error('FireRed dimensions must be 256–2048 pixels and aligned to 32 pixels.')
+  if (references.length > 2) throw new Error('FireRed supports up to two reference images alongside the source photo.')
   const turbo = mode === 'turbo'
   const graph: ComfyPrompt = {
     '1': { class_type: selection.modelLoader, inputs: selection.modelLoader === 'UnetLoaderGGUF' ? { unet_name: selection.model } : { unet_name: selection.model, weight_dtype: 'default' } },
@@ -53,6 +54,13 @@ export function buildFireRedEditWorkflow(source: UploadedFile, prompt: string, s
     '12': { class_type: 'VAEDecode', inputs: { samples: ['11', 0], vae: ['3', 0] } },
     '14': { class_type: 'SaveImage', inputs: { images: ['12', 0], filename_prefix: 'FireRed/Photo_Edit' } },
   }
+  references.forEach((reference, index) => {
+    const nodeId = String(15 + index)
+    const input = `image${index + 2}`
+    graph[nodeId] = { class_type: 'LoadImage', inputs: { image: uploadedName(reference) } }
+    graph['7'].inputs[input] = [nodeId, 0]
+    graph['8'].inputs[input] = [nodeId, 0]
+  })
   if (turbo) graph['13'] = { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: selection.lightningLora, strength_model: 1 } }
   return graph
 }

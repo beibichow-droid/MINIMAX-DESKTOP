@@ -76,6 +76,8 @@ async function main() {
   assert.ok(await evaluate(`document.querySelectorAll('.ripple-render-card select[aria-label="Ripple edit length"] option').length === 5`), 'Ripple has 5, 10, 15, 20 second and custom lengths')
   await evaluate(`document.querySelector('.ripple-long-toggle input').click()`)
   assert.ok(await evaluate(`Boolean(document.querySelector('.ripple-long-settings')) && document.querySelector('.ripple-generate')?.disabled === true`), 'Long video mode exposes chunk controls and waits for a source')
+  await evaluate(`(() => { const overlap = document.querySelectorAll('.ripple-long-settings select')[1]; overlap.value = '0'; overlap.dispatchEvent(new Event('change', { bubbles: true })) })()`)
+  assert.ok(await evaluate(`(() => { const blend = document.querySelector('.ripple-long-settings input[type="checkbox"]'); return blend?.disabled && !blend.checked })()`), 'No overlap clears and disables blending instead of trapping the render controls')
   for (const [width, height] of [[1379, 982], [860, 620]]) {
     await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
     assert.ok(await evaluate(`document.documentElement.scrollWidth <= innerWidth && Boolean(document.querySelector('.ripple-long-settings')?.getClientRects().length)`), `Ripple long mode fits ${width} × ${height}`)
@@ -85,6 +87,15 @@ async function main() {
   const ffprobe = 'C:/FFMPEG/bin/ffprobe.exe'
   const synthetic = path.join(profile, 'ripple-source.mp4')
   execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=320x256:rate=24:duration=13', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=13', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', '-y', synthetic])
+  const invalidImage = path.join(profile, 'invalid-frame.png')
+  fs.writeFileSync(invalidImage, 'not an image')
+  await evaluate(`localStorage.setItem('ltx-ripple.workspace.v1', JSON.stringify({ source: { path: ${JSON.stringify(synthetic)}, name: 'ripple-source.mp4', kind: 'video' }, editedFrame: { path: ${JSON.stringify(invalidImage)}, name: 'invalid-frame.png', kind: 'image' } }))`)
+  await evaluate(`[...document.querySelectorAll('.sidebar .nav-button')].find(item => item.textContent.trim() === 'Photo Edit').click()`)
+  await until(() => evaluate(`Boolean(document.querySelector('.photo-edit-workspace'))`), 'Photo Edit before invalid-frame check')
+  await evaluate(`document.querySelector('.photo-edit-back').click()`)
+  await until(() => evaluate(`document.querySelector('.ripple-error')?.textContent.includes('could not be decoded')`), 'invalid Ripple replacement feedback')
+  assert.ok(await evaluate(`document.querySelector('.ripple-generate')?.disabled`), 'Ripple render stays disabled for an image that cannot decode')
+  console.log('Invalid replacement image rejected before render')
   const oversized = path.join(profile, 'oversized-source.mp4')
   fs.copyFileSync(synthetic, oversized)
   if (fs.statSync(oversized).size < 2 * 1024 * 1024) fs.truncateSync(oversized, 2 * 1024 * 1024)
@@ -136,6 +147,12 @@ async function main() {
   const third = await evaluate(`window.minimax.prepareRippleChunkSource(${JSON.stringify(synthetic)}, 192, 120, ${JSON.stringify(profile)}, ${JSON.stringify(ffmpeg)})`)
   const fullJoin = await evaluate(`window.minimax.assembleRippleChunks([{ source: ${JSON.stringify(first)}, sourceFrames: 120, overlapFrames: 0 }, { source: ${JSON.stringify(second)}, sourceFrames: 120, overlapFrames: 24 }, { source: ${JSON.stringify(third)}, sourceFrames: 120, overlapFrames: 24 }], ${JSON.stringify(synthetic)}, 13, 320, 256, true, ${JSON.stringify(profile)}, ${JSON.stringify(ffmpeg)})`)
   assert.equal((await evaluate(`window.minimax.getVideoMetadata(${JSON.stringify(fullJoin.path)}, ${JSON.stringify(ffmpeg)})`)).frameCount, 312, 'Three overlapping chunks preserve the full source duration')
+  const shortSource = path.join(profile, 'short-tail-source.mp4')
+  execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-i', synthetic, '-vf', 'trim=end_frame=264,setpts=PTS-STARTPTS', '-af', 'atrim=duration=11,asetpts=PTS-STARTPTS', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-y', shortSource])
+  const shortFirst = await evaluate(`window.minimax.prepareRippleChunkSource(${JSON.stringify(shortSource)}, 0, 240, ${JSON.stringify(profile)}, ${JSON.stringify(ffmpeg)})`)
+  const shortSecond = await evaluate(`window.minimax.prepareRippleChunkSource(${JSON.stringify(shortSource)}, 192, 104, ${JSON.stringify(profile)}, ${JSON.stringify(ffmpeg)})`)
+  const shortJoin = await evaluate(`window.minimax.assembleRippleChunks([{ source: ${JSON.stringify(shortFirst)}, sourceFrames: 240, overlapFrames: 0 }, { source: ${JSON.stringify(shortSecond)}, sourceFrames: 104, overlapFrames: 48 }], ${JSON.stringify(shortSource)}, 11, 320, 256, true, ${JSON.stringify(profile)}, ${JSON.stringify(ffmpeg)})`)
+  assert.equal((await evaluate(`window.minimax.getVideoMetadata(${JSON.stringify(shortJoin.path)}, ${JSON.stringify(ffmpeg)})`)).frameCount, 264, 'Two-second overlap and padded tail retain the entire eleven-second source')
   const streamKinds = JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'json', assembled.path], { encoding: 'utf8' })).streams.map(stream => stream.codec_type)
   assert.ok(streamKinds.includes('video') && streamKinds.includes('audio'), 'Assembled Ripple video keeps original audio')
   console.log('Ripple FFmpeg assembly verified')
@@ -168,6 +185,62 @@ async function main() {
     await evaluate(`document.querySelector('.photo-edit-use').click()`)
     await until(() => evaluate(`document.querySelector('.ripple-frame-button img')?.naturalWidth > 0`), 'Ripple replacement frame preview')
   }
+  const recoveryOutput = path.join(profile, 'recovery-output')
+  const recoveryVideoFolder = path.join(recoveryOutput, 'video')
+  fs.mkdirSync(recoveryVideoFolder, { recursive: true })
+  fs.copyFileSync(synthetic, path.join(recoveryVideoFolder, 'offline-preview.mp4'))
+  const recoveryImage = 'Photo_Edit_recovered.png'
+  fs.writeFileSync(path.join(recoveryOutput, recoveryImage), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64'))
+  const recoveryServer = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(request.url === '/system_stats'
+      ? JSON.stringify({ system: { argv: ['python', 'main.py', '--output-directory', recoveryOutput] } })
+      : request.url?.startsWith('/history/recover-photo')
+      ? JSON.stringify({ 'recover-photo': { status: { status_str: 'success' }, outputs: { '14': { images: [{ filename: recoveryImage, type: 'output' }] } } } })
+      : JSON.stringify({ queue_running: [], queue_pending: [] }))
+  })
+  await new Promise(resolve => recoveryServer.listen(0, '127.0.0.1', resolve))
+  const recoveryPort = recoveryServer.address().port
+  await new Promise(resolve => recoveryServer.close(resolve))
+  const recoveryUrl = `http://127.0.0.1:${recoveryPort}`
+  await evaluate(`(async () => { const current = await window.minimax.getSettings(); await window.minimax.saveSettings({ ...current, comfyUrl: ${JSON.stringify(recoveryUrl)}, outputDirectory: ${JSON.stringify(recoveryOutput)} }); return true })()`)
+  await evaluate(`localStorage.setItem('oyama.photo-edit.workspace.v1', JSON.stringify({ source: null, result: null, prompt: 'Recovery edit', seed: 1, mode: 'quality', job: { id: 'recover-photo', url: ${JSON.stringify(recoveryUrl)} } }))`)
+  await evaluate(`location.reload()`)
+  await until(() => evaluate(`Boolean(document.querySelector('.sidebar .nav-button'))`), 'reloaded Electron app with recovery settings')
+  await evaluate(`[...document.querySelectorAll('.sidebar .nav-button')].find(item => item.textContent.trim() === 'Photo Edit').click()`)
+  await until(() => evaluate(`document.querySelector('.photo-edit-message')?.textContent.includes('Waiting to reconnect')`), 'Photo Edit disconnection guidance')
+  assert.ok(await evaluate(`JSON.parse(localStorage.getItem('oyama.photo-edit.workspace.v1')).job?.id === 'recover-photo'`), 'A connection failure retains the edit job')
+  assert.ok(await evaluate(`document.querySelector('.photo-edit-add-reference')?.disabled`), 'Reference picker is disabled while an edit is running')
+  await new Promise(resolve => recoveryServer.listen(recoveryPort, '127.0.0.1', resolve))
+  try {
+    await until(() => evaluate(`document.querySelector('.photo-edit-result-stage img')?.naturalWidth > 0`), 'saved edit after ComfyUI reconnect').catch(async error => {
+      console.error('Recovery state:', await evaluate(`({ message: document.querySelector('.photo-edit-message')?.textContent, draft: localStorage.getItem('oyama.photo-edit.workspace.v1'), image: document.querySelector('.photo-edit-result-stage img')?.currentSrc })`))
+      throw error
+    })
+    assert.ok(await evaluate(`JSON.parse(localStorage.getItem('oyama.photo-edit.workspace.v1')).job === null`), 'Recovered edit clears the job only after saving')
+    await evaluate(`document.querySelector('.photo-edit-back').click()`)
+    await until(() => evaluate(`Boolean(document.querySelector('.ripple-workspace'))`), 'Ripple before reference draft check')
+    await evaluate(`(() => { const draft = JSON.parse(localStorage.getItem('oyama.photo-edit.workspace.v1')); draft.references = [{ path: ${JSON.stringify(path.join(recoveryOutput, recoveryImage))}, name: 'jacket.png', kind: 'image' }, { path: ${JSON.stringify(path.join(recoveryOutput, recoveryImage))}, name: 'hat.png', kind: 'image' }]; localStorage.setItem('oyama.photo-edit.workspace.v1', JSON.stringify(draft)) })()`)
+    await evaluate(`[...document.querySelectorAll('.sidebar .nav-button')].find(item => item.textContent.trim() === 'Photo Edit').click()`)
+    await until(() => evaluate(`document.querySelectorAll('.photo-edit-reference-preview img').length === 2`), 'saved FireRed reference previews')
+    for (const [width, height] of [[1379, 982], [860, 620]]) {
+      await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
+      assert.ok(await evaluate(`document.documentElement.scrollWidth <= innerWidth && document.querySelectorAll('.photo-edit-reference').length === 2`), `FireRed references fit ${width} × ${height}`)
+    }
+    await evaluate(`document.querySelector('[aria-label="Remove Image 2 reference"]').click()`)
+    assert.ok(await evaluate(`document.querySelectorAll('.photo-edit-reference').length === 1 && document.querySelector('.photo-edit-reference-detail strong')?.textContent.includes('Image 2') && document.querySelector('.photo-edit-add-reference')?.textContent.includes('Image 3')`), 'Removing a reference renumbers the remaining image and exposes the free slot')
+    const configuredElsewhere = path.join(profile, 'configured-elsewhere')
+    await evaluate(`(async () => { const current = await window.minimax.getSettings(); await window.minimax.saveSettings({ ...current, outputDirectory: ${JSON.stringify(configuredElsewhere)} }); await window.minimax.getComfyStatus(${JSON.stringify(recoveryUrl)}); return true })()`)
+    const detectedFile = await evaluate(`window.minimax.resolveOutput(${JSON.stringify(recoveryOutput)}, { filename: 'offline-preview.mp4', subfolder: 'video', type: 'output' })`)
+    assert.equal(detectedFile, path.join(recoveryVideoFolder, 'offline-preview.mp4'), 'Continue resolves a completed beat from the actual ComfyUI output folder when the saved setting differs')
+    assert.equal(await evaluate(`window.minimax.resolveOutput(${JSON.stringify(path.join(profile, 'unrelated'))}, { filename: 'offline-preview.mp4', subfolder: 'video', type: 'output' })`), null, 'Unrelated output folders remain blocked')
+    await new Promise(resolve => recoveryServer.close(resolve))
+    const offlineMedia = `minimax-media://comfy/?url=${encodeURIComponent(`${recoveryUrl}/view?filename=offline-preview.mp4&subfolder=video&type=output`)}`
+    const range = await evaluate(`(async () => { const response = await fetch(${JSON.stringify(offlineMedia)}, { headers: { Range: 'bytes=0-31' } }); return { status: response.status, contentRange: response.headers.get('content-range'), bytes: (await response.arrayBuffer()).byteLength } })()`)
+    assert.equal(range.status, 206, 'ComfyUI output video is served from disk with byte ranges')
+    assert.equal(range.bytes, 32, 'ComfyUI local video range has the requested length')
+    assert.match(range.contentRange, /^bytes 0-31\//, 'ComfyUI local video reports its range')
+  } finally { if (recoveryServer.listening) await new Promise(resolve => recoveryServer.close(resolve)) }
   console.log('PASS: Electron Photo Edit bridge, Turbo and Quality, desktop and compact layouts, Ripple navigation, and available output save')
 }
 

@@ -835,7 +835,7 @@ function App() {
   const checkedRippleOutputs = useRef(new Set<string>())
   useEffect(() => {
     if (!settings || !status.connected) return
-    const candidates = jobs.filter(job => job.provider === 'ltxripple' && job.status === 'completed' && job.promptId && !checkedRippleOutputs.current.has(job.id)).slice(0, 10)
+    const candidates = jobs.filter(job => job.provider === 'ltxripple' && job.status === 'completed' && job.promptId && !checkedRippleOutputs.current.has(job.id))
     for (const job of candidates) {
       checkedRippleOutputs.current.add(job.id)
       void window.minimax.getHistory(settings.comfyUrl, job.promptId!).then(async history => {
@@ -3230,7 +3230,6 @@ function App() {
           onGenerate={generateLtxRipple}
           onGenerateLong={generateLtxRippleLong}
           onCancel={job => void cancelJob(job)}
-          onCancelBatch={() => void cancelRippleBatch()}
         />}
         {view === 'photoedit' && <PhotoEditWorkspace
           url={settings.comfyUrl}

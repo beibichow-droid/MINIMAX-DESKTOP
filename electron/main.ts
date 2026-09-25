@@ -787,6 +787,27 @@ async function probeClipVideoMetadata(input: string, ffmpegPath: string): Promis
   return { duration: duration || frameCount / fps, fps, frameCount, width: Number(stream.width) || 0, height: Number(stream.height) || 0 }
 }
 
+let observedComfyOutput: { url: string; directory: string; at: number } | null = null
+
+function comfyOutputFromStats(stats: { system?: { argv?: string[] } }) {
+  const argv = stats.system?.argv ?? []
+  const index = argv.findIndex(value => value === '--output-directory')
+  return (index >= 0 ? argv[index + 1] : argv.find(value => value.startsWith('--output-directory='))?.slice('--output-directory='.length))?.trim() || null
+}
+
+async function trustedComfyOutputDirectory(settings: AppSettings, requested: string) {
+  if (normalize(requested).toLowerCase() === normalize(settings.outputDirectory).toLowerCase()) return true
+  const url = cleanUrl(settings.comfyUrl)
+  if (observedComfyOutput?.url === url && Date.now() - observedComfyOutput.at < 600_000) {
+    return normalize(requested).toLowerCase() === normalize(observedComfyOutput.directory).toLowerCase()
+  }
+  const stats = await comfyFetch(url, '/system_stats', { signal: AbortSignal.timeout(10_000) }).catch(() => null) as { system?: { argv?: string[] } } | null
+  const directory = stats && comfyOutputFromStats(stats)
+  if (!directory) return false
+  observedComfyOutput = { url, directory, at: Date.now() }
+  return normalize(requested).toLowerCase() === normalize(directory).toLowerCase()
+}
+
 async function comfyUploadLimit(url: string) {
   const features = await comfyFetch(url, '/features', { signal: AbortSignal.timeout(5_000) }).catch(() => null) as { max_upload_size?: unknown } | null
   const advertised = Number(features?.max_upload_size)
@@ -1035,12 +1056,23 @@ app.whenReady().then(async () => {
     if (requestUrl.hostname === 'comfy') {
       const target = requestUrl.searchParams.get('url')
       if (!target) return new Response('Missing ComfyUI media URL', { status: 400 })
-      const configuredUrl = new URL(cleanUrl((await loadSettings()).comfyUrl))
+      const settings = await loadSettings()
+      const configuredUrl = new URL(cleanUrl(settings.comfyUrl))
       const targetUrl = new URL(target)
       if (targetUrl.origin !== configuredUrl.origin || targetUrl.pathname !== '/view') {
         return new Response('Media URL is outside the configured ComfyUI server', { status: 403 })
       }
-      const upstream = await net.fetch(targetUrl.toString(), { headers: request.headers })
+      const outputFile = {
+        filename: targetUrl.searchParams.get('filename'),
+        subfolder: targetUrl.searchParams.get('subfolder') ?? '',
+        type: targetUrl.searchParams.get('type') ?? 'output',
+      }
+      const local = resolveComfyOutput(settings.outputDirectory, outputFile)
+        ?? (observedComfyOutput?.url === cleanUrl(settings.comfyUrl) ? resolveComfyOutput(observedComfyOutput.directory, outputFile) : null)
+      if (local && selectedMediaExtensions.has(extname(local).toLowerCase())) return localMediaResponse(local, request)
+      let upstream: Response
+      try { upstream = await net.fetch(targetUrl.toString(), { headers: request.headers }) }
+      catch { return new Response('ComfyUI is unavailable and this media is not in the configured output folder.', { status: 503 }) }
       const headers = new Headers(upstream.headers)
       headers.delete('content-security-policy')
       headers.delete('content-disposition')
@@ -1210,9 +1242,9 @@ app.whenReady().then(async () => {
     const started = Date.now()
     try {
       const stats = await comfyFetch(url, '/system_stats', { signal: AbortSignal.timeout(15_000) }) as { system?: { argv?: string[] } }
-      const argv = stats.system?.argv ?? []
-      const outputIndex = argv.findIndex(value => value === '--output-directory')
-      const detectedOutputDirectory = outputIndex >= 0 ? argv[outputIndex + 1] : argv.find(value => value.startsWith('--output-directory='))?.slice('--output-directory='.length)
+      const detectedOutputDirectory = comfyOutputFromStats(stats)
+      const settings = await loadSettings()
+      if (cleanUrl(url) === cleanUrl(settings.comfyUrl)) observedComfyOutput = detectedOutputDirectory ? { url: cleanUrl(url), directory: detectedOutputDirectory, at: Date.now() } : null
       return { connected: true, latencyMs: Date.now() - started, stats, detectedOutputDirectory }
     } catch (error) {
       return { connected: false, latencyMs: Date.now() - started, error: error instanceof Error ? error.message : String(error) }
@@ -1257,17 +1289,27 @@ app.whenReady().then(async () => {
     if (outputDirectory.toLowerCase() !== normalize(settings.outputDirectory).toLowerCase()) throw new Error('Images must be saved inside the configured output folder.')
     const folders = { character: 'MiniMax Character References', 'photo-edit': 'FireRed Photo Edits', 'image-creation': 'Created Images' }
     if (!Object.hasOwn(folders, purpose)) throw new Error('Unknown image output purpose.')
-    const query = new URLSearchParams({ filename: basename(file.filename), subfolder: file.subfolder ?? '', type: file.type ?? 'output' })
-    const response = await fetch(`${cleanUrl(url)}/view?${query}`)
-    if (!response.ok) throw new Error(`Image download failed (${response.status}).`)
-    const mime = response.headers.get('content-type')?.split(';')[0] ?? ''
-    const extension = mime === 'image/jpeg' ? '.jpg' : mime === 'image/webp' ? '.webp' : mime === 'image/png' ? '.png' : ''
-    if (!extension) throw new Error('ComfyUI did not return a supported image.')
+    const local = resolveComfyOutput(outputDirectory, file)
+    const localExtension = local ? extname(local).toLowerCase() : ''
+    let imageBytes: Buffer | null = null
+    let extension = ''
+    if (local && ['.png', '.jpg', '.jpeg', '.webp'].includes(localExtension)) {
+      imageBytes = await readFile(local)
+      extension = localExtension
+    } else {
+      const query = new URLSearchParams({ filename: basename(file.filename), subfolder: file.subfolder ?? '', type: file.type ?? 'output' })
+      const response = await fetch(`${cleanUrl(url)}/view?${query}`)
+      if (!response.ok) throw new Error(`Image download failed (${response.status}).`)
+      const mime = response.headers.get('content-type')?.split(';')[0] ?? ''
+      extension = mime === 'image/jpeg' ? '.jpg' : mime === 'image/webp' ? '.webp' : mime === 'image/png' ? '.png' : ''
+      if (!extension) throw new Error('ComfyUI did not return a supported image.')
+      imageBytes = Buffer.from(await response.arrayBuffer())
+    }
     const directory = join(outputDirectory, folders[purpose])
     await mkdir(directory, { recursive: true })
     const prefix = purpose === 'character' ? 'character' : purpose === 'photo-edit' ? 'photo-edit' : 'created-image'
     const target = join(directory, `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`)
-    await writeFile(target, Buffer.from(await response.arrayBuffer()))
+    await writeFile(target, imageBytes)
     return { path: target, name: basename(target) }
   })
   ipcMain.handle('comfy:save-still-image', async (_event, url: string, file: { filename: string; subfolder?: string; type?: string }, requestedOutput: string) => {
@@ -1297,7 +1339,7 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('outputs:resolve', async (_event, outputDirectory: string, file: { filename?: unknown; subfolder?: unknown; type?: unknown }) => {
     const settings = await loadSettings()
-    if (normalize(outputDirectory).toLowerCase() !== normalize(settings.outputDirectory).toLowerCase()) return null
+    if (!await trustedComfyOutputDirectory(settings, outputDirectory)) return null
     // DesktopApi.resolveOutput promises a filesystem path. Callers persist this
     // value for frame extraction and create a media URL separately. Returning a
     // minimax-media URL here caused that URL to be treated as a path and made
