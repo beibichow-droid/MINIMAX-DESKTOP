@@ -26,14 +26,13 @@ import { importSceneDraft } from './lib/sceneLegacyAdapter'
 import { analyzeSceneReference } from './lib/referenceAnalysis'
 import { SceneComposer, type SceneInspectorSelection } from './components/SceneComposer'
 import { SceneContextPanels, SceneSelectionInspector } from './components/SceneContextPanels'
-import { H3PromptEditor } from './components/H3PromptEditor'
-import { VideoPromptModal } from './components/VideoPromptModal'
+import { CreatePromptPanel } from './components/CreatePromptPanel'
 import { VideoCompare } from './components/VideoCompare'
 import { VideoExportButtons } from './components/VideoExportButtons'
 import { ContinueWorkspace, type ContinueBeat, type ContinueMethod, type ContinueScript } from './components/ContinueWorkspace'
 import { continuationReferenceReplaced, continuationSourceState, continuationBeatSignature, continuationOutputName, continuationPreviousAction, continuationTiming, nextContinuationOpenRequest, type ContinuationOpenRequest } from './lib/continuation'
 import { buildCharacterDialogueRequest } from './lib/dialogPolicy'
-import { compileScene, promptMarkupLegend } from './lib/h3SceneCompiler'
+import { compileScene } from './lib/h3SceneCompiler'
 import { bindSceneReferences, createSceneState, defaultPreservedAttributes, resizeScene, setFrameZeroGuide, value, type ScenePromptState, type SceneReference } from './lib/scenePromptState'
 import { MOVIE_HANDOFF_KEY, parseMovieHandoff, type MovieFrameTarget } from './lib/movieHandoff'
 import { MovieEditor } from './components/MovieEditor'
@@ -105,7 +104,8 @@ import { estimatedComponentBytes, resolveGpuRouting, routingGpus, type RoutingCo
 import { MINIMAX_VIDEO_RESOLUTIONS, MINIMAX_VIDEO_RESOLUTION_GROUPS, videoResolutionLabel } from './lib/videoResolutions'
 import { benchmarkFromJob, estimateRenderMs, renderHardware, type RenderBenchmark } from './lib/renderBenchmarks'
 import { useLivePreview, type LivePreview, type LiveProgress } from './lib/useLivePreview'
-import { samplerProgressSummary } from './lib/renderProgress'
+import { nodeTimingUpdate, samplerProgressSummary, samplerTimingUpdate } from './lib/renderProgress'
+import { appendComfyActivity, comfyHistoryActivity, formatRuntime, formatStepCountdown, formatStepDuration } from './lib/renderActivity'
 
 type ContinuationGenerationControl = {
   scriptId: string
@@ -115,7 +115,7 @@ type ContinuationGenerationControl = {
   sourceJobId?: string
   requestedDuration: number
   deliveredDuration: number
-  assembly: { sourcePath: string; trimFrames: number; blendFrames: number; useMotionTrim: boolean }
+  assembly: { sourcePath: string; trimFrames: number; blendFrames: number; useMotionTrim: boolean; hardCut?: boolean }
   motion?: { latentPath: string; contextFrames: number; blendFrames: number; carryAudio: boolean; suppressAudio: boolean }
 }
 import { RenderSize } from './components/RenderSize'
@@ -124,6 +124,10 @@ import { ReferenceHandoffInspector } from './components/ReferenceHandoffInspecto
 import { ZImageWorkspace } from './components/ZImageWorkspace'
 import { ClipMasterBeta } from './components/ClipMasterBeta'
 import { Ltx25Workspace } from './components/Ltx25Workspace'
+import { LtxRippleWorkspace } from './components/LtxRippleWorkspace'
+import { PhotoEditWorkspace } from './components/PhotoEditWorkspace'
+import { buildLtxRippleWorkflow, LTX_RIPPLE_REQUIRED_NODES, rippleFrameOptions, type LtxRippleOptions } from './lib/ltxRippleWorkflow'
+import { planRippleChunks } from './lib/ltxRippleBatch'
 import { AceStepWorkspace } from './components/AceStepWorkspace'
 import { Music3Workspace } from './components/Music3Workspace'
 import { VideoReferenceClipper } from './components/VideoReferenceClipper'
@@ -168,6 +172,7 @@ import type {
   WardrobeProject,
   OllamaModel,
   LocalLlmStatus,
+  LegacyMigrationStatus,
   UpscaleMode,
   View,
 } from './types'
@@ -208,53 +213,6 @@ const H3_LEARNED_UPSCALE_REQUIRED_NODES = [
 function findLtxSamplingPreviewOverrideNode(info: ObjectInfo) {
   return Object.keys(info).find((name) => name === 'LTX2SamplingPreviewOverride')
     ?? Object.keys(info).find((name) => /ltx2.*sampling.*preview.*override/i.test(name))
-}
-
-function formatRuntime(milliseconds: number) {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
-}
-
-function formatStepDuration(milliseconds: number) {
-  const seconds = Math.max(0, milliseconds / 1000)
-  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s/step`
-}
-
-function appendComfyActivity(job: GenerationJob, event: NonNullable<GenerationJob['comfyActivity']>[number]) {
-  const activity = job.comfyActivity ?? []
-  const previous = activity.at(-1)
-  // Polling and the event socket can report the same transition. Keep a useful
-  // transcript rather than filling the console with duplicate heartbeat lines.
-  if (previous?.message === event.message && event.at - previous.at < 3_000) return job
-  return { ...job, comfyActivity: [...activity, event].slice(-32) }
-}
-
-function comfyHistoryActivity(messages: unknown[] | undefined) {
-  if (!messages?.length) return []
-  return messages.slice(-4).flatMap((message) => {
-    if (!Array.isArray(message)) return []
-    const node = message[0] === undefined ? '' : `Node ${String(message[0])}: `
-    const kind = typeof message[1] === 'string' ? message[1] : ''
-    const detail = message[2] && typeof message[2] === 'object' ? message[2] as { exception_message?: unknown; message?: unknown } : undefined
-    const text = detail?.exception_message ?? detail?.message ?? kind
-    if (!text || typeof text !== 'string') return []
-    const readable = text.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim()
-    if (!readable) return []
-    const tinyVaeMismatch = /taeh3.*(?:decoder|decode).*?(?:mismatch|shape|channel)|(?:mismatch|shape|channel).*taeh3/i.test(readable)
-    const notice = tinyVaeMismatch
-      ? 'H3 Tiny VAE preview is incompatible with this latent shape. Preview decoder disabled; final full Video VAE decode continues without retrying Tiny VAE.'
-      : `${node}${readable}`.slice(0, 260)
-    return [{ level: tinyVaeMismatch ? 'warning' as const : /error|fail|interrupt/i.test(kind) ? 'error' as const : 'info' as const, message: notice }]
-  })
-}
-
-function formatStepCountdown(milliseconds: number) {
-  const seconds = Math.max(0, milliseconds / 1000)
-  if (seconds < 0.25) return 'due now'
-  return `${seconds < 10 ? seconds.toFixed(1) : Math.ceil(seconds)}s`
 }
 
 const modeInfo: Array<{ id: GenerationMode; label: string; note: string; icon: typeof Film }> = [
@@ -377,6 +335,8 @@ function App() {
   const legacyMigrationDismissalKey = 'oyama.legacy-migration-banner-dismissed.v1'
   const persisted = useMemo(readWorkspace, [])
   const [view, setView] = useState<View>('create')
+  const [photoEditIncomingSource, setPhotoEditIncomingSource] = useState<{ file: MediaFile; size: { width: number; height: number } } | null>(null)
+  const [rippleIncomingReplacement, setRippleIncomingReplacement] = useState<{ file: MediaFile; size: { width: number; height: number } } | null>(null)
   const [navigatorOpen, setNavigatorOpen] = useState(false)
   const [bootError, setBootError] = useState('')
   const [bootAttempt, setBootAttempt] = useState(0)
@@ -475,6 +435,9 @@ function App() {
   const [submitting, setSubmitting] = useState(false)
   const [stillSubmitting, setStillSubmitting] = useState(false)
   const [ltxSubmitting, setLtxSubmitting] = useState(false)
+  const [ltxRippleSubmitting, setLtxRippleSubmitting] = useState(false)
+  const [rippleBatchPromptId, setRippleBatchPromptId] = useState<string | null>(null)
+  const rippleBatchControl = useRef<{ id: string; promptId: string | null; cancelled: boolean; index: number; total: number } | null>(null)
   const [aceSubmitting, setAceSubmitting] = useState(false)
   const [music3Submitting, setMusic3Submitting] = useState(false)
   const [musicEngine, setMusicEngine] = useState<'acestep' | 'music3'>('acestep')
@@ -490,7 +453,7 @@ function App() {
   const thumbnailAttempts = useRef(new Set<string>())
   const [thumbnailScanNonce, setThumbnailScanNonce] = useState(0)
   const [notice, setNotice] = useState<{ tone: 'error' | 'success' | 'neutral'; text: string } | null>(null)
-  const [legacyMigration, setLegacyMigration] = useState<{ available: boolean; migrated: boolean; migratedAt?: string; needsBrowserStorageRepair: boolean } | null>(null)
+  const [legacyMigration, setLegacyMigration] = useState<LegacyMigrationStatus | null>(null)
   const [legacyMigrationRunning, setLegacyMigrationRunning] = useState(false)
   const [legacyMigrationDismissed, setLegacyMigrationDismissed] = useState(() => localStorage.getItem(legacyMigrationDismissalKey) === 'true')
   const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([])
@@ -515,8 +478,12 @@ function App() {
     return settingsSaveQueue.current
   }, [])
   const [promptSuggestion, setPromptSuggestion] = useState('')
+  const [inlineSuggestionsEnabled, setInlineSuggestionsEnabled] = useState(() => localStorage.getItem('minimax.inline-suggestions-enabled') === 'true')
+  useEffect(() => { localStorage.setItem('minimax.inline-suggestions-enabled', String(inlineSuggestionsEnabled)) }, [inlineSuggestionsEnabled])
   const [promptSuggestionId, setPromptSuggestionId] = useState('')
   const [promptingTool, setPromptingTool] = useState<'enhance' | 'timeline' | 'audio' | null>(null)
+  const [promptAiProgress, setPromptAiProgress] = useState<{ thinking: string; content: string } | null>(null)
+  const promptToolRevision = useRef(0)
   const [dialogueGenerating, setDialogueGenerating] = useState(false)
   const [lanOpen, setLanOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
@@ -536,10 +503,12 @@ function App() {
   const [clipMasterFromMovie, setClipMasterFromMovie] = useState(false)
   const [createResetKey, setCreateResetKey] = useState(0)
   const [ltxResetKey, setLtxResetKey] = useState(0)
+  const [ltxRippleResetKey, setLtxRippleResetKey] = useState(0)
   const [zImageResetKey, setZImageResetKey] = useState(0)
   const [aceResetKey, setAceResetKey] = useState(0)
   const [music3ResetKey, setMusic3ResetKey] = useState(0)
   const [ltxResetAt, setLtxResetAt] = useState(0)
+  const [ltxRippleResetAt, setLtxRippleResetAt] = useState(0)
   useEffect(() => {
     const decide = (event: Event) => {
       const detail = (event as CustomEvent<{ id: string; decision: 'approve' | 'dismiss' }>).detail
@@ -556,22 +525,23 @@ function App() {
     setJobs((current) => {
       let changed = false
       const nextJobs = current.map((j) => {
+      const rippleBatch = rippleBatchControl.current
+      if (rippleBatch?.promptId === id && j.id === rippleBatch.id && j.status === 'running' && !rippleBatch.cancelled) {
+        const progress = 3 + (rippleBatch.index + Math.min(95, Math.max(0, update.progress ?? 0)) / 100) / rippleBatch.total * 86
+        const progressLabel = `Chunk ${rippleBatch.index + 1} of ${rippleBatch.total} · ${update.label}`
+        if (j.progressLabel === progressLabel && progress <= j.progress) return j
+        changed = true
+        return { ...j, progress: Math.max(j.progress, progress), progressLabel }
+      }
       if (j.promptId !== id || !['running', 'queued'].includes(j.status)) return j
-      if (j.status === 'running' && j.progressLabel === update.label && (update.currentStep === undefined || update.currentStep === j.currentStep) && (update.totalSteps === undefined || update.totalSteps === j.totalSteps) && (update.progress === undefined || update.progress <= j.progress) && (update.samplerPass === undefined || update.samplerPass === j.samplerPass)) return j
+      if (j.status === 'running' && j.progressLabel === update.label && (update.currentStep === undefined || update.currentStep === j.currentStep) && (update.totalSteps === undefined || update.totalSteps === j.totalSteps) && (update.progress === undefined || update.progress <= j.progress) && (update.samplerPass === undefined || update.samplerPass === j.samplerPass) && (update.nodeId === undefined || update.nodeId === j.activeNodeId)) return j
       changed = true
       const samplerPass = update.samplerPass ?? j.samplerPass
       const passChanged = Boolean(update.samplerPass && update.samplerPass !== j.samplerPass)
       const currentStep = passChanged ? update.currentStep ?? 0 : update.currentStep ?? j.currentStep
       const totalSteps = passChanged ? update.totalSteps ?? (samplerPass === 'refine' ? j.refinementSteps : j.steps) : update.totalSteps ?? j.totalSteps
-      const advancedSamplerStep = update.currentStep !== undefined && !passChanged && update.currentStep > (j.currentStep ?? -1)
-      const measuredStepMs = advancedSamplerStep && j.lastSamplerStepAt && j.currentStep !== undefined
-        ? receivedAt - j.lastSamplerStepAt
-        : undefined
-      const estimatedSamplerStepMs = passChanged && samplerPass === 'refine' && j.estimatedSamplerStepMs
-        ? Math.round(j.estimatedSamplerStepMs * (j.refinementStepCostMultiplier ?? 1))
-        : measuredStepMs
-        ? j.estimatedSamplerStepMs ? Math.round(j.estimatedSamplerStepMs * 0.65 + measuredStepMs * 0.35) : measuredStepMs
-        : j.estimatedSamplerStepMs
+      const samplerTiming = samplerTimingUpdate(j, update, receivedAt)
+      const nodeTiming = nodeTimingUpdate(j, update.nodeId, receivedAt)
       const refinementProgress = j.refinementSteps && j.steps && currentStep !== undefined && (update.currentStep !== undefined || passChanged)
         ? Math.min(95, ((samplerPass === 'refine' ? j.steps : 0) + currentStep) / (j.steps + j.refinementSteps) * 95)
         : undefined
@@ -585,8 +555,8 @@ function App() {
         status: 'running' as const,
         startedAt: j.startedAt ?? receivedAt,
         queueMissingAt: undefined,
-        lastSamplerStepAt: passChanged ? undefined : advancedSamplerStep ? receivedAt : j.lastSamplerStepAt,
-        estimatedSamplerStepMs,
+        ...samplerTiming,
+        ...nodeTiming,
       }
       const samplerMilestone = update.currentStep !== undefined && update.totalSteps !== undefined && (update.currentStep === 0 || update.currentStep === update.totalSteps || update.currentStep % Math.max(1, Math.ceil(update.totalSteps / 4)) === 0)
       const stageChanged = Boolean(update.label && update.label !== j.progressLabel)
@@ -862,6 +832,23 @@ function App() {
     return () => { document.removeEventListener('visibilitychange', onVisibilityChange); window.removeEventListener('pagehide', onPageHide); if (jobsPersistTimer.current !== null) window.clearTimeout(jobsPersistTimer.current) }
   }, [persist])
 
+  const checkedRippleOutputs = useRef(new Set<string>())
+  useEffect(() => {
+    if (!settings || !status.connected) return
+    const candidates = jobs.filter(job => job.provider === 'ltxripple' && job.status === 'completed' && job.promptId && !checkedRippleOutputs.current.has(job.id)).slice(0, 10)
+    for (const job of candidates) {
+      checkedRippleOutputs.current.add(job.id)
+      void window.minimax.getHistory(settings.comfyUrl, job.promptId!).then(async history => {
+        const output = extractOutputFile(history, job.promptId!, 'video', '29')
+        if (!output) return
+        const localPath = await window.minimax.resolveOutput(activeOutputDirectory, output).catch(() => null)
+        const outputUrl = localPath ? await window.minimax.mediaUrl(localPath) : playableOutputUrl(extractOutputUrl(history, job.promptId!, settings.comfyUrl, 'video', '29'))
+        if (!outputUrl) return
+        setJobs(current => current.map(item => item.id === job.id && (item.outputUrl !== outputUrl || item.localOutputPath !== (localPath ?? undefined)) ? { ...item, outputUrl, localOutputPath: localPath ?? undefined, thumbnailUrl: undefined } : item))
+      }).catch(() => { checkedRippleOutputs.current.delete(job.id) })
+    }
+  }, [activeOutputDirectory, jobs, settings, status.connected])
+
   useEffect(() => {
     if (!settings?.ffmpegPath) return
     const pending = jobs.find(job => job.status === 'completed' && job.mediaType !== 'image' && job.mediaType !== 'audio' && (job.localOutputPath || job.outputUrl) && (!job.thumbnailUrl || !job.thumbnailUrl.includes('&v=2')) && !thumbnailAttempts.current.has(job.id))
@@ -994,7 +981,8 @@ function App() {
           if (disposed || cancellationRequests.current.has(job.id)) return
           const entry = history[promptId] as { status?: { status_str?: string; completed?: boolean; messages?: unknown[] } } | undefined
           const mediaType = job.mediaType ?? 'video'
-          const outputUrl = playableOutputUrl(extractOutputUrl(history, promptId, settings.comfyUrl, mediaType))
+          const outputNodeId = job.provider === 'ltxripple' ? '29' : undefined
+          const outputUrl = playableOutputUrl(extractOutputUrl(history, promptId, settings.comfyUrl, mediaType, outputNodeId))
           const terminalState = comfyTerminalState(entry)
           if (terminalState === 'failed') {
             const historyEvents = comfyHistoryActivity(entry?.status?.messages).map((event) => ({ ...event, at: Date.now() }))
@@ -1014,7 +1002,7 @@ function App() {
               updateFromHistory(job, (item) => ({ ...item, status: 'failed', error: `The still rendered, but could not be saved locally: ${error instanceof Error ? error.message : String(error)}` }))
             }
           } else if (outputUrl && terminalState === 'completed') {
-            const outputFile = extractOutputFile(history, promptId, mediaType)
+            const outputFile = extractOutputFile(history, promptId, mediaType, outputNodeId)
             // Resolve the exact output reported by ComfyUI. Never credit a
             // concurrent render merely because it is the newest disk file.
             const localOutput = outputFile ? await window.minimax.resolveOutput(activeOutputDirectory, outputFile) : null
@@ -1040,7 +1028,7 @@ function App() {
             if (extractionError) setNotice({ tone: 'error', text: `The video rendered, but its reference frames could not be extracted: ${extractionError}` })
             updateFromHistory(job, (item) => appendComfyActivity({ ...item, status: 'completed', progress: 100, renderDurationMs: Date.now() - item.createdAt, outputUrl: localUrl, localOutputPath: localOutput ?? undefined, latentPath: latentPath ?? undefined, segmentOutputPath: segmentOutputPath ?? undefined, segmentOutputUrl, duration: completedMetadata?.duration ?? item.duration, width: completedMetadata?.width ?? item.width, height: completedMetadata?.height ?? item.height }, { at: Date.now(), level: 'success', message: item.latentFile ? 'Video and synchronized H3 AV latent saved for continuation.' : 'Output saved locally and ready to use.' }))
           } else if (terminalState === 'completed') {
-            const outputFile = extractOutputFile(history, promptId, mediaType)
+            const outputFile = extractOutputFile(history, promptId, mediaType, outputNodeId)
             const localOutput = outputFile ? await window.minimax.resolveOutput(activeOutputDirectory, outputFile) : null
             const localUrl = localOutput ? await window.minimax.mediaUrl(localOutput) : null
             if (localOutput) recordCharacterTurntable(job.characterProjectId, localOutput)
@@ -1124,6 +1112,50 @@ function App() {
 
   const startVideoContinuation = async (job: GenerationJob) => {
     setContinuationOpenRequest(current => nextContinuationOpenRequest(current, job.id))
+    setView('continue')
+  }
+
+  const editContinuationSourcePrompt = (job: GenerationJob, revisedPrompt: string) => {
+    const sourceState = continuationSourceState(job)
+    const references = sourceState.references
+    const originalSettings = job.renderSettings
+    const originalSeed = originalSettings?.seed ?? job.seed ?? seed
+    setSceneState({ ...sourceState, scene: revisedPrompt, mode: job.mode, view: 'creative', manualPrompt: '' })
+    setFirstFrame(job.mode === 'image' || job.mode === 'frames' ? references.find(ref => ref.anchor === 'opening' && ref.file.kind === 'image')?.file ?? null : null)
+    setLastFrame(job.mode === 'frames' ? references.find(ref => ref.anchor === 'ending' && ref.file.kind === 'image')?.file ?? null : null)
+    setReferenceImages(job.mode === 'reference' ? references.filter(ref => ref.file.kind === 'image').map(ref => ref.file) : [])
+    setReferenceVideos(job.mode === 'reference' ? references.filter(ref => ref.file.kind === 'video').map(ref => ref.file) : [])
+    setReferenceAudios(job.mode === 'reference' ? references.filter(ref => ref.file.kind === 'audio').map(ref => ref.file) : [])
+    setSelectedReferenceCharacterIds([])
+    setSelectedReferenceLocationIds([])
+    setResolution(originalSettings?.resolution ?? `${job.renderWidth ?? job.width}x${job.renderHeight ?? job.height}`)
+    setSeed(originalSeed)
+    setRef2vaSeed(originalSeed)
+    setSeedLocked(true)
+    setTurbo(originalSettings?.turbo ?? job.turbo ?? 'off')
+    setSteps(originalSettings?.steps ?? job.steps ?? steps)
+    setSampler(originalSettings?.sampler ?? job.sampler ?? sampler)
+    setScheduler(originalSettings?.scheduler ?? job.scheduler ?? scheduler)
+    setExperimentalSampling(originalSettings?.experimentalSampling ?? Boolean(job.sampler))
+    if (originalSettings) {
+      setTurbo8Profile(originalSettings.turbo8Profile)
+      setTextEncoderPreference(originalSettings.textEncoderPreference)
+      setRefImageSize(originalSettings.refImageSize)
+      setSigmaShiftMode(originalSettings.sigmaShiftMode)
+      setShiftVideo(originalSettings.shiftVideo)
+      setShiftAudio(originalSettings.shiftAudio)
+      setLoraStrength(originalSettings.loraStrength)
+      setUserLoras(originalSettings.userLoras.map(item => ({ ...item })))
+      setClothingPolicy(originalSettings.clothingPolicy)
+      setNoDialogue(originalSettings.noDialogue)
+      setNaturalMovement(originalSettings.naturalMovement)
+    }
+    setUpscaleMode('off')
+    setCharacterHandoff(null)
+    setActiveJobId(null)
+    setCreateResetKey(value => value + 1)
+    setView('create')
+    setNotice({ tone: 'neutral', text: 'Revised source prompt loaded in H3 Create. Review its media and render settings, then generate a new clip. The saved source remains unchanged.' })
   }
 
   const addVideoLastFrameAsReference = async (job: GenerationJob, opening: { mode: 'match' | 'reframe' | 'arc'; cameraAngle?: string }) => {
@@ -1296,6 +1328,23 @@ function App() {
     setNotice({ tone: 'success', text: selectedIds.includes(locationId) ? `Added ${location.name}. Characters, wardrobe, and locations now use ${bindings.length} of 9 picture slots.` : `${location.name} removed. ${locationCount} location picture${locationCount === 1 ? '' : 's'} remain.` })
   }
 
+  const clearShotReferences = () => {
+    // An in-flight library preview load must not restore references after clear.
+    libraryBindingRevision.current += 1
+    const previous = workspaceBindingsFor(selectedReferenceCharacterIds, selectedReferenceLocationIds)
+    managedLibraryReferencePaths.current.clear()
+    setSelectedReferenceCharacterIds([])
+    setSelectedReferenceLocationIds([])
+    setReferenceImages([])
+    setReferenceVideos([])
+    setReferenceAudios([])
+    setSceneState(current => bindSceneReferences(current, [], [], [], null, null))
+    setPrompt(current => syncReferencePrompt(current, previous, []))
+    setPromptSuggestion('')
+    setPromptSuggestionId('')
+    setNotice({ tone: 'success', text: 'Shot references cleared. Character and media libraries were kept.' })
+  }
+
   const loadReferenceWardrobe = async (wardrobeId: string) => {
     const wardrobe = wardrobeProjects.find((project) => project.id === wardrobeId)
     if (!wardrobe) return
@@ -1383,18 +1432,24 @@ function App() {
       ...referenceAudios.map((file, index) => `<Audio ${index + 1}> = ${file.name}`),
     ] : undefined
     const request = buildPromptAssistantRequest(tool, prompt, { duration, mode, referenceMap, noDialogue })
+    const revision = ++promptToolRevision.current
+    const onProgress = (update: { thinking: string; content: string }) => { if (revision === promptToolRevision.current) setPromptAiProgress(update) }
     setPromptingTool(tool)
     setPromptSuggestion('')
+    setPromptAiProgress({ thinking: '', content: '' })
     try {
       const imagePaths = mode === 'reference' ? referenceImages.map((file) => file.path) : [firstFrame?.path, lastFrame?.path].filter(Boolean) as string[]
       const structuredRequest = `${request}\n\nReturn the required structured fields. The direction field must contain only the complete shot direction. Keep the summary to one concise sentence. Inspect attached images in reference-map order and use only visible details; do not invent unseen traits.`
       let result: unknown
       try {
-        result = await window.minimax.generateStructuredWithOllama(llm.url, llm.model, structuredRequest, h3PromptDirectionSchema, llm.provider, imagePaths)
+        result = await window.minimax.generateStructuredWithOllama(llm.url, llm.model, structuredRequest, h3PromptDirectionSchema, llm.provider, imagePaths, onProgress)
       } catch (error) {
+        if (revision !== promptToolRevision.current) return
         if (!imagePaths.length) throw error
-        result = await window.minimax.generateStructuredWithOllama(llm.url, llm.model, `${request}\n\nImage inspection was unavailable. Use only the authoritative reference map and do not claim visual observations. Return only the required structured fields.`, h3PromptDirectionSchema, llm.provider)
+        setPromptAiProgress({ thinking: '', content: '' })
+        result = await window.minimax.generateStructuredWithOllama(llm.url, llm.model, `${request}\n\nImage inspection was unavailable. Use only the authoritative reference map and do not claim visual observations. Return only the required structured fields.`, h3PromptDirectionSchema, llm.provider, [], onProgress)
       }
+      if (revision !== promptToolRevision.current) return
       if (!result || typeof result !== 'object') throw new Error('The local model returned a response outside the MiniMax H3 prompt format. Try again or choose another model.')
       const payload = result as { summary?: unknown; direction?: unknown }
       if (typeof payload.direction !== 'string') throw new Error('The local model did not return a usable MiniMax H3 shot direction. Try again or choose another model.')
@@ -1403,59 +1458,33 @@ function App() {
       setPromptSuggestion(response); setPromptSuggestionId(suggestionId)
       offerCopilotSuggestion({ id: suggestionId, title: tool === 'timeline' ? 'Review timeline rewrite' : tool === 'audio' ? 'Review sound and dialogue pass' : 'Review MiniMax-ready refinement', text: response, target: 'create-prompt', sourceLabel: `${llm.model} · ${llm.label}` })
     } catch (error) {
+      if (revision !== promptToolRevision.current) return
+      setPromptAiProgress(null)
       setNotice({ tone: 'error', text: error instanceof Error ? error.message : String(error) })
     } finally {
-      setPromptingTool(null)
+      if (revision === promptToolRevision.current) setPromptingTool(null)
     }
   }
 
   const resetCreateWorkspace = () => {
-    const defaults = settings?.generationDefaults
-    setSceneState(createSceneState())
-    setPromptSuggestion('')
+    promptToolRevision.current += 1
     setPromptingTool(null)
-    setDialogueGenerating(false)
-    setDuration(defaults?.duration ?? workspaceDefaults.duration)
-    setResolution(defaults?.resolution ?? workspaceDefaults.resolution)
-    setTurbo(defaults?.turbo ?? workspaceDefaults.turbo)
-    setTurbo8Profile(defaults?.turbo8Profile ?? workspaceDefaults.turbo8Profile)
-    setTextEncoderPreference(defaults?.textEncoderPreference ?? workspaceDefaults.textEncoderPreference)
-    setSteps(defaults?.steps ?? workspaceDefaults.steps)
-    setSampler(defaults?.sampler ?? workspaceDefaults.sampler)
-    setScheduler(defaults?.scheduler ?? workspaceDefaults.scheduler)
-    setExperimentalSampling(defaults?.experimentalSampling ?? workspaceDefaults.experimentalSampling)
-    setRefImageSize(defaults?.refImageSize ?? workspaceDefaults.refImageSize)
-    setNoDialogue(true)
-    setClothingPolicy('wardrobe')
-    setSigmaShiftMode(defaults?.sigmaShiftMode ?? workspaceDefaults.sigmaShiftMode)
-    setShiftVideo(defaults?.shiftVideo ?? workspaceDefaults.shiftVideo)
-    setShiftAudio(defaults?.shiftAudio ?? workspaceDefaults.shiftAudio)
-    setLoraStrength(defaults?.loraStrength ?? workspaceDefaults.loraStrength)
-    setUserLoras(workspaceDefaults.userLoras.map((item) => ({ ...item })))
-    setLiveEnabled(defaults?.livePreview ?? workspaceDefaults.liveEnabled)
-    setLivePreviewMode('auto')
-    setUpscaleMode(defaults?.upscaleMode ?? workspaceDefaults.upscaleMode)
-    setH3ProReview(workspaceDefaults.h3ProReview)
-    setH3ProRefineSteps(workspaceDefaults.h3ProRefineSteps)
-    setH3RefineSteps(workspaceDefaults.h3RefineSteps)
-    setH3RefineDenoise(workspaceDefaults.h3RefineDenoise)
-    setRtxModel('')
-    setSeed(randomH3Seed(seed))
-    setSeedLocked(workspaceDefaults.seedLocked)
-    setAdvanced(false)
+    setPromptAiProgress(null)
+    libraryBindingRevision.current += 1
+    managedLibraryReferencePaths.current.clear()
+    setSceneState(current => ({ ...createSceneState('', current.duration, current.mode), noDialogue: current.noDialogue, naturalMovement: current.naturalMovement }))
+    setPromptSuggestion('')
+    setPromptSuggestionId('')
     setFirstFrame(null)
     setLastFrame(null)
     setReferenceImages([])
     setReferenceVideos([])
     setReferenceAudios([])
-    setActiveWorkspaceProjectId(null)
     setVideoClipDraft(null)
-    setActiveJobId(null)
     setCharacterHandoff(null)
     setSelectedReferenceCharacterIds([])
     setSelectedReferenceLocationIds([])
-    setCreateResetKey((value) => value + 1)
-    setNotice({ tone: 'success', text: 'MiniMax Create reset. Saved libraries, rendered files, and queue history were not deleted.' })
+    setNotice({ tone: 'success', text: 'H3 prompt and sources cleared. Render settings, saved projects, and results were kept.' })
   }
 
   const generateCharacterDialogue = async (draft: CharacterDialogueDraft) => {
@@ -1531,6 +1560,7 @@ function App() {
         return
       }
       if (project.scope === 'ltx25') { setLtxResetAt(Date.now()); setLtxResetKey((value) => value + 1) }
+      if (project.scope === 'ltxripple') { setLtxRippleResetAt(Date.now()); setLtxRippleResetKey(value => value + 1) }
       if (project.scope === 'zimage') setZImageResetKey((value) => value + 1)
       if (project.scope === 'music') { setAceResetKey((value) => value + 1); setMusicEngine('acestep') }
       if (project.scope === 'music3') { setMusic3ResetKey((value) => value + 1); setMusicEngine('music3') }
@@ -1566,6 +1596,13 @@ function App() {
       setNotice({ tone: 'success', text: 'LTX 2.5 reset. Its prompt, first frame, options, and current preview were cleared.' })
       return
     }
+    if (view === 'ltxripple') {
+      localStorage.removeItem('ltx-ripple.workspace.v1')
+      setLtxRippleResetAt(Date.now())
+      setLtxRippleResetKey(value => value + 1)
+      setNotice({ tone: 'success', text: 'LTX Ripple inputs and current preview were cleared.' })
+      return
+    }
     if (view === 'zimage') {
       localStorage.removeItem('minimax.zimage-workspace')
       setZImageResetKey((value) => value + 1)
@@ -1575,7 +1612,7 @@ function App() {
 
   const factoryResetWorkspace = async () => {
     try {
-      if (pendingJobs.length || submitting || stillSubmitting || ltxSubmitting || aceSubmitting) throw new Error('Finish or cancel active generations before resetting.')
+      if (pendingJobs.length || submitting || stillSubmitting || ltxSubmitting || ltxRippleSubmitting || aceSubmitting) throw new Error('Finish or cancel active generations before resetting.')
       await window.minimax.factoryResetSettings('Reset')
     } catch (error) {
       setNotice({ tone: 'error', text: `Factory reset could not complete: ${error instanceof Error ? error.message : String(error)}` })
@@ -1585,6 +1622,7 @@ function App() {
   const cancelJob = async (job: GenerationJob) => {
     if (!settings) return
     if (!['queued', 'running'].includes(job.status) || cancellingIds.has(job.id)) return
+    if (rippleBatchControl.current?.id === job.id) { await cancelRippleBatch(); return }
     cancellationRequests.current.add(job.id)
     setCancellingIds((current) => new Set(current).add(job.id))
     if (!job.promptId) {
@@ -1819,6 +1857,7 @@ function App() {
       }, surveyModels, { images, videos: [], audios: [] })
       if (surveyGpuRouting) console.info(`[GPU Routing] MiniMax H3 character survey | ${surveyGpuRouting.logLine} | Strategy: ${surveyGpuRouting.workflow.strategy}`)
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+      live.registerWorkflow(response.prompt_id, graph)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
         setJobs((current) => current.map((item) => item.id === localId ? { ...item, promptId: response.prompt_id, status: 'cancelled', error: undefined } : item))
@@ -1897,6 +1936,7 @@ function App() {
       const graph = buildLtx25Workflow({ ...options, attentionBackend: ltxAttentionBackend, gpuRouting: ltxGpuRouting?.workflow }, ltxSelection, uploaded, uploadedMsrReferences)
       if (ltxGpuRouting) console.info(`[GPU Routing] LTX 2.5 | ${ltxGpuRouting.logLine} | Strategy: ${ltxGpuRouting.workflow.strategy}`)
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+      live.registerWorkflow(response.prompt_id, graph, liveEnabled)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
         setJobs((current) => current.map((item) => item.id === localId ? { ...item, promptId: response.prompt_id, status: 'cancelled' } : item))
@@ -1916,6 +1956,156 @@ function App() {
     } finally {
       cancellationRequests.current.delete(localId)
       setLtxSubmitting(false)
+    }
+  }
+
+  const generateLtxRipple = async (options: LtxRippleOptions, source: MediaFile, editedFrame: MediaFile): Promise<string | null> => {
+    if (!settings) return 'Studio settings are still loading.'
+    if (!status.connected) return 'Start ComfyUI and verify the server connection in Settings.'
+    const missingNodes = LTX_RIPPLE_REQUIRED_NODES.filter(node => !info[node])
+    if (missingNodes.length) return `Ripple requires these ComfyUI nodes: ${missingNodes.join(', ')}. Update ComfyUI and its LTX nodes, then refresh the engine.`
+    const lora = choices(info, 'LoraLoaderModelOnly', 'lora_name').find(name => /(?:^|[\\/])LTX25_Ripple_v11\.safetensors$/i.test(name))
+    if (!lora) return 'Install LTX25_Ripple_v11.safetensors in ComfyUI/models/loras, restart ComfyUI, and refresh the engine.'
+    if (!ltxSelection.diffusion || !ltxSelection.textEncoder || !ltxSelection.videoVae || !ltxSelection.audioVae) return 'Install the LTX 2.5 distilled transformer, Gemma encoder, and video/audio VAEs.'
+    const metadata = await window.minimax.getVideoMetadata(source.path, settings.ffmpegPath)
+    if (!rippleFrameOptions(Math.floor(metadata.duration * 24)).includes(options.frames)) return 'The selected clip is too short for this Ripple render span. Choose a shorter span or longer clip.'
+    const id = createId()
+    const job: GenerationJob = { id, provider: 'ltxripple', mode: 'reference', mediaType: 'video', prompt: options.prompt, createdAt: Date.now(), status: 'queued', progress: 2, progressLabel: 'Preparing source clip at 24 fps', width: options.width, height: options.height, duration: options.frames / 24, seed: options.seed, referenceFiles: [source, editedFrame], execution: { diffusionModel: ltxSelection.diffusion, textEncoder: ltxSelection.textEncoder, sampler: 'Euler', scheduler: 'Simple · 8 steps', adapters: [`LTX Ripple v11 · ${options.strength.toFixed(2)}`] } }
+    setJobs(current => [job, ...current])
+    selectActiveJob(id)
+    setLtxRippleSubmitting(true)
+    setNotice({ tone: 'neutral', text: 'Preparing the LTX Ripple source and first-frame guide…' })
+    try {
+      const prepared = await window.minimax.prepareContinuationSource([source.path], (options.frames - 2) / 24, activeOutputDirectory, settings.ffmpegPath)
+      const preparedMetadata = await window.minimax.getVideoMetadata(prepared, settings.ffmpegPath)
+      if (preparedMetadata.frameCount !== options.frames - 1) throw new Error(`Source preparation produced ${preparedMetadata.frameCount} frames; Ripple requires ${options.frames - 1} source frames plus the edited first frame. Check the source clip and FFmpeg settings.`)
+      setJobs(current => current.map(item => item.id === id ? { ...item, progress: 3, progressLabel: 'Optimizing and uploading Ripple inputs' } : item))
+      const [videoUpload, frameUpload] = await Promise.all([window.minimax.uploadInput(settings.comfyUrl, prepared), window.minimax.uploadInput(settings.comfyUrl, editedFrame.path)])
+      if (cancellationRequests.current.has(id)) throw new Error('Ripple render cancelled before submission.')
+      const graph = buildLtxRippleWorkflow(options, ltxSelection, lora, videoUpload, frameUpload)
+      const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+      live.registerWorkflow(response.prompt_id, graph, options.livePreview !== false)
+      if (cancellationRequests.current.has(id)) {
+        await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
+        setJobs(current => current.map(item => item.id === id ? { ...item, promptId: response.prompt_id, status: 'cancelled' } : item))
+        return 'Ripple render cancelled.'
+      }
+      setJobs(current => current.map(item => item.id === id ? { ...item, promptId: response.prompt_id, status: 'running', progress: 4, progressLabel: 'Waiting for ComfyUI to start' } : item))
+      setNotice({ tone: 'success', text: 'LTX Ripple edit added to ComfyUI.' })
+      return null
+    } catch (reason) {
+      const cancelled = cancellationRequests.current.has(id)
+      const message = cancelled ? 'Ripple render cancelled.' : reason instanceof Error ? reason.message : String(reason)
+      setJobs(current => current.map(item => item.id === id ? { ...item, status: cancelled ? 'cancelled' : 'failed', error: cancelled ? undefined : message } : item))
+      setNotice({ tone: cancelled ? 'neutral' : 'error', text: message })
+      return message
+    } finally {
+      cancellationRequests.current.delete(id)
+      setLtxRippleSubmitting(false)
+    }
+  }
+
+  const cancelRippleBatch = async () => {
+    const control = rippleBatchControl.current
+    if (!control) return
+    control.cancelled = true
+    if (control.promptId && settings) await window.minimax.cancelPrompt(settings.comfyUrl, control.promptId).catch(() => undefined)
+  }
+
+  const generateLtxRippleLong = async (options: LtxRippleOptions, source: MediaFile, editedFrame: MediaFile, chunkSeconds: number, overlapSeconds: number, blend: boolean): Promise<string | null> => {
+    if (!settings) return 'Studio settings are still loading.'
+    if (rippleBatchControl.current) return 'Finish or cancel the current Ripple batch first.'
+    if (!status.connected) return 'Start ComfyUI and verify the server connection in Settings.'
+    const missingNodes = LTX_RIPPLE_REQUIRED_NODES.filter(node => !info[node])
+    if (missingNodes.length) return `Ripple requires these ComfyUI nodes: ${missingNodes.join(', ')}.`
+    const lora = choices(info, 'LoraLoaderModelOnly', 'lora_name').find(name => /(?:^|[\\/])LTX25_Ripple_v11\.safetensors$/i.test(name))
+    if (!lora) return 'Install LTX25_Ripple_v11.safetensors in ComfyUI/models/loras, restart ComfyUI, and refresh the engine.'
+    if (!ltxSelection.diffusion || !ltxSelection.textEncoder || !ltxSelection.videoVae || !ltxSelection.audioVae) return 'Install the LTX 2.5 distilled transformer, Gemma encoder, and video/audio VAEs.'
+    let chunks
+    let metadata
+    try {
+      metadata = await window.minimax.getVideoMetadata(source.path, settings.ffmpegPath)
+      chunks = planRippleChunks(metadata.duration, chunkSeconds, overlapSeconds)
+      if (chunks.length < 2) return 'This source fits in one Ripple pass. Turn off Long video mode.'
+      if (blend && chunks.some(chunk => chunk.index > 0 && chunk.overlapFrames === 0)) return 'Set a nonzero overlap to blend transitions.'
+    } catch (reason) { return reason instanceof Error ? reason.message : String(reason) }
+    const id = createId()
+    const control = { id, promptId: null as string | null, cancelled: false, index: 0, total: chunks.length }
+    rippleBatchControl.current = control
+    const job: GenerationJob = { id, provider: 'ltxripple', mode: 'reference', mediaType: 'video', prompt: options.prompt, createdAt: Date.now(), status: 'running', progress: 2, progressLabel: `Preparing chunk 1 of ${chunks.length}`, width: options.width, height: options.height, duration: metadata.duration, seed: options.seed, referenceFiles: [source, editedFrame], execution: { diffusionModel: ltxSelection.diffusion, textEncoder: ltxSelection.textEncoder, sampler: 'Euler', scheduler: 'Simple · 8 steps', adapters: [`LTX Ripple v11 · ${options.strength.toFixed(2)}`], preview: options.livePreview === false ? 'Off' : options.previewOverride ? 'LTX sampling · 24 fps' : 'Standard decoded frame' } }
+    setJobs(current => [job, ...current])
+    selectActiveJob(id)
+    setLtxRippleSubmitting(true)
+    const rendered: Array<{ source: string; sourceFrames: number; overlapFrames: number }> = []
+    try {
+      for (const chunk of chunks) {
+        if (control.cancelled) throw new Error('Ripple batch cancelled.')
+        setJobs(current => current.map(item => item.id === id ? { ...item, progressLabel: `Preparing chunk ${chunk.index + 1} of ${chunks.length}`, progress: 3 + chunk.index / chunks.length * 86 } : item))
+        const prepared = await window.minimax.prepareRippleChunkSource(source.path, chunk.startFrame, chunk.sourceFrames, activeOutputDirectory, settings.ffmpegPath)
+        let framePath = editedFrame.path
+        if (chunk.index > 0) {
+          const previous = chunks[chunk.index - 1]
+          const previousOutput = rendered.at(-1)
+          if (!previousOutput) throw new Error('The previous Ripple chunk has no rendered video for the next first frame.')
+          // Output frame 0 is the edited guide; sample the previous output at
+          // the exact point where the next chunk's overlap begins.
+          const seam = (previous.sourceFrames - chunk.overlapFrames) / 24
+          const extracted = await window.minimax.extractVideoFrame(previousOutput.source, seam, activeOutputDirectory, settings.ffmpegPath)
+          framePath = extracted.path
+        }
+        if (control.cancelled) throw new Error('Ripple batch cancelled.')
+        setJobs(current => current.map(item => item.id === id ? { ...item, progressLabel: `Optimizing and uploading chunk ${chunk.index + 1} of ${chunks.length}` } : item))
+        const [videoUpload, frameUpload] = await Promise.all([window.minimax.uploadInput(settings.comfyUrl, prepared), window.minimax.uploadInput(settings.comfyUrl, framePath)])
+        const graph = buildLtxRippleWorkflow({ ...options, frames: chunk.outputFrames, filenamePrefix: `LTX_Ripple/Chunks/${id}/Chunk_${String(chunk.index + 1).padStart(2, '0')}` }, ltxSelection, lora, videoUpload, frameUpload)
+        const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+        control.index = chunk.index
+        control.promptId = response.prompt_id
+        setRippleBatchPromptId(response.prompt_id)
+        live.registerWorkflow(response.prompt_id, graph, options.livePreview !== false)
+        setJobs(current => current.map(item => item.id === id ? { ...item, progressLabel: `Rendering chunk ${chunk.index + 1} of ${chunks.length}` } : item))
+        const started = Date.now()
+        let output: string | null = null
+        while (!output) {
+          if (control.cancelled) throw new Error('Ripple batch cancelled.')
+          if (Date.now() - started > 2 * 60 * 60 * 1000) throw new Error(`Chunk ${chunk.index + 1} timed out. Check ComfyUI history and GPU memory.`)
+          let history: Record<string, unknown>
+          try { history = await window.minimax.getHistory(settings.comfyUrl, response.prompt_id) }
+          catch {
+            setJobs(current => current.map(item => item.id === id ? { ...item, progressLabel: `Chunk ${chunk.index + 1} of ${chunks.length} · waiting for ComfyUI connection` } : item))
+            await new Promise(resolve => window.setTimeout(resolve, 2000))
+            continue
+          }
+          const entry = history[response.prompt_id] as { status?: { status_str?: string; completed?: boolean } } | undefined
+          if (comfyTerminalState(entry) === 'failed') throw new Error(`Chunk ${chunk.index + 1} failed in ComfyUI. Check its execution log and GPU memory.`)
+          const outputFile = extractOutputFile(history, response.prompt_id, 'video', '29')
+          if (outputFile) {
+            const localPath = await window.minimax.resolveOutput(activeOutputDirectory, outputFile).catch(() => null)
+            output = localPath ?? extractOutputUrl(history, response.prompt_id, settings.comfyUrl, 'video', '29') ?? null
+          } else if (comfyTerminalState(entry) === 'completed') throw new Error(`Chunk ${chunk.index + 1} completed without a Ripple video from SaveVideo node 29.`)
+          if (!output) await new Promise(resolve => window.setTimeout(resolve, 2000))
+        }
+        rendered.push({ source: output, sourceFrames: chunk.sourceFrames, overlapFrames: chunk.overlapFrames })
+        control.promptId = null
+        setRippleBatchPromptId(null)
+        setJobs(current => current.map(item => item.id === id ? { ...item, progress: 3 + (chunk.index + 1) / chunks.length * 86, progressLabel: `Completed chunk ${chunk.index + 1} of ${chunks.length}` } : item))
+      }
+      if (control.cancelled) throw new Error('Ripple batch cancelled.')
+      setJobs(current => current.map(item => item.id === id ? { ...item, progress: 91, progressLabel: blend ? 'Blending chunk transitions' : 'Joining edited chunks' } : item))
+      const assembled = await window.minimax.assembleRippleChunks(rendered, source.path, metadata.duration, options.width, options.height, blend, activeOutputDirectory, settings.ffmpegPath)
+      if (control.cancelled) throw new Error('Ripple batch cancelled.')
+      const outputUrl = await window.minimax.mediaUrl(assembled.path)
+      setJobs(current => current.map(item => item.id === id ? appendComfyActivity({ ...item, status: 'completed', progress: 100, progressLabel: 'Ripple long video ready', outputUrl, localOutputPath: assembled.path, renderDurationMs: Date.now() - item.createdAt }, { at: Date.now(), level: 'success', message: `${chunks.length} Ripple chunks assembled with the original audio.` }) : item))
+      setNotice({ tone: 'success', text: `Ripple long video ready · ${chunks.length} edited chunks.` })
+      return null
+    } catch (reason) {
+      const message = control.cancelled ? 'Ripple batch cancelled. Completed chunk outputs remain in ComfyUI.' : reason instanceof Error ? reason.message : String(reason)
+      setJobs(current => current.map(item => item.id === id ? { ...item, status: control.cancelled ? 'cancelled' : 'failed', error: control.cancelled ? undefined : message, progressLabel: control.cancelled ? 'Cancelled' : 'Ripple batch failed' } : item))
+      setNotice({ tone: control.cancelled ? 'neutral' : 'error', text: message })
+      return message
+    } finally {
+      if (rippleBatchControl.current === control) rippleBatchControl.current = null
+      setRippleBatchPromptId(null)
+      setLtxRippleSubmitting(false)
     }
   }
 
@@ -1954,6 +2144,7 @@ function App() {
       const graph = buildAceStepWorkflow({ ...options, attentionBackend: resolvedH3AttentionBackend, gpuRouting: aceGpuRouting?.workflow }, aceSelection)
       if (aceGpuRouting) console.info(`[GPU Routing] ACE-Step | ${aceGpuRouting.logLine} | Strategy: ${aceGpuRouting.workflow.strategy}`)
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+      live.registerWorkflow(response.prompt_id, graph)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
         setJobs((current) => current.map((item) => item.id === localId ? { ...item, promptId: response.prompt_id, status: 'cancelled' } : item))
@@ -1981,7 +2172,9 @@ function App() {
     const job: GenerationJob = { id: localId, provider: 'music3', mediaType: 'audio', mode: 'text', prompt: options.caption, createdAt: Date.now(), status: 'queued', progress: 2, progressLabel: 'Preparing MiniMax Music 3 workflow', width: 0, height: 0, duration: options.duration, execution: { diffusionModel: music3Selection.diffusion, sampler: 'Euler + simple' } }
     setJobs((current) => [job, ...current]); setMusic3Submitting(true); setNotice({ tone: 'neutral', text: 'Preparing the official MiniMax Music 3 ComfyUI graph…' })
     try {
-      const response = await window.minimax.submitPrompt(settings.comfyUrl, buildMusic3Workflow(options, music3Selection), live.clientId)
+      const graph = buildMusic3Workflow(options, music3Selection)
+      const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+      live.registerWorkflow(response.prompt_id, graph)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
         setJobs((current) => current.map((item) => item.id === localId ? { ...item, promptId: response.prompt_id, status: 'cancelled' } : item))
@@ -2086,7 +2279,7 @@ function App() {
     const effectivePrompt = sceneCompilation.prompt
     const [width, height] = resolution.split('x').map(Number)
     const previewFrames = h3PreviewFrameCount(duration)
-    const continuationPreviewEnabled = target === 'video' && (liveEnabled || Boolean(control?.continuation))
+    const continuationPreviewEnabled = target === 'video' && liveEnabled
     const useGenerationAnimatedPreview = continuationPreviewEnabled && livePreviewMode !== 'standard' && h3AnimatedPreviewReady
     const selectedSampling = experimentalSampling
       ? { sampler, scheduler }
@@ -2195,7 +2388,7 @@ function App() {
       const generationOptions = {
         latentCapture: latentFile ? { filenamePrefix: `h3_context/${localId}` } : undefined,
         motionContext: control?.continuation?.motion ? { latentPath: control.continuation.motion.latentPath, contextFrames: control.continuation.motion.contextFrames, blendFrames: control.continuation.motion.blendFrames, carryAudio: control.continuation.motion.carryAudio, suppressAudio: control.continuation.motion.suppressAudio } : undefined,
-        continuationAssembly: control?.continuation?.assembly && sourceVideo ? { sourceVideo, trimFrames: control.continuation.assembly.trimFrames, blendFrames: control.continuation.assembly.blendFrames, useMotionTrim: control.continuation.assembly.useMotionTrim } : undefined,
+        continuationAssembly: control?.continuation?.assembly && sourceVideo ? { sourceVideo, trimFrames: control.continuation.assembly.trimFrames, blendFrames: control.continuation.assembly.blendFrames, useMotionTrim: control.continuation.assembly.useMotionTrim, hardCut: control.continuation.assembly.hardCut } : undefined,
         sceneState: boundScene,
         ignoreSceneConflicts: renderAnyway,
         mode,
@@ -2214,6 +2407,7 @@ function App() {
         upscale: target === 'video' ? upscaleMode === 'refine' ? { type: 'refine' as const, steps: h3RefineSteps, denoise: h3RefineDenoise } : h3ProActive ? { type: 'h3' as const, model: h3LearnedUpscaleModel, scale: 2, refineSteps: h3ProRefineSteps, refineDenoise: 0.35 } : upscaleMode === 'ltx' ? { type: 'ltx' as const, model: upscaleModel, vae: upscaleVae } : upscaleMode === 'rtx' ? { type: 'rtx' as const, model: rtxModel } : undefined : undefined,
         refImageSize,
         sigmaShift: sigmaShiftMode === 'custom' ? { video: shiftVideo, audio: shiftAudio } : undefined,
+        livePreview: liveEnabled,
         previewOverride: useGenerationAnimatedPreview && h3PreviewOverrideNode ? { frames: previewFrames, fps: H3_PREVIEW_FPS, nodeType: h3PreviewOverrideNode, vaeName: selection.previewVae, jpegQuality: 85 } : undefined,
         attentionBackend: settings.attentionBackend === 'sol' ? undefined : resolvedH3AttentionBackend,
         solAttention: target === 'video' && settings.attentionBackend === 'sol' && solAttentionNode ? { nodeType: solAttentionNode, tau: settings.solAttnTau } : undefined,
@@ -2233,6 +2427,7 @@ function App() {
       if (h3GpuRouting) console.info(`[GPU Routing] ${h3GpuRouting.logLine} | Strategy: ${h3GpuRouting.workflow.strategy}`)
       if (control?.continuation) updatePreparation('Submitting continuation to ComfyUI')
       const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+      live.registerWorkflow(response.prompt_id, graph, liveEnabled)
       if (cancellationRequests.current.has(localId)) {
         await window.minimax.cancelPrompt(settings.comfyUrl, response.prompt_id)
         setJobs((current) => current.map((item) => item.id === localId ? { ...item, promptId: response.prompt_id, status: 'cancelled', error: undefined } : item))
@@ -2281,14 +2476,15 @@ function App() {
     if (!continuationAssemblyReady) throw new Error('Combined continuation output requires the MiniMax H3 Extender Trim and Merge nodes. Install or enable them, restart ComfyUI, then test the connection again.')
     // Normalize source cadence before a 24 fps merge; a chosen frame also ends the retained source.
     onProgress('Preparing the source for the 24 fps combined video')
-    sourcePath = await window.minimax.prepareContinuationSource(sourceCandidates, method === 'frame' ? beat.frameTime : null, activeOutputDirectory, settings.ffmpegPath)
+    const hardCut = beat.continuityBreak
+    sourcePath = await window.minimax.prepareContinuationSource(sourceCandidates, !hardCut && method === 'frame' ? beat.frameTime : null, activeOutputDirectory, settings.ffmpegPath)
     onProgress('Reading source timing and checking the seam')
     const externalMetadata = await window.minimax.getVideoMetadata(sourcePath, settings.ffmpegPath)
-    if (script.continuity.blendFrames > externalMetadata.frameCount) throw new Error('The source is shorter than the seam blend. Reduce seam blend frames or choose a later source frame.')
+    if (!hardCut && script.continuity.blendFrames > externalMetadata.frameCount) throw new Error('The source is shorter than the seam blend. Reduce seam blend frames or choose a later source frame.')
     if (sourceJob && resolvedOutput && sourceJob.localOutputPath !== resolvedOutput) {
       setJobs(current => current.map(job => job.id === sourceJob.id ? { ...job, localOutputPath: resolvedOutput } : job))
     }
-    if (method === 'motion' && (!continuationNodesReady || !sourceJob?.latentFile)) throw new Error('This source has no compatible saved H3 AV latent. Select Last Frame or Choose Frame.')
+    if (!hardCut && method === 'motion' && (!continuationNodesReady || !sourceJob?.latentFile)) throw new Error('This source has no compatible saved H3 AV latent. Select Last Frame or Choose Frame.')
     const previousState = sourceJob ? continuationSourceState(sourceJob) : script.mode === 'reference' ? sceneState : createSceneState('', beat.duration, 'text')
     const inheritedNoDialogue = sourceJob?.renderSettings?.noDialogue ?? sourceJob?.noDialogue ?? previousState.noDialogue
     const effectiveNoDialogue = script.continuity.dialogueMode === 'none' || (script.continuity.dialogueMode !== 'allow' && inheritedNoDialogue)
@@ -2305,22 +2501,23 @@ function App() {
       !beat.cameraOverride.trim() && previousState.camera.movement?.value && `Camera movement: ${previousState.camera.movement.value}`,
       previousAction && `Previous action: ${previousAction}`,
     ].filter(Boolean)
-    const nextMode: GenerationMode = script.mode === 'reference' ? 'reference' : method === 'motion' ? 'text' : 'image'
-    const authored = [continuityLines.length ? `Preserve the established scene and motion. ${continuityLines.join('. ')}.` : '', `What happens next: ${beat.prompt.trim()}`, beat.cameraOverride.trim() ? `Camera change: ${beat.cameraOverride.trim()}` : ''].filter(Boolean).join('\n')
-    const timing = continuationTiming(beat.duration, method === 'motion' ? script.continuity.contextFrames : 0, script.continuity.blendFrames)
+    const nextMode: GenerationMode = hardCut ? script.mode === 'reference' && Object.values(beat.replacements).some(Boolean) ? 'reference' : 'text' : script.mode === 'reference' ? 'reference' : method === 'motion' ? 'text' : 'image'
+    const cameraDirection = [beat.shotSize, beat.cameraAngle, beat.cameraMovement, beat.cameraOverride.trim()].filter(Boolean).join(', ')
+    const authored = [continuityLines.length ? `Preserve the established scene and motion. ${continuityLines.join('. ')}.` : '', hardCut ? 'New shot after a direct camera cut.' : '', `What happens next: ${beat.prompt.trim()}`, cameraDirection ? `Camera direction: ${cameraDirection}` : ''].filter(Boolean).join('\n')
+    const timing = continuationTiming(beat.duration, !hardCut && method === 'motion' ? script.continuity.contextFrames : 0, hardCut ? 0 : script.continuity.blendFrames)
     if (timing.renderFrames > 362) throw new Error(`This beat needs ${timing.renderFrames} raw H3 frames after continuity overlap, above H3’s 362-frame limit. Shorten the beat or reduce latent context frames.`)
     const renderDuration = timing.renderDuration
     const nextState = createSceneState(authored, renderDuration, nextMode)
     nextState.environment = beat.continuityBreak ? value('') : previousState.environment
     nextState.lighting = beat.continuityBreak ? value('') : previousState.lighting
-    nextState.camera = beat.cameraOverride.trim() ? { ...(beat.continuityBreak ? nextState.camera : previousState.camera), movement: value(beat.cameraOverride.trim()) } : beat.continuityBreak ? nextState.camera : previousState.camera
+    nextState.camera = cameraDirection ? { ...(hardCut ? nextState.camera : previousState.camera), movement: value(cameraDirection) } : hardCut ? nextState.camera : previousState.camera
     nextState.characters = beat.continuityBreak ? [] : previousState.characters
     nextState.noDialogue = effectiveNoDialogue
     if (effectiveNoDialogue) nextState.dialogue = []
     nextState.naturalMovement = previousState.naturalMovement
-    nextState.continuity = { scene: !beat.continuityBreak, camera: !beat.continuityBreak, exactFrame: method !== 'motion', notes: value('') }
+    nextState.continuity = { scene: !hardCut, camera: !hardCut, exactFrame: !hardCut && method !== 'motion', notes: value('') }
     let frame: MediaFile | null = null
-    if (method !== 'motion') {
+    if (!hardCut && method !== 'motion') {
       onProgress('Extracting the frame for visual continuity')
       let extracted: Awaited<ReturnType<typeof window.minimax.extractVideoFrame>> | null = null
       let extractionError = ''
@@ -2447,8 +2644,8 @@ function App() {
         sourceJobId: sourceJob?.id ?? ('status' in source ? undefined : source.path),
         requestedDuration: beat.duration,
         deliveredDuration: timing.deliveredDuration,
-        assembly: { sourcePath, trimFrames: timing.trimFrames, blendFrames: script.continuity.blendFrames, useMotionTrim: method === 'motion' },
-        motion: method === 'motion' && sourceJob?.latentFile ? { latentPath: sourceJob.latentPath ?? sourceJob.latentFile, contextFrames: script.continuity.contextFrames, blendFrames: script.continuity.blendFrames, carryAudio: script.continuity.carryAudio, suppressAudio: effectiveNoDialogue } : undefined,
+        assembly: { sourcePath, trimFrames: timing.trimFrames, blendFrames: hardCut ? 0 : script.continuity.blendFrames, useMotionTrim: !hardCut && method === 'motion', hardCut },
+        motion: !hardCut && method === 'motion' && sourceJob?.latentFile ? { latentPath: sourceJob.latentPath ?? sourceJob.latentFile, contextFrames: script.continuity.contextFrames, blendFrames: script.continuity.blendFrames, carryAudio: script.continuity.carryAudio, suppressAudio: effectiveNoDialogue } : undefined,
       } })
       if (!queuedId) throw new Error('ComfyUI did not return a queued beat. Check the local engine connection and retry.')
       setJobs(current => current.map(job => job.id === queuedId ? { ...job, continuityState: compactContinuityState } : job))
@@ -2579,6 +2776,7 @@ function App() {
           referenceImages: [], referenceVideos: [], referenceAudios: [],
         }, selection, { images: [], videos: [], audios: [] })
         const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+        live.registerWorkflow(response.prompt_id, graph)
         const timing = await waitForBenchmarkCompletion(settings.comfyUrl, response.prompt_id, submittedAt)
         finalResults = benchmarkResultPatch(finalResults, item.backend, { status: 'completed', ...timing, completedAt: Date.now() })
       } catch (error) {
@@ -2632,6 +2830,7 @@ function App() {
       try {
         const graph = buildMiniMaxWorkflow({ mode: 'text', prompt: diagnosticPrompt, width: 1344, height: 768, duration: 5, seed: 12345, steps: 20, turbo: test.turbo, sampler: 'res_multistep', scheduler: 'simple', refImageSize: 'match', filenamePrefix: test.filenamePrefix, referenceImages: [], referenceVideos: [], referenceAudios: [] }, test.selection, { images: [], videos: [], audios: [] })
         const response = await window.minimax.submitPrompt(settings.comfyUrl, graph, live.clientId)
+        live.registerWorkflow(response.prompt_id, graph)
         queuedCount += 1
         setJobs((current) => current.map((item) => item.id === id ? { ...item, promptId: response.prompt_id, status: 'running', progress: 4, progressLabel: index === 0 ? 'Native test queued' : 'Turbo 8 test queued behind Native' } : item))
         if (index === tests.length - 1) setActiveJobId(id)
@@ -2817,14 +3016,14 @@ function App() {
           <label className="titlebar-render-anyway" title="Submit despite scene conflicts. Engine, models, and media must still be available."><input type="checkbox" checked={renderAnyway} onChange={(event) => setRenderAnyway(event.target.checked)} />Render anyway</label>
           {mode === 'reference' && <button className="titlebar-action titlebar-generate-image" type="button" onClick={() => void generateRef.current?.('image')} disabled={stillSubmitting}><ImagePlus size={14} />{stillSubmitting ? 'Generating…' : 'Generate image'}</button>}
         </div>}
-        {(view === 'create' || view === 'ltx25' || view === 'zimage') && <button className="titlebar-action titlebar-reset" onClick={resetCurrentWorkspace} title="Reset prompts, options, media, selections, and the current preview in this workspace"><RotateCcw size={14} />Reset workspace</button>}
+        {(view === 'create' || view === 'ltx25' || view === 'ltxripple' || view === 'zimage') && <button className="titlebar-action titlebar-reset" onClick={resetCurrentWorkspace} title={view === 'create' ? 'Clear H3 prompt and sources; keep render settings' : 'Reset prompts, options, media, selections, and the current preview in this workspace'}><RotateCcw size={14} />{view === 'create' ? 'Clear prompt & sources' : 'Reset workspace'}</button>}
         {workspaceProjectScope(view, musicEngine) && <button className="titlebar-action titlebar-projects" onClick={() => setProjectManagerOpen(true)} title="Save, open, and manage full workspace projects"><FolderOpen size={14} /><span>Project: Current workspace</span><ChevronDown size={13} /></button>}
         <button className="titlebar-action titlebar-help" onClick={() => setHelpOpen(true)} title="Show tips for this workspace" aria-label="Show workspace tips"><HelpCircle size={15} />Tips</button>
         <button className="titlebar-action" onClick={() => { setLanOpen(true); void window.minimax.getLanStatus().then(setLanStatus) }} title="Share Oyama AI Video Studio over your local network"><QrCode size={14} />LAN</button>
       </header>
 
       {failedKeys.length > 0 && <section className="storage-failure" role="alert"><strong>Some changes have not been saved</strong><p>Local storage is full or unavailable. Keep this window open to preserve your current work, free storage space, then retry.</p><button type="button" className="secondary-button" onClick={retryLocalSave}>Retry saving</button></section>}
-      <WorkspaceNavigator open={navigatorOpen} onOpenChange={setNavigatorOpen} view={view} engine={musicEngine} onNavigate={(next, engine) => { if (engine) setMusicEngine(engine); setView(next) }} onProjects={() => setProjectManagerOpen(true)} onTips={() => setHelpOpen(true)} onFind={openWorkspaceSearch} onReset={['create', 'ltx25', 'zimage'].includes(view) ? resetCurrentWorkspace : undefined} />
+      <WorkspaceNavigator open={navigatorOpen} onOpenChange={setNavigatorOpen} view={view} engine={musicEngine} onNavigate={(next, engine) => { if (engine) setMusicEngine(engine); setView(next) }} onProjects={() => setProjectManagerOpen(true)} onTips={() => setHelpOpen(true)} onFind={openWorkspaceSearch} onReset={['create', 'ltx25', 'ltxripple', 'zimage'].includes(view) ? resetCurrentWorkspace : undefined} />
       {workspaceSearchOpen && <div className="workspace-search-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setWorkspaceSearchOpen(false) }}>
         <section className="workspace-search-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-search-title">
           <div className="workspace-search-input-wrap"><Search size={17} /><input ref={workspaceSearchInputRef} type="search" value={workspaceSearchQuery} onChange={(event) => setWorkspaceSearchQuery(event.target.value)} onKeyDown={handleWorkspaceSearchKeyDown} placeholder={`Search ${workspaceTips[view].title} settings`} autoComplete="off" spellCheck={false} aria-labelledby="workspace-search-title" /><kbd>Esc</kbd></div>
@@ -2925,6 +3124,7 @@ function App() {
             accessories={accessoryProjects}
             selectedCharacterIds={selectedReferenceCharacterIds}
             selectedLocationIds={selectedReferenceLocationIds}
+            clearReferences={clearShotReferences}
             removeCharacter={removeWorkspaceCharacter}
             characterDetailReferencesEnabled={settings.characterDetailReferencesEnabled}
             loadCharacter={(characterId) => void loadReferenceCharacter(characterId)}
@@ -2969,14 +3169,19 @@ function App() {
             connected={status.connected}
              onSendStillToI2v={(job, provider) => void sendStillToI2v(job, provider)}
             latestJob={activeJobId ? jobs.find((job) => job.id === activeJobId) : undefined}
-            onOpenContinuation={() => setContinuationOpenRequest(current => nextContinuationOpenRequest(current))} onContinue={startVideoContinuation}
+            onOpenContinuation={() => { setContinuationOpenRequest(current => nextContinuationOpenRequest(current)); setView('continue') }} onContinue={startVideoContinuation}
             onContinueReference={startRef2vaContinuation}
             onContinueH3Pro={continueH3Pro}
             ollamaAvailable={ollamaModels.length > 0}
             ollamaModel={llmConnection.model}
             llmProviderLabel={llmConnection.label}
+            llmProvider={llmConnection.provider}
+            llmUrl={llmConnection.url}
+            inlineSuggestionsEnabled={inlineSuggestionsEnabled}
+            setInlineSuggestionsEnabled={setInlineSuggestionsEnabled}
             promptSuggestion=""
             promptingTool={promptingTool}
+            promptAiProgress={promptAiProgress}
             dialogueGenerating={dialogueGenerating}
             onPromptTool={(tool) => void runPromptTool(tool)}
             onGenerateDialogue={generateCharacterDialogue}
@@ -3006,6 +3211,37 @@ function App() {
           onGenerate={(options, file) => void generateLtx(options, file)}
           onCancel={(job) => void cancelJob(job)}
         />}
+        {view === 'ltxripple' && <LtxRippleWorkspace key={`ripple-${ltxRippleResetKey}`}
+          settings={settings}
+          outputDirectory={activeOutputDirectory}
+          connected={status.connected}
+          liveConnected={live.connected}
+          livePreview={live.preview}
+          samplingPreviewNodeType={ltxSamplingPreviewOverrideNode ?? null}
+          batchPromptId={rippleBatchPromptId}
+          missingNodes={LTX_RIPPLE_REQUIRED_NODES.filter(node => !info[node])}
+          lora={choices(info, 'LoraLoaderModelOnly', 'lora_name').find(name => /(?:^|[\\/])LTX25_Ripple_v11\.safetensors$/i.test(name)) ?? ''}
+          modelReady={Boolean(ltxSelection.diffusion && ltxSelection.textEncoder && ltxSelection.videoVae && ltxSelection.audioVae)}
+          latestJob={jobs.find(job => job.provider === 'ltxripple' && job.createdAt > ltxRippleResetAt)}
+          submitting={ltxRippleSubmitting}
+          incomingReplacement={rippleIncomingReplacement}
+          onConsumeReplacement={() => setRippleIncomingReplacement(null)}
+          onEditFirstFrame={(file, size) => { setPhotoEditIncomingSource({ file, size }); setView('photoedit') }}
+          onGenerate={generateLtxRipple}
+          onGenerateLong={generateLtxRippleLong}
+          onCancel={job => void cancelJob(job)}
+          onCancelBatch={() => void cancelRippleBatch()}
+        />}
+        {view === 'photoedit' && <PhotoEditWorkspace
+          url={settings.comfyUrl}
+          info={info}
+          connected={status.connected}
+          outputDirectory={settings.outputDirectory}
+          incomingSource={photoEditIncomingSource}
+          onConsumeIncoming={() => setPhotoEditIncomingSource(null)}
+          onUseRipple={(file, size) => { setRippleIncomingReplacement({ file, size }); setView('ltxripple'); setNotice({ tone: 'success', text: 'FireRed edit loaded as Ripple’s replacement frame at its rendered size.' }) }}
+          onOpenRipple={() => setView('ltxripple')}
+        />}
         {view === 'music' && musicEngine === 'acestep' && <AceStepWorkspace key={`acestep-${aceResetKey}`}
           settings={settings}
           models={aceSelection}
@@ -3034,7 +3270,7 @@ function App() {
           onCancel={(job) => void cancelJob(job)}
           onSelectAceStep={() => setMusicEngine('acestep')}
         />}
-        <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={activeOutputDirectory} attentionBackend={resolvedH3AttentionBackend} gpuRouting={h3GpuRouting?.workflow} onUse={(file, frameResolution) => {
+        <div hidden={view !== 'zimage'}><ZImageWorkspace key={`first-frame-${zImageResetKey}`} url={settings.comfyUrl} info={info} connected={status.connected} ollamaAvailable={ollamaModels.length > 0} llmProvider={llmConnection.provider} ollamaUrl={llmConnection.url} ollamaModel={llmConnection.model} outputDirectory={settings.outputDirectory} attentionBackend={resolvedH3AttentionBackend} gpuRouting={h3GpuRouting?.workflow} onUse={(file, frameResolution) => {
           setFirstFrame(file); setResolution(frameResolution); setMode('image'); setActiveJobId(null); setView('create'); setNotice({ tone: 'success', text: 'Z-Image frame loaded into the MiniMax I2V workspace.' })
         }} onUseLtx={(file) => void sendGeneratedStillToLtx(file)} /></div>
         {view === 'referenceprep' && <ReferencePrepStudio settings={settings} info={info} connected={status.connected} onUseCutout={(file) => {
@@ -3058,7 +3294,7 @@ function App() {
           return generateLtx({ mode: 'image', prompt: `${walkthroughDirection} Location description: ${locationProfile} Camera language: ${cameraLanguage} Image clarity: ${clarityDirection} No cuts, no teleporting, no layout changes, no duplicated objects, no people as focal subjects, no dialogue, no text, no logos.`, width: 1344, height: 768, duration: Math.max(5, Math.min(20, options?.duration ?? 10)), preset: 'quality', seed: Math.floor(Math.random() * 1_000_000_000), filenamePrefix: 'MiniMax_location_walkthrough' }, firstFrame, { locationProjectId: project.id })
         }} />}
         {view === 'queue' && <JobsView title="Queue" note="Running and recent local generations" jobs={jobs} empty="No generations have been queued." cancellingIds={cancellingIds} onCancel={cancelJob} onRemove={removeJobFromHistory} />}
-        <div hidden={view !== 'continue'}><ContinueWorkspace openRequest={continuationOpenRequest} jobs={jobs} connected={status.connected} liveConnected={live.connected} motionReady={continuationNodesReady} assemblyReady={continuationAssemblyReady} missingNodes={missingContinuationNodes} livePreview={live.preview} cancellingIds={cancellingIds} onChooseVideo={async () => { const picked = await window.minimax.chooseMedia('video'); return picked ? { ...picked, kind: 'video', preview: await window.minimax.mediaUrl(picked.path) } : null }} onChooseImage={async () => { const picked = await window.minimax.chooseMedia('image'); return picked ? { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) } : null }} onGenerate={generateContinuationBeat} onCancel={cancelJob} onResetSource={() => setContinuationOpenRequest(current => ({ ...current, sourceId: null }))} /></div>
+        <div hidden={view !== 'continue'}><ContinueWorkspace openRequest={continuationOpenRequest} jobs={jobs} connected={status.connected} liveConnected={live.connected} motionReady={continuationNodesReady} assemblyReady={continuationAssemblyReady} missingNodes={missingContinuationNodes} livePreview={live.preview} cancellingIds={cancellingIds} onChooseVideo={async () => { const picked = await window.minimax.chooseMedia('video'); return picked ? { ...picked, kind: 'video', preview: await window.minimax.mediaUrl(picked.path) } : null }} onChooseImage={async () => { const picked = await window.minimax.chooseMedia('image'); return picked ? { ...picked, kind: 'image', preview: await window.minimax.mediaUrl(picked.path) } : null }} onGenerate={generateContinuationBeat} onCancel={cancelJob} onResetSource={() => setContinuationOpenRequest(current => ({ ...current, sourceId: null }))} onEditSourcePrompt={editContinuationSourcePrompt} /></div>
         {(view === 'movie' || (view === 'clipmaster' && clipMasterFromMovie)) && <div className="movie-integrated" hidden={view !== 'movie'}><div className="movie-workspace-heading"><div><h1>Oyama AI Movie</h1><p>Assemble renders, refine clips, and send frames to H3 or LTX.</p></div><button className="secondary-button" onClick={() => void window.minimax.openMovieEditor()}><ExternalLink size={15} />Open separate window</button></div><MovieEditor settings={settings} jobs={jobs} onCreate={(kind) => setView(kind === 'music' ? 'music' : 'ltx25')} onNotice={(tone, text) => setNotice({ tone, text })} onOpenClipMaster={clip => { setClipMasterClip(clip); setClipMasterFromMovie(true); setView('clipmaster') }} onUseFrame={receiveMovieFrame} /></div>}
         {view === 'library'  && <LibraryView jobs={jobs.filter((job) => job.status === 'completed')} settings={settings} onEdit={() => setView('movie')} onCreate={() => setView('create')} onUseLtx={loadStartFrameInLtx} onUseLastFrameReference={addVideoLastFrameAsReference} onNotice={(tone, text) => setNotice({ tone, text })} />}
         {view === 'clipmaster' && <ClipMasterBeta onUseFrame={receiveMovieFrame} clip={clipMasterClip ?? undefined} jobs={jobs} settings={settings} onClose={() => { setClipMasterClip(null); setView(clipMasterFromMovie ? 'movie' : 'library') }} onNotice={(tone, text) => setNotice({ tone, text })} onExportClip={clipMasterFromMovie ? clip => window.dispatchEvent(new CustomEvent('oyama-movie-add-media', { detail: clip })) : undefined} />}
@@ -3077,7 +3313,7 @@ function App() {
           </button>
         </span>}
         {activeRenderRuntime !== undefined && <span className={`status-bar-runtime ${activeRenderJob?.status === 'running' || activeRenderJob?.status === 'queued' ? 'active' : ''}`} role="status" title={activeRenderJob?.status === 'running' && activeEngineRuntime !== undefined ? 'ComfyUI engine time. Queue wait is shown separately when known.' : 'Time since this render was submitted locally.'}><Clock3 size={13} />{activeRenderJob?.status === 'queued' ? 'Queue' : activeRenderJob?.status === 'running' ? 'Engine' : 'Render'} · {formatRuntime(activeEngineRuntime ?? activeRenderRuntime)}{activeRenderJob?.status === 'running' && activeQueueWait !== undefined && activeQueueWait > 0 && <small>Queued {formatRuntime(activeQueueWait)}</small>}</span>}
-        {activeSamplerProgress && <span className="status-bar-sampler" title={`ComfyUI render progress: ${activeSamplerProgress.currentStep} of ${activeSamplerProgress.totalSteps} sampler steps (${activeSamplerProgress.progress}%). ${activeSamplerProgress.rate ? `Measured pace ${formatStepDuration(activeSamplerProgress.rate)}.` : 'Measuring sampler pace.'} ${activeSamplerProgress.stepOverdueBy !== undefined ? `The next step is taking ${formatStepCountdown(activeSamplerProgress.stepOverdueBy)} longer than the measured pace; decoding, preview work, or system load may be delaying it.` : activeSamplerProgress.currentStep < activeSamplerProgress.totalSteps && activeSamplerProgress.nextStepIn !== undefined ? `Next sampler step expected in ${formatStepCountdown(activeSamplerProgress.nextStepIn)}.` : ''} ${activeSamplerProgress.remainingMs !== undefined ? `Estimated ${formatRuntime(activeSamplerProgress.remainingMs)} remaining.` : 'Remaining-time estimate will appear after another sampler step is measured.'}`}><Gauge size={13} /><strong>{activeSamplerProgress.progress}%</strong><span className="sampler-step">Step {activeSamplerProgress.currentStep}/{activeSamplerProgress.totalSteps}</span>{activeSamplerProgress.rate && <span className="sampler-rate">{formatStepDuration(activeSamplerProgress.rate)}</span>}{activeSamplerProgress.currentStep < activeSamplerProgress.totalSteps && activeSamplerProgress.nextStepIn !== undefined && <span className={`sampler-countdown ${activeSamplerProgress.stepOverdueBy !== undefined ? 'delayed' : ''}`}><Clock3 size={12} />{activeSamplerProgress.stepOverdueBy !== undefined ? `Waiting +${formatStepCountdown(activeSamplerProgress.stepOverdueBy)}` : `Next ${formatStepCountdown(activeSamplerProgress.nextStepIn)}`}</span>}{activeSamplerProgress.remainingMs !== undefined && <span className="sampler-estimate">ETA ~{formatRuntime(activeSamplerProgress.remainingMs)}</span>}</span>}
+        {activeSamplerProgress && <span className="status-bar-sampler" title={`ComfyUI render progress: ${activeSamplerProgress.currentStep} of ${activeSamplerProgress.totalSteps} sampler steps (${activeSamplerProgress.progress}%). ${activeSamplerProgress.rate ? `Measured pace ${formatStepDuration(activeSamplerProgress.rate)}.` : 'Measuring sampler pace.'} ${activeSamplerProgress.stepOverdueBy !== undefined ? `The next step is taking ${formatStepCountdown(activeSamplerProgress.stepOverdueBy)} longer than the measured pace; decoding, preview work, or system load may be delaying it.` : activeSamplerProgress.currentStep < activeSamplerProgress.totalSteps && activeSamplerProgress.nextStepIn !== undefined ? `Next sampler step expected in ${formatStepCountdown(activeSamplerProgress.nextStepIn)}.` : ''} ${activeSamplerProgress.remainingSteps > 0 && activeSamplerProgress.remainingMs !== undefined ? `Estimated ${formatRuntime(activeSamplerProgress.remainingMs)} of sampling remaining; decoding and saving follow.` : activeSamplerProgress.remainingSteps === 0 ? 'Sampling complete; decoding and saving may still be running.' : 'Sampling estimate will appear after another step is measured.'}`}><Gauge size={13} /><strong>{activeSamplerProgress.progress}%</strong><span className="sampler-step">Step {activeSamplerProgress.currentStep}/{activeSamplerProgress.totalSteps}</span>{activeSamplerProgress.rate && <span className="sampler-rate">{formatStepDuration(activeSamplerProgress.rate)}</span>}{activeSamplerProgress.currentStep < activeSamplerProgress.totalSteps && activeSamplerProgress.nextStepIn !== undefined && <span className={`sampler-countdown ${activeSamplerProgress.stepOverdueBy !== undefined ? 'delayed' : ''}`}><Clock3 size={12} />{activeSamplerProgress.stepOverdueBy !== undefined ? `Waiting +${formatStepCountdown(activeSamplerProgress.stepOverdueBy)}` : `Next ${formatStepCountdown(activeSamplerProgress.nextStepIn)}`}</span>}{activeSamplerProgress.remainingSteps > 0 && activeSamplerProgress.remainingMs !== undefined && <span className="sampler-estimate">Sampling ~{formatRuntime(activeSamplerProgress.remainingMs)} left</span>}</span>}
         {view === 'create' && <span className="status-bar-render-estimate" title={plannedRenderEstimate ? `Estimated from ${plannedRenderEstimate.sampleCount} completed H3 render${plannedRenderEstimate.sampleCount === 1 ? '' : 's'} on this GPU. Queue wait is excluded.` : 'This estimate learns from completed H3 video renders on the detected GPU.'}><Clock3 size={13} />{plannedRenderEstimate ? `Est. render ~${formatRuntime(plannedRenderEstimate.milliseconds)}` : 'Est. render · learning'}</span>}
         <button type="button" className={`working-seed ${view === 'create' && mode === 'reference' || seed === ref2vaSeed ? 'matching' : 'mismatch'}`} onClick={() => { setSeed(ref2vaSeed); setSeedLocked(true); setNotice({ tone: 'success', text: `Working seed synchronized to Ref2VA seed ${ref2vaSeed}.` }) }} title={view === 'create' && mode === 'reference' ? `Ref2VA working seed ${ref2vaSeed} is authoritative.` : seed === ref2vaSeed ? `Working seed ${seed} matches the Ref2VA seed.` : `Current workspace seed ${seed} differs from Ref2VA seed ${ref2vaSeed}. Click to synchronize.`} aria-label={view === 'create' && mode === 'reference' ? `Ref2VA working seed ${ref2vaSeed}` : seed === ref2vaSeed ? `Working seed ${seed}, matches Ref2VA` : `Working seed ${seed}, click to use Ref2VA seed ${ref2vaSeed}`}><Dices size={13} /><span>Working seed</span><strong>{view === 'create' && mode === 'reference' ? ref2vaSeed : seed}</strong>{view !== 'create' || mode !== 'reference' ? seed !== ref2vaSeed && <small>· Ref2VA {ref2vaSeed}</small> : <small>· source</small>}</button>
         <span className="status-bar-spacer" />
@@ -3164,15 +3400,16 @@ type CreateViewProps = {
   setFirstFrame(value: MediaFile | null): void; setLastFrame(value: MediaFile | null): void
   chooseMedia(kind: MediaKind, setter: (file: MediaFile) => void): Promise<void>
   referenceImages: MediaFile[]; referenceVideos: MediaFile[]; referenceAudios: MediaFile[]
-  characters: CharacterProject[]; wardrobes: WardrobeProject[]; locations: LocationProject[]; accessories: AccessoryProject[]; selectedCharacterIds: string[]; selectedLocationIds: string[]; removeCharacter(characterId: string): void; characterDetailReferencesEnabled: boolean; loadCharacter(characterId: string): void; loadWardrobe(wardrobeId: string): void; loadLocation(locationId: string): void; loadAccessory(accessoryId: string): void
+  characters: CharacterProject[]; wardrobes: WardrobeProject[]; locations: LocationProject[]; accessories: AccessoryProject[]; selectedCharacterIds: string[]; selectedLocationIds: string[]; clearReferences(): void; removeCharacter(characterId: string): void; characterDetailReferencesEnabled: boolean; loadCharacter(characterId: string): void; loadWardrobe(wardrobeId: string): void; loadLocation(locationId: string): void; loadAccessory(accessoryId: string): void
   refreshSourceMedia(): Promise<void>
   removeReference(kind: MediaKind, index: number): void
   chooseReference(kind: MediaKind): Promise<void>
   editVideoReference(index: number): void
   h3Validated: boolean
   modelReady: boolean; selection: ModelSelection; submitting: boolean; stillSubmitting: boolean; connected: boolean
-  ollamaAvailable: boolean; ollamaModel: string; llmProviderLabel: string; promptSuggestion: string
+  ollamaAvailable: boolean; ollamaModel: string; llmProviderLabel: string; llmProvider: AppSettings['llmProvider']; llmUrl: string; inlineSuggestionsEnabled: boolean; setInlineSuggestionsEnabled(value: boolean): void; promptSuggestion: string
   promptingTool: 'enhance' | 'timeline' | 'audio' | null
+  promptAiProgress: { thinking: string; content: string } | null
   dialogueGenerating: boolean
   onPromptTool(tool: 'enhance' | 'timeline' | 'audio'): void
   onGenerateDialogue(draft: CharacterDialogueDraft): Promise<string>
@@ -3214,12 +3451,13 @@ function StudioTopBar({ view, musicEngine, projectName, connected, onOpenProject
   </div>
 }
 
-function ModeBar({ projectName, onOpenProjects, connected, modelReady, onOpenSettings, onOpenCompare, compareOpen, onOpenNavigator }: Pick<VideoShellProps, 'projectName' | 'onOpenProjects' | 'connected' | 'modelReady' | 'onOpenSettings' | 'onOpenCompare' | 'compareOpen' | 'onOpenNavigator'>) {
+function ModeBar({ projectName, onOpenProjects, connected, modelReady, onOpenSettings, onOpenCompare, compareOpen, onOpenNavigator, onReset }: Pick<VideoShellProps, 'projectName' | 'onOpenProjects' | 'connected' | 'modelReady' | 'onOpenSettings' | 'onOpenCompare' | 'compareOpen' | 'onOpenNavigator' | 'onReset'>) {
   return <header className="video-mode-bar">
     <div className="video-mode-identity"><strong>H3 Video</strong><small>Create with MiniMax H3</small></div>
     <button type="button" className="video-workspace-switcher" onClick={onOpenNavigator} aria-haspopup="dialog" title="Browse workspaces"><Menu size={16} /><span>Workspaces</span></button>
     <button type="button" className="video-project-name" onClick={onOpenProjects}>Project: {projectName}<ChevronDown size={13} /></button>
     <span className="video-mode-spacer" />
+    <button type="button" className="video-mode-reset" title="Clear prompt and sources; keep render settings" aria-label="Clear prompt and sources" onClick={() => { if (window.confirm('Clear the H3 prompt and attached sources? Render settings, saved projects, media files, and queue history will stay.')) onReset() }}><RotateCcw size={15} /><span>Clear prompt & sources</span></button>
     <button className="compare-titlebar-button" type="button" onClick={onOpenCompare} aria-haspopup="dialog" aria-expanded={compareOpen} title="Open Video Compare"><Columns3 size={15} /><span>Compare</span></button>
     <button type="button" className={`video-pipeline-state ${connected && modelReady ? 'ready' : ''}`} onClick={onOpenSettings} title="Open connection and model settings"><i />{!connected ? 'Offline · Set up' : !modelReady ? 'Set up models' : 'Engine ready'}</button>
     <button type="button" className="video-mode-settings" title="Application settings" aria-label="Application settings" onClick={onOpenSettings}><Settings size={18} /></button>
@@ -3260,12 +3498,6 @@ function AssetRail({ props, onSelect }: { props: VideoShellProps; onSelect(file:
   </aside>
 }
 
-function PromptPanel({ prompt, setPrompt, onPromptTool, promptingTool, promptSuggestion, onUseSuggestion, onDismissSuggestion }: Pick<VideoShellProps, 'prompt' | 'setPrompt' | 'onPromptTool' | 'promptingTool' | 'promptSuggestion' | 'onUseSuggestion' | 'onDismissSuggestion'>) {
-  const [legendOpen, setLegendOpen] = useState(false)
-  const [expanded, setExpanded] = useState(false)
-  return <section className="video-prompt-panel"><header><strong>Prompt</strong><div><button type="button" className="video-prompt-expand" onClick={() => setExpanded(true)} title="Open large prompt editor"><PanelTopOpen size={14} />Expand</button><button type="button" className="video-syntax-help-button" onClick={() => setLegendOpen(true)} title="Prompt syntax legend" aria-label="Open prompt syntax legend"><HelpCircle size={14} /></button><button type="button" onClick={() => onPromptTool('timeline')} disabled={Boolean(promptingTool)}><Clock3 size={14} />Timeline</button><button type="button" onClick={() => onPromptTool('enhance')} disabled={Boolean(promptingTool)}>{promptingTool === 'enhance' ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />}Improve</button></div></header><H3PromptEditor value={prompt} onChange={setPrompt} placeholder="Describe the scene, or type ## to add structured direction…" /><footer><span>Type <code>##</code> or right-click to insert tags</span><span>{prompt.length} characters</span></footer>{promptSuggestion && <div className="video-prompt-suggestion"><p>{promptSuggestion}</p><button type="button" onClick={onDismissSuggestion}>Dismiss</button><button type="button" onClick={onUseSuggestion}>Use suggestion</button></div>}{expanded && <VideoPromptModal value={prompt} promptingTool={promptingTool} onChange={setPrompt} onPromptTool={onPromptTool} onClose={() => setExpanded(false)} />}{legendOpen && <div className="video-syntax-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setLegendOpen(false) }}><section className="video-syntax-dialog" role="dialog" aria-modal="true" aria-labelledby="video-syntax-title"><header><span><strong id="video-syntax-title">H3 prompt syntax</strong><small>Easy authoring tags are compiled into MiniMax H3’s official fields.</small></span><button type="button" onClick={() => setLegendOpen(false)} aria-label="Close syntax legend"><X size={17} /></button></header><div className="video-syntax-list">{promptMarkupLegend.map(item => <div key={item.tag}><code>{item.tag}</code><span>{item.description}</span><button type="button" onClick={() => { const separator = prompt.trim() ? '\n\n' : ''; setPrompt(`${prompt}${separator}${item.tag}\n`); setLegendOpen(false) }}>Insert</button></div>)}</div><div className="video-syntax-example"><strong>Example</strong><pre>{`##scene\nA model crosses a sunlit gallery as the camera slowly pushes in.\n\n##soundscape\nSoft footsteps and distant city ambience.\n\n##music\nMinimal non-diegetic strings, restrained and elegant.`}</pre></div><footer><span>The compiler emits official H3 fields such as <code>integrated_multimodal_description</code>, <code>overall_soundscape</code>, and <code>non_diegetic_music</code>; authoring tags never reach the model.</span><button type="button" onClick={() => setLegendOpen(false)}>Done</button></footer></section></div>}</section>
-}
-
 function ModeInputStrip({ props, boundScene, selection, onSelect }: { props: VideoShellProps; boundScene: ScenePromptState; selection: SceneInspectorSelection; onSelect(selection: SceneInspectorSelection): void }) {
   if (props.mode === 'text') return null
   if (props.mode === 'reference') return <section className="video-input-strip video-reference-strip"><header><strong>References</strong><span>{boundScene.references.length} selected</span></header><div className="video-reference-items">{boundScene.references.map((ref, index) => <button type="button" key={ref.id} className={`video-reference-item ${selection.kind === 'reference' && selection.id === ref.id ? 'selected' : ''}`} onClick={() => onSelect({ kind: 'reference', id: ref.id })}>{ref.file.preview && ref.file.kind === 'image' ? <img src={ref.file.preview} alt="" /> : <span className="video-reference-icon"><Film size={22} /></span>}<span><strong>{`Picture ${index + 1}`}</strong><small>{ref.file.referenceRole || ref.videoRole || ref.audio?.layer || 'Reference'} · {ref.ownerId ? boundScene.characters.find(item => item.id === ref.ownerId)?.name || 'Character' : 'Scene'}</small></span></button>)}<button type="button" className="video-reference-add" onClick={() => void props.chooseReference('image')}><Plus size={18} /><span>Add reference</span></button></div></section>
@@ -3293,11 +3525,11 @@ function GenerateBar({ props, blocker }: { props: VideoShellProps; blocker: stri
   }, [activeId])
   const elapsed = active ? Math.max(0, now - (active.startedAt ?? active.createdAt)) : 0
   const sampler = samplerProgressSummary(active, now)
-  const remainingMs = sampler?.remainingMs
+  const remainingMs = sampler?.remainingSteps ? sampler.remainingMs : undefined
   const nextStepIn = sampler?.nextStepIn
-  const completionTime = remainingMs !== undefined ? new Date(now + remainingMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : undefined
+  const nodeElapsed = active?.activeNodeStartedAt ? Math.max(0, now - active.activeNodeStartedAt) : undefined
   const announcedStage = active?.status === 'queued' ? 'Waiting in render queue' : active?.progressLabel?.includes('Refinement') ? 'Refinement pass' : active?.progressLabel?.includes('step') ? 'Sampling pass' : active?.progressLabel || 'Rendering locally'
-  return <footer className={`video-generate-bar ${active ? 'is-rendering' : ''}`}><div className="video-generate-context"><span className="video-generate-thumb">{props.firstFrame?.preview && props.mode !== 'reference' ? <img src={props.firstFrame.preview} alt="" /> : <Film size={21} />}</span><span><strong>{videoModeLabels.find(([id]) => id === props.mode)?.[1]}</strong><small>{props.mode === 'reference' ? 'Reference to Video' : props.mode === 'text' ? 'Text to Video' : props.mode === 'image' ? 'Image to Video' : 'First / Last Frame'}</small></span></div><div className="video-status-details"><span className={props.connected ? "ready" : "offline"}><i />{props.connected ? "Connected" : "Offline"}</span><span title="Attention backend">Attention: {props.attentionBackendLabel}</span><span title="GPU routing">{props.gpuRoutingSummary}</span></div>{active ? <div className="video-render-estimate"><span className="video-render-estimate-heading"><i /><span className="sr-only" role="status" aria-live="polite">{announcedStage}</span><strong>{active.status === 'queued' ? `Waiting in render queue${active.queuePosition ? ` · position ${active.queuePosition}` : ''}` : active.progressLabel || 'Rendering locally'}</strong><b>{Math.round(active.progress)}%</b></span><span className="video-render-progress"><i style={{ width: `${Math.max(2, active.progress)}%` }} /></span><span className="video-render-metrics"><small>Elapsed {formatRuntime(elapsed)}</small>{sampler ? <small>Step {sampler.currentStep}/{sampler.totalSteps}</small> : null}{sampler?.rate ? <small>{formatStepDuration(sampler.rate)}</small> : null}{nextStepIn !== undefined && sampler?.remainingSteps ? <small>Next step {formatStepCountdown(nextStepIn)}</small> : null}<small>{remainingMs !== undefined ? `ETA ~${formatRuntime(remainingMs)} · ${completionTime}` : active.status === 'queued' ? 'ETA starts with sampling' : 'Measuring sampler pace…'}</small></span></div> : <div className="video-generate-summary" title={blocker || 'Current output settings'}><span>{props.resolution.replace('x', ' × ')}</span><span>{props.duration}s</span><span>{quality}</span>{blocker && <em>{blocker}</em>}</div>}<span className="video-generate-spacer" />{active && <button type="button" className="video-cancel-button" disabled={props.cancelling} onClick={props.onCancel}><CircleStop size={16} />{props.cancelling ? 'Stopping…' : 'Cancel'}</button>}<button type="button" className="video-generate-button" disabled={props.submitting || Boolean(blocker) || Boolean(active)} title={blocker || (active ? 'Wait for or cancel the active render.' : 'Generate video')} onClick={props.onGenerate}><Play size={18} fill="currentColor" />{props.submitting ? 'Submitting…' : active ? 'Rendering…' : 'Generate'}</button></footer>
+  return <footer className={`video-generate-bar ${active ? 'is-rendering' : ''}`}><div className="video-generate-context"><span className="video-generate-thumb">{props.firstFrame?.preview && props.mode !== 'reference' ? <img src={props.firstFrame.preview} alt="" /> : <Film size={21} />}</span><span><strong>{videoModeLabels.find(([id]) => id === props.mode)?.[1]}</strong><small>{props.mode === 'reference' ? 'Reference to Video' : props.mode === 'text' ? 'Text to Video' : props.mode === 'image' ? 'Image to Video' : 'First / Last Frame'}</small></span></div><button type="button" className={`video-suggestions-toggle ${props.inlineSuggestionsEnabled ? 'on' : ''}`} aria-pressed={props.inlineSuggestionsEnabled} onClick={() => props.setInlineSuggestionsEnabled(!props.inlineSuggestionsEnabled)} title={`${props.llmProviderLabel} inline prompt suggestions · ${props.inlineSuggestionsEnabled ? 'On' : 'Off'}`}><Sparkles size={14} /><span>Suggestions {props.inlineSuggestionsEnabled ? 'On' : 'Off'}</span></button><div className="video-status-details"><span className={props.connected ? "ready" : "offline"}><i />{props.connected ? "Connected" : "Offline"}</span><span title="Attention backend">Attention: {props.attentionBackendLabel}</span><span title="GPU routing">{props.gpuRoutingSummary}</span></div>{active ? <div className="video-render-estimate"><span className="video-render-estimate-heading"><i /><span className="sr-only" role="status" aria-live="polite">{announcedStage}</span><strong>{active.status === 'queued' ? `Waiting in render queue${active.queuePosition ? ` · position ${active.queuePosition}` : ''}` : active.progressLabel || 'Rendering locally'}</strong><b>{Math.round(active.progress)}%</b></span><span className="video-render-progress"><i style={{ width: `${Math.max(2, active.progress)}%` }} /></span><span className="video-render-metrics"><small>Elapsed {formatRuntime(elapsed)}</small>{active.activeNodeId && nodeElapsed !== undefined ? <small title={`Time spent in current ComfyUI node ${active.activeNodeId}`}>Node {active.activeNodeId} · {formatRuntime(nodeElapsed)}</small> : null}{sampler ? <small>Step {sampler.currentStep}/{sampler.totalSteps}</small> : null}{sampler?.rate ? <small>{formatStepDuration(sampler.rate)}</small> : null}{nextStepIn !== undefined && sampler?.remainingSteps ? <small>Next step {formatStepCountdown(nextStepIn)}</small> : null}<small>{remainingMs !== undefined ? `Sampling ~${formatRuntime(remainingMs)} left` : active.status === 'queued' ? 'Timing starts with sampling' : sampler?.remainingSteps === 0 ? 'Sampling complete · finalizing output' : 'Measuring sampling pace…'}</small></span></div> : <div className="video-generate-summary" title={blocker || 'Current output settings'}><span>{props.resolution.replace('x', ' × ')}</span><span>{props.duration}s</span><span>{quality}</span>{blocker && <em>{blocker}</em>}</div>}<span className="video-generate-spacer" />{active && <button type="button" className="video-cancel-button" disabled={props.cancelling} onClick={props.onCancel}><CircleStop size={16} />{props.cancelling ? 'Stopping…' : 'Cancel'}</button>}<button type="button" className="video-generate-button" disabled={props.submitting || Boolean(blocker) || Boolean(active)} title={blocker || (active ? 'Wait for or cancel the active render.' : 'Generate video')} onClick={props.onGenerate}><Play size={18} fill="currentColor" />{props.submitting ? 'Submitting…' : active ? 'Rendering…' : 'Generate'}</button></footer>
 }
 
 function Inspector({ props, boundScene, selection, selectedFile, selectedReference, onClearSelection, onUpdateScene, onUpdateFile, onPreset, onSceneEditor }: {
@@ -3335,11 +3567,11 @@ function Inspector({ props, boundScene, selection, selectedFile, selectedReferen
       <div className={`video-preview-health ${h3PreviewReady && props.liveEnabled && props.livePreviewMode !== 'standard' ? 'ready' : ''}`} role="status"><span className="video-preview-health-dot" /><span>{previewStatus}</span></div>
       <details className="video-inspector-section video-output-section" open><summary><span>Output<small>Size, length, and repeatability</small></span><ChevronDown size={15} /></summary><div className="video-inspector-fields video-output-fields"><label className="video-resolution-label">Resolution<select value={props.resolution} onChange={event => props.setResolution(event.target.value)}>{!MINIMAX_VIDEO_RESOLUTIONS.includes(props.resolution) && <option value={props.resolution}>{videoResolutionLabel(props.resolution)}</option>}{(['square', 'landscape', 'portrait', 'ultrawide'] as const).map(orientation => <optgroup key={orientation} label={orientation[0].toUpperCase() + orientation.slice(1)}>{MINIMAX_VIDEO_RESOLUTION_GROUPS[orientation].map(size => <option value={size} key={size}>{videoResolutionLabel(size)}</option>)}</optgroup>)}</select></label><label>Duration<select value={props.duration} onChange={event => props.setDuration(Number(event.target.value))}>{Array.from({ length: 27 }, (_, i) => i * .5 + 2).map(value => <option key={value} value={value}>{value} seconds</option>)}</select></label><label className="video-seed-label">Seed<div className="video-seed-field"><input type="number" value={props.seed} min={0} max={999999999999} disabled={props.submitting || props.stillSubmitting} onChange={event => props.setSeed(Math.max(0, Math.floor(Number(event.target.value) || 0)))} aria-label="Seed" /><button type="button" onClick={() => { props.setSeedLocked(true); props.setSeed(randomH3Seed(props.seed)) }} title="Randomize seed" aria-label="Randomize seed"><Dices size={15} /></button></div></label><label className="video-checkbox video-seed-lock"><input type="checkbox" checked={props.seedLocked} onChange={event => props.setSeedLocked(event.target.checked)} />Keep this seed for repeatable results</label></div></details>
       <details className="video-inspector-section video-quality-section" open><summary><span>Quality & sampling<small>{props.steps} steps · {fixedSteps ? 'Fixed recipe' : qualityValue === 'custom' ? 'Custom' : 'Preset managed'}</small></span><ChevronDown size={15} /></summary><div className="video-inspector-fields"><label>Quality preset<select value={qualityValue} onChange={event => onPreset(event.target.value as 'off' | '8' | '4' | 'fast' | 'custom')}><option value="off">Quality · native</option><option value="8">Turbo 8 · balanced</option><option value="4">Turbo 4 · experimental</option>{props.mode === 'text' && <option value="fast">Fast · T2V only</option>}<option value="custom">Custom…</option></select></label><div className="video-step-control"><span><strong>Sampling steps</strong><small>{fixedSteps ? `${props.turbo === '4' ? 'Turbo 4' : 'Fast'} uses a fixed ${props.turbo === '4' ? 4 : 8}-step recipe. Select Custom to adjust steps.` : qualityValue === 'custom' ? 'Custom value controls render time and refinement.' : 'Changing this switches to Custom sampling.'}</small></span><div><button type="button" aria-label="Decrease sampling steps" disabled={fixedSteps || props.steps <= minSteps} onClick={() => setSteps(props.steps - 1)}>−</button><input type="number" aria-label="Sampling steps" min={minSteps} max={maxSteps} disabled={fixedSteps} value={fixedSteps ? props.turbo === '4' ? 4 : 8 : stepsDraft} onChange={event => setStepsDraft(event.target.value)} onBlur={commitStepsDraft} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} /><button type="button" aria-label="Increase sampling steps" disabled={fixedSteps || props.steps >= maxSteps} onClick={() => setSteps(props.steps + 1)}>+</button></div><input className="video-step-slider" type="range" aria-label="Sampling steps slider" min={minSteps} max={maxSteps} disabled={fixedSteps} value={fixedSteps ? props.turbo === '4' ? 4 : 8 : props.steps} onChange={event => setSteps(Number(event.target.value))} /></div><div className={`video-quality-note ${qualityValue === 'custom' ? 'custom' : ''}`}><strong>{fixedSteps ? 'Fixed-step recipe' : qualityValue === 'custom' ? 'Custom sampling active' : qualityValue === 'off' ? 'Maximum detail' : 'Accelerated recipe'}</strong><span>{fixedSteps ? 'Choose Custom for adjustable Turbo 8 sampling, or Native for full-quality sampling.' : qualityValue === 'custom' ? `${minSteps}–${maxSteps} steps supported for the selected base recipe.` : qualityValue === 'off' ? 'Native quality favors detail and consistency over speed.' : 'Official Turbo settings favor faster iteration.'}</span></div></div></details>
+      <details className="video-inspector-section video-preview-section" open><summary><span>Live preview<small>{props.liveEnabled ? 'Intermediate frames while rendering' : 'Off · progress remains visible'}</small></span><ChevronDown size={15} /></summary><div className="video-inspector-fields"><label className="video-checkbox"><input type="checkbox" checked={props.liveEnabled} onChange={event => props.setLiveEnabled(event.target.checked)} />Show live previews while generating</label><small className="field-help">Off skips preview nodes for new renders. Progress and saved output stay available.</small>{props.liveEnabled && <label>Preview source<select value={props.livePreviewMode} onChange={event => props.setLivePreviewMode(event.target.value as typeof props.livePreviewMode)}><option value="auto">Automatic · H3 motion when ready</option><option value="standard">Standard first frame</option><option value="h3-override">Require H3 animated preview</option></select></label>}</div></details>
       <details className="video-inspector-section video-advanced-section" open={advancedOpen} onToggle={event => { setAdvancedOpen(event.currentTarget.open); props.setAdvanced(event.currentTarget.open) }}><summary>Advanced<ChevronDown size={15} /></summary><div className="video-inspector-fields">
         <button type="button" className="video-inline-action" onClick={onSceneEditor}><SlidersHorizontal size={15} />Edit scene structure and continuity</button>
         {props.mode === 'reference' && <><button type="button" className="video-inline-action" onClick={() => setDialogueOpen(true)}><MessageSquareText size={15} />Character dialogue</button><button type="button" className="video-inline-action" disabled={props.stillSubmitting} onClick={props.onGenerateStill}><ImagePlus size={15} />Generate reference still</button><label>Reference fidelity<select value={props.refImageSize} onChange={event => props.setRefImageSize(event.target.value as 'match' | 'max')}><option value="match">Balanced</option><option value="max">Maximum identity</option></select></label><label>Clothing behavior<select value={props.clothingPolicy} onChange={event => props.setClothingPolicy(event.target.value as typeof props.clothingPolicy)}><option value="wardrobe">Assigned wardrobe</option><option value="underwear">Underwear</option><option value="unrestricted">Unrestricted</option></select></label></>}
         <label className="video-checkbox"><input type="checkbox" checked={props.noDialogue} onChange={event => props.setNoDialogue(event.target.checked)} />No dialogue</label><label className="video-checkbox"><input type="checkbox" checked={props.naturalMovement} onChange={event => props.setNaturalMovement(event.target.checked)} />Natural movement</label>
-        <label className="video-checkbox"><input type="checkbox" checked={props.liveEnabled} onChange={event => props.setLiveEnabled(event.target.checked)} />Live preview</label>{props.liveEnabled && <label>Preview source<select value={props.livePreviewMode} onChange={event => props.setLivePreviewMode(event.target.value as typeof props.livePreviewMode)}><option value="auto">Automatic · H3 motion when ready</option><option value="standard">Standard first frame</option><option value="h3-override">Require H3 animated preview</option></select></label>}
         <label>Refinement and upscale<select value={props.upscaleMode} onChange={event => props.setUpscaleMode(event.target.value as UpscaleMode)}><option value="off">Off</option><option value="refine">Refine · same resolution</option><option value="h3" disabled={!props.h3LearnedUpscaleAvailable}>Refine + Upscale · H3 2×</option><option value="ltx" disabled={!props.ltxAvailable}>LTX 2.5 · 2×</option><option value="rtx" disabled={!props.rtxModels.length}>RTX frames · 2×</option></select></label>{props.upscaleMode === 'rtx' && <label>RTX model<select value={props.rtxModel} onChange={event => props.setRtxModel(event.target.value)}>{props.rtxModels.map(name => <option key={name}>{name}</option>)}</select></label>}{props.upscaleMode === 'refine' && <><label>Refinement steps<input type="number" min={1} max={30} value={props.h3RefineSteps} onChange={event => props.setH3RefineSteps(Math.max(1, Math.min(30, Math.round(Number(event.target.value)) || 1)))} /></label><label>Refinement strength<input type="number" min={0.01} max={1} step={0.05} value={props.h3RefineDenoise} onChange={event => props.setH3RefineDenoise(Math.max(0.01, Math.min(1, Number(event.target.value) || 0.01)))} /></label></>}{props.upscaleMode === 'h3' && <><label>Refinement steps<input type="number" min={1} max={30} value={props.h3ProRefineSteps} onChange={event => props.setH3ProRefineSteps(Number(event.target.value))} /></label><label className="video-checkbox"><input type="checkbox" checked={props.h3ProReview} onChange={event => props.setH3ProReview(event.target.checked)} />Review first pass</label></>}
         <div className="video-advanced-divider">Custom sampling</div><label className="video-checkbox"><input type="checkbox" checked={qualityValue === 'custom'} onChange={event => onPreset(event.target.checked ? 'custom' : props.turbo)} />Enable Custom values</label>
         {qualityValue === 'custom' && <><label>Base recipe<select value={props.turbo} onChange={event => props.setTurbo(event.target.value as typeof props.turbo)}><option value="off">Native</option><option value="8">Turbo 8</option><option value="4">Turbo 4</option>{props.mode === 'text' && <option value="fast">Fast T2V</option>}</select></label>{props.turbo === '8' && <label>Turbo profile<select value={props.turbo8Profile} onChange={event => props.setTurbo8Profile(event.target.value as Turbo8Profile)}><option value="stable">Stable</option><option value="balanced">Balanced</option><option value="motion">Motion</option><option value="euler-beta">Euler + Beta</option></select></label>}<label>Sampler<select value={props.sampler} onChange={event => { props.setSampler(event.target.value); props.setExperimentalSampling(true) }}>{[...new Set([props.sampler, 'res_multistep', 'euler', ...choices(props.info, 'KSamplerSelect', 'sampler_name')])].map(value => <option key={value}>{value}</option>)}</select></label><label>Scheduler<select value={props.scheduler} onChange={event => { props.setScheduler(event.target.value); props.setExperimentalSampling(true) }}>{[...new Set([props.scheduler, 'simple', 'beta', ...choices(props.info, 'BasicScheduler', 'scheduler')])].map(value => <option key={value}>{value}</option>)}</select></label><label>Text encoder<select value={props.textEncoderPreference} onChange={event => props.setTextEncoderPreference(event.target.value as typeof props.textEncoderPreference)}><option value="fast">Fast</option><option value="quality">Quality</option></select></label><label>Official Turbo LoRA strength<input type="number" min={0} max={2} step={.05} value={props.loraStrength} onChange={event => props.setLoraStrength(Number(event.target.value))} /></label><label>Sigma shifts<select value={props.sigmaShiftMode} onChange={event => props.setSigmaShiftMode(event.target.value as typeof props.sigmaShiftMode)}><option value="model">Model defaults</option><option value="custom">Custom</option></select></label>{props.sigmaShiftMode === 'custom' && <><label>Video shift<input type="number" min={.01} max={100} step={.01} value={props.shiftVideo} onChange={event => props.setShiftVideo(Number(event.target.value))} /></label><label>Audio shift<input type="number" min={.01} max={100} step={.01} value={props.shiftAudio} onChange={event => props.setShiftAudio(Number(event.target.value))} /></label></>}{props.userLoras.map((slot, index) => <div className="video-lora-row" key={index}><label>LoRA {index + 1}<select value={slot.name} onChange={event => props.setUserLoras(props.userLoras.map((item, i) => i === index ? { ...item, name: event.target.value } : item))}><option value="">None</option>{props.userLoraChoices.map(name => <option key={name}>{name}</option>)}</select></label><input aria-label={`LoRA ${index + 1} strength`} type="number" min={0} max={2} step={.05} disabled={!slot.name} value={slot.strength} onChange={event => props.setUserLoras(props.userLoras.map((item, i) => i === index ? { ...item, strength: Number(event.target.value) } : item))} /></div>)}</>}
@@ -3389,7 +3621,7 @@ function VideoWorkspaceShell(props: VideoShellProps) {
   useEffect(() => () => popoutRef.current?.close(), [])
   const assetRail = <AssetRail props={props} onSelect={file => { setRailAsset(file); const ref = boundScene.references.find(item => item.file.path === file.path); setSelection(ref ? { kind: 'reference', id: ref.id } : { kind: 'scene' }); setActiveSection('settings') }} />
   return <div className="video-workspace-shell">
-    <ModeBar projectName={props.projectName} onOpenProjects={props.onOpenProjects} connected={props.connected} modelReady={props.modelReady} onOpenSettings={props.onOpenSettings} onOpenCompare={props.onOpenCompare} compareOpen={props.compareOpen} onOpenNavigator={props.onOpenNavigator} />
+    <ModeBar projectName={props.projectName} onOpenProjects={props.onOpenProjects} connected={props.connected} modelReady={props.modelReady} onOpenSettings={props.onOpenSettings} onOpenCompare={props.onOpenCompare} compareOpen={props.compareOpen} onOpenNavigator={props.onOpenNavigator} onReset={props.onReset} />
     <div className="video-workspace-main">
       <div className="video-workbench">
         <WorkspaceSectionTabs<H3Section> tabs={h3Sections} active={activeSection} onChange={setActiveSection} label="H3 workflow sections" />
@@ -3398,12 +3630,12 @@ function VideoWorkspaceShell(props: VideoShellProps) {
             <div className="video-workflow-intro"><h2>Choose your source</h2><p>Pick a video mode and add the media that will guide this shot.</p></div>
             <nav className="video-source-modes" aria-label="Video input mode">{videoModeLabels.map(([id, label]) => <button key={id} type="button" aria-pressed={props.mode === id} title={modeInfo.find(item => item.id === id)?.note} className={props.mode === id ? 'active' : ''} onClick={() => { setSelection({ kind: 'scene' }); setRailAsset(null); if (id !== 'text' && props.turbo === 'fast') choosePreset('off'); props.setMode(id) }}>{label}</button>)}</nav>
             <ModeInputStrip props={props} boundScene={boundScene} selection={selection} onSelect={value => { setRailAsset(null); setSelection(value); setActiveSection('settings') }} />
-            {props.mode === 'reference' && <ReferenceSourcePanel characters={props.characters} locations={props.locations} selectedCharacterIds={props.selectedCharacterIds} selectedLocationIds={props.selectedLocationIds} imageCount={boundScene.references.filter(ref => ref.file.kind === 'image').length} videoCount={props.referenceVideos.length} audioCount={props.referenceAudios.length} onAddCharacter={props.loadCharacter} onAddLocation={props.loadLocation} onChoose={kind => void props.chooseReference(kind)} onOpenCharacters={() => props.onNavigate('characters')} onOpenLocations={() => props.onNavigate('locations')} />}
+            {props.mode === 'reference' && <ReferenceSourcePanel characters={props.characters} locations={props.locations} selectedCharacterIds={props.selectedCharacterIds} selectedLocationIds={props.selectedLocationIds} imageCount={boundScene.references.filter(ref => ref.file.kind === 'image').length} videoCount={props.referenceVideos.length} audioCount={props.referenceAudios.length} images={props.referenceImages} videos={props.referenceVideos} audios={props.referenceAudios} managedImagePaths={new Set(bindings.map(binding => binding.file.path))} onAddCharacter={props.loadCharacter} onAddLocation={props.loadLocation} onClear={() => { setSelection({ kind: 'scene' }); setRailAsset(null); props.clearReferences() }} onChoose={kind => void props.chooseReference(kind)} onRemove={(kind, index) => { setSelection({ kind: 'scene' }); setRailAsset(null); props.removeReference(kind, index) }} onEditVideo={props.editVideoReference} onOpenCharacters={() => props.onNavigate('characters')} onOpenLocations={() => props.onNavigate('locations')} />}
             {props.mode === 'reference' ? <details className="video-more-assets"><summary>Browse all project assets</summary>{assetRail}</details> : assetRail}
           </section>
           <section className="video-workspace-tab-panel" aria-label="Create" hidden={activeSection !== 'prompt'}>
             <div className="video-workflow-intro"><h2>Describe the shot</h2><p>Write the action, camera direction, and sound you want H3 to create.</p></div>
-            <PromptPanel prompt={props.prompt} setPrompt={props.setPrompt} onPromptTool={props.onPromptTool} promptingTool={props.promptingTool} promptSuggestion={props.promptSuggestion} onUseSuggestion={props.onUseSuggestion} onDismissSuggestion={props.onDismissSuggestion} />
+            <CreatePromptPanel prompt={props.prompt} setPrompt={props.setPrompt} onPromptTool={props.onPromptTool} promptingTool={props.promptingTool} promptAiProgress={props.promptAiProgress} promptSuggestion={props.promptSuggestion} onUseSuggestion={props.onUseSuggestion} onDismissSuggestion={props.onDismissSuggestion} provider={props.llmProvider} providerLabel={props.llmProviderLabel} model={props.ollamaModel} url={props.llmUrl} suggestionsEnabled={props.inlineSuggestionsEnabled} modelAvailable={props.ollamaAvailable} />
             <details className="video-continuation-opt-in"><summary>Continue an existing video</summary><p>Plan additional beats with motion context, frame continuity, and combined exports.</p><button className="secondary-button" onClick={props.onOpenContinuation}>Open Continue workspace</button></details>
           </section>
           <section className="video-workspace-tab-panel" aria-label="Settings" hidden={activeSection !== 'settings'}>

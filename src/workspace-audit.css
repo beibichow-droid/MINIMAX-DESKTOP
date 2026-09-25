@@ -67,6 +67,7 @@
 .character-workspace-v2 .character-primary-preview > button strong { color: var(--text); font-size: 13px; }
 .character-workspace-v2 .character-primary-preview > button span { font-size: 11px; }
 .character-workspace-v2 .character-primary-preview figcaption { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); }
+.character-workspace-v2 .character-primary-actions { display: flex; align-items: center; gap: 4px; }
 .character-workspace-v2 .character-reference-mosaic { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: start; gap: 8px; min-width: 0; }
 .character-workspace-v2 .character-reference-mosaic button { position: relative; display: grid; min-height: 85px; place-items: center; overflow: hidden; border: 1px dashed var(--line-strong); border-radius: 6px; background: var(--surface-2); color: var(--muted); cursor: pointer; }
 .character-workspace-v2 .character-reference-mosaic button:hover,
@@ -125,6 +126,28 @@
 .character-workspace-v2 .character-selected-reference { display: grid; gap: 13px; min-width: 0; }
 .character-workspace-v2 .character-selected-reference > img { display: block; width: 100%; max-height: 150px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); object-fit: contain; }
 .character-workspace-v2 .character-selected-reference > strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.character-workspace-v2 .character-reference-list { display: grid; gap: 8px; min-width: 0; }
+.character-workspace-v2 .character-reference-list > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.character-workspace-v2 .character-reference-list > header span { display: grid; min-width: 0; gap: 2px; }
+.character-workspace-v2 .character-reference-list > header strong { font-size: 11px; }
+.character-workspace-v2 .character-reference-list > header small { color: var(--muted); font-size: 10px; }
+.character-workspace-v2 .character-reference-list > header button { display: flex; align-items: center; flex: none; gap: 4px; padding: 5px 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-2); color: var(--text); font-size: 10px; cursor: pointer; }
+.character-workspace-v2 .character-reference-list > header button:hover { border-color: var(--accent); }
+.character-workspace-v2 .character-reference-list-items { display: grid; gap: 5px; max-height: 265px; overflow-y: auto; }
+.character-workspace-v2 .character-reference-list-items article { display: grid; grid-template-columns: minmax(0, 1fr) 30px; min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); }
+.character-workspace-v2 .character-reference-list-items article.selected { border-color: var(--accent); background: var(--accent-soft); }
+.character-workspace-v2 .character-reference-list-select { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.character-workspace-v2 .character-reference-list-select img { width: 34px; height: 38px; flex: none; border-radius: 3px; object-fit: cover; }
+.character-workspace-v2 .character-reference-list-select span { display: grid; min-width: 0; gap: 2px; }
+.character-workspace-v2 .character-reference-list-select strong,
+.character-workspace-v2 .character-reference-list-select small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.character-workspace-v2 .character-reference-list-select strong { font-size: 11px; }
+.character-workspace-v2 .character-reference-list-select small { color: var(--muted); font-size: 10px; }
+.character-workspace-v2 .character-reference-list-remove { align-self: center; justify-self: center; display: grid; width: 26px; height: 26px; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.character-workspace-v2 .character-reference-list-remove:hover { background: var(--surface-3); color: var(--text); }
+.character-workspace-v2 .character-reference-list > p { display: flex; align-items: center; gap: 8px; margin: 0; padding: 10px; border: 1px dashed var(--line-strong); border-radius: 6px; color: var(--muted); font-size: 11px; }
+.character-workspace-v2 .character-reference-include { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 11px; }
+.character-workspace-v2 .character-reference-include input { accent-color: var(--accent); }
 .character-workspace-v2 .character-reference-order { display: flex; flex-wrap: wrap; gap: 7px; }
 .character-workspace-v2 .character-inspector-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .character-workspace-v2 .character-inspector-advanced { min-width: 0; border: 1px solid var(--line); border-radius: 5px; }

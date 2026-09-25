@@ -8,6 +8,8 @@ export const workspaceDestinations: WorkspaceDestination[] = [
   { view: 'create', label: 'Video · MiniMax H3', description: 'Generate video from text, images, or references. T2V, I2V, Ref2VA.', group: 'Create' },
   { view: 'continue', label: 'Continue video', description: 'Extend an existing video with the next scene or beat.', group: 'Create' },
   { view: 'ltx25', label: 'Video · LTX 2.5', description: 'Generate video with the LTX engine.', group: 'Create' },
+  { view: 'ltxripple', label: 'LTX Ripple', description: 'First Frame All Frames: propagate a first-frame edit through source video.', group: 'Create' },
+  { view: 'photoedit', label: 'Photo Edit · FireRed', description: 'Edit a photo with a written instruction and send it to Ripple.', group: 'Create' },
   { view: 'zimage', label: 'Create image', description: 'Generate still images with Z-Image.', group: 'Create' },
   { view: 'music', engine: 'acestep', label: 'Music · ACE-Step', description: 'Compose music and vocals from lyrics and style.', group: 'Create' },
   { view: 'music', engine: 'music3', label: 'Music · Music 3', description: 'Generate songs with MiniMax Music 3.', group: 'Create' },
@@ -40,14 +42,14 @@ export function findWorkspaces(query: string): WorkspaceDestination[] {
     .sort((a, b) => rank(a) - rank(b))
 }
 
-export type WorkspaceProjectScope = 'create' | 'ltx25' | 'zimage' | 'music' | 'music3'
+export type WorkspaceProjectScope = 'create' | 'ltx25' | 'ltxripple' | 'zimage' | 'music' | 'music3'
 export function workspaceProjectScope(view: View, engine: MusicEngine = 'acestep'): WorkspaceProjectScope | null {
   if (view === 'music') return engine === 'music3' ? 'music3' : 'music'
-  return view === 'create' || view === 'ltx25' || view === 'zimage' ? view : null
+  return view === 'create' || view === 'ltx25' || view === 'ltxripple' || view === 'zimage' ? view : null
 }
 export function workspaceProjectLabel(scope: WorkspaceProjectScope): string {
   return scope === 'music3' ? 'Music · Music 3' : workspaceLabel(scope, 'acestep')
 }
 export function workspaceStorageKey(scope: Exclude<WorkspaceProjectScope, 'create'>): string {
-  return { ltx25: 'ltx25.workspace', zimage: 'minimax.zimage-workspace', music: 'acestep.workspace', music3: 'minimax.music3-workspace' }[scope]
+  return { ltx25: 'ltx25.workspace', ltxripple: 'ltx-ripple.workspace.v1', zimage: 'minimax.zimage-workspace', music: 'acestep.workspace', music3: 'minimax.music3-workspace' }[scope]
 }

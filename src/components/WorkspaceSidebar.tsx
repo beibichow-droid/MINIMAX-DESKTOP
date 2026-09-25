@@ -1,4 +1,4 @@
-import { Aperture, Clapperboard, FileText, Film, HardDrive, Image as ImageIcon, Library, ListVideo, MapPin, Menu, Music2, PanelLeftClose, Scan, Scissors, Settings, Shirt, SkipForward, Users, WandSparkles, Watch, type LucideIcon } from 'lucide-react'
+import { Aperture, Clapperboard, FileText, Film, HardDrive, Image as ImageIcon, ImagePlus, Library, ListVideo, MapPin, Menu, Music2, PanelLeftClose, Scan, Scissors, Settings, Shirt, SkipForward, Users, WandSparkles, Watch, type LucideIcon } from 'lucide-react'
 import type { View } from '../types'
 
 type MusicEngine = 'acestep' | 'music3'
@@ -30,6 +30,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       { view: 'zimage', label: 'Image', icon: ImageIcon },
       { view: 'referenceprep', label: 'Reference Prep', icon: Scan },
       { view: 'ltx25', label: 'LTX 2.5', icon: Aperture },
+      { view: 'ltxripple', label: 'LTX Ripple', icon: Aperture },
+      { view: 'photoedit', label: 'Photo Edit', icon: ImagePlus },
       { view: 'music', engine: 'acestep', label: 'ACE-Step', icon: Music2 },
       { view: 'music', engine: 'music3', label: 'Music 3', icon: Music2 },
     ] },

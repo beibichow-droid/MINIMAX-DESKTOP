@@ -20,7 +20,7 @@ export function LibraryView({ jobs, settings, onEdit, onCreate, onUseLtx, onUseL
   const [openingCameraAngle, setOpeningCameraAngle] = useState('side camera angle')
   const available = jobs.filter((job) => job.mediaType !== 'audio' && Boolean(job.outputUrl))
   const filtered = available.filter((job) => (provider === 'all' || (job.provider ?? 'minimax') === provider) && (mediaType === 'all' || (mediaType === 'image' ? job.mediaType === 'image' : job.mediaType !== 'image')) && (!query.trim() || job.prompt.toLowerCase().includes(query.trim().toLowerCase()))).sort((a, b) => sort === 'newest' ? b.createdAt - a.createdAt : a.createdAt - b.createdAt)
-  const videos: BookmarkVideo[] = available.filter(job => job.mediaType !== 'image').map((job) => ({ id: `job-${job.id}`, name: shortPrompt(job.prompt), source: job.outputUrl!, duration: job.duration, provider: job.provider === 'ltx25' ? 'ltx25' : 'minimax' }))
+  const videos: BookmarkVideo[] = available.filter(job => job.mediaType !== 'image').map((job) => ({ id: `job-${job.id}`, name: shortPrompt(job.prompt), source: job.outputUrl!, duration: job.duration, provider: job.provider === 'ltxripple' ? 'ltxripple' : job.provider === 'ltx25' ? 'ltx25' : 'minimax' }))
   useEffect(() => {
     if (!lightbox) return
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setLightbox(null) }
@@ -59,7 +59,7 @@ export function LibraryView({ jobs, settings, onEdit, onCreate, onUseLtx, onUseL
           {!image && <span className="library-media-duration">{job.duration}s</span>}
         </button>
         <div className="library-card-body">
-          <div className="library-card-meta"><span className={`library-provider ${job.provider === 'ltx25' ? 'ltx' : ''}`}>{image ? 'Ref2VA still' : job.provider === 'ltx25' ? 'LTX 2.5' : 'MiniMax H3'}</span><time dateTime={new Date(job.createdAt).toISOString()}>{new Date(job.createdAt).toLocaleDateString()}</time></div>
+          <div className="library-card-meta"><span className={`library-provider ${job.provider === 'ltx25' || job.provider === 'ltxripple' ? 'ltx' : ''}`}>{image ? 'Ref2VA still' : job.provider === 'ltxripple' ? 'LTX Ripple' : job.provider === 'ltx25' ? 'LTX 2.5' : 'MiniMax H3'}</span><time dateTime={new Date(job.createdAt).toISOString()}>{new Date(job.createdAt).toLocaleDateString()}</time></div>
           <strong title={job.prompt}>{title}</strong>
           <small>{job.width} × {job.height} · {image ? 'one image' : `${job.duration}s · ${job.mode}`}</small>
           <div className="library-card-actions">
