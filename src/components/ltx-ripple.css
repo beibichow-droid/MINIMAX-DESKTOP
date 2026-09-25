@@ -7,3 +7,13 @@
 .ripple-edit-frame{width:100%;display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:8px 6px;border:1px solid #6d5e63;border-radius:8px;background:#372c35;color:#f2d0c2;font-size:11px;font-weight:700;cursor:pointer}.ripple-edit-frame:hover{background:#4b3441}.ripple-edit-frame:focus-visible{outline:2px solid #f0b88e;outline-offset:2px}
 .ripple-preview-controls{display:grid;gap:8px;margin:14px 0;color:#e1dfea;font-size:12px}.ripple-preview-controls label{display:flex;align-items:center;gap:8px;font-weight:700}.ripple-preview-controls input{accent-color:#a38df6}.ripple-preview-controls select{width:100%;background:#12141f;border:1px solid #484a5d;border-radius:9px;color:#f4f4f8;padding:9px;font:inherit}.ripple-preview-controls small{color:#aaaebe;line-height:1.4}.ripple-live-preview{margin:0 0 14px;background:#10121b;border:1px solid #514d66;border-radius:10px;overflow:hidden}.ripple-live-preview img{display:block;width:100%;max-height:300px;object-fit:contain}.ripple-live-preview figcaption{padding:8px 11px;color:#ddd4fa;font-size:12px}.ripple-preview-controls :focus-visible,.ripple-frame-button:focus-visible,.ripple-generate:focus-visible{outline:2px solid #bcaafa;outline-offset:2px}@media(prefers-reduced-motion:reduce){.ripple-spin{animation:none}}
 .ripple-long-toggle{display:flex;align-items:center;gap:9px;margin:12px 0;color:#e5e1f1;font-size:12px;font-weight:700}.ripple-long-toggle input{accent-color:#aa94f5}.ripple-long-settings{border:1px solid #4d4965;border-radius:11px;background:#161824;padding:12px;margin:10px 0}.ripple-long-settings>small{display:block;color:#b6b6c5;font-size:11px;line-height:1.45}.ripple-long-settings .ripple-warning{margin-top:11px}
+.ripple-live-preview video{display:block;width:100%;max-height:300px;object-fit:contain}
+.ripple-reset:disabled{opacity:.5;cursor:not-allowed}
+.ripple-file-row button,.ripple-reset{flex-shrink:0}
+.ripple-file-row span{min-width:0}
+@media(max-width:520px){
+  .ripple-frame-compare{grid-template-columns:minmax(0,1fr);gap:12px}
+  .ripple-frame-compare>svg{justify-self:center;transform:rotate(90deg)}
+  .ripple-frame{aspect-ratio:16/9}
+  .ripple-facts span{flex-wrap:wrap}
+}
